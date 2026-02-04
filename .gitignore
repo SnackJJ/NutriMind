@@ -1,0 +1,45 @@
+# Environment and secrets
+.env
+*.env.local
+
+# Data files (too large)
+data/
+logs/
+knowledge_db/
+
+# Lock files
+uv.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+
+# Testing cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Temp/debug files
+debug_*.py
+parse_check.py
+test_minimal.jsonl
+
+# Root-level temp test files
+/test_*.py
+
+# OS
+.DS_Store
+Thumbs.db

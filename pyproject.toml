@@ -1,0 +1,29 @@
+[project]
+name = "nutrimind"
+version = "0.1.0"
+description = "NutriMind Agent"
+authors = [{ name = "NutriAgent Team" }]
+dependencies = [
+    "vllm",
+    "transformers",
+    "torch",
+    "trl",
+    "peft",
+    "datasets",
+    "chromadb",
+    "sentence-transformers",
+    "openai",
+    "httpx",
+    "pydantic",
+    "loguru",
+    "pyyaml",
+    "python-dotenv",
+    "rank-bm25",
+    "docling",
+    "dashscope",
+    "beautifulsoup4",
+    "lxml",
+    "nltk",
+    "tenacity",
+]
+requires-python = ">=3.10"
