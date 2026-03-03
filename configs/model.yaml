@@ -1,0 +1,6 @@
+backend: "mock"
+server_url: "http://localhost:8000/v1"
+model_name: "Qwen/Qwen2.5-3B-Instruct"
+timeout_ms: 30000
+max_tokens: 1024
+temperature: 0.1

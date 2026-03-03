@@ -1,0 +1,26 @@
+database_path: "data/usda.db"
+rag:
+  # Embedding
+  embedding_model: "BAAI/bge-small-en-v1.5"
+  embedding_dim: 384
+  # Reranker
+  reranker_model: "BAAI/bge-reranker-base"
+  # Chunking
+  chunk_max_tokens: 450
+  chunk_overlap_tokens: 48
+  chunk_min_tokens: 30
+  context_max_tokens: 50
+  # Index paths
+  chroma_db_path: "data/knowledge_db"
+  chroma_distance_metric: "cosine"
+  bm25_index_path: "data/knowledge_bm25/index.pkl"
+  # Retrieval parameters
+  semantic_top_k: 20
+  bm25_top_k: 20
+  rerank_top_k: 10
+  final_top_k: 3
+  relevance_threshold: 0.3
+  rrf_k: 60
+  # Contextualization
+  context_model: "gemini-2.5-flash"
+  context_cache_path: "data/knowledge/context_cache.json"
