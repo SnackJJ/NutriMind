@@ -84,23 +84,27 @@ def get_history(days: int = 7, metric: str = "all") -> dict:
             "carbs_g":       round(sum(d["carbs_g"]       for d in daily_breakdown) / n, 1),
         }
 
-        # Filter breakdown columns when specific metric requested
-        if metric != "all":
-            col = METRIC_COLUMNS[metric]
-            key = list(METRIC_COLUMNS.keys())[list(METRIC_COLUMNS.values()).index(col)]
-            display_key = f"{key}_kcal" if key == "calories" else f"{key}_g"
-            daily_breakdown = [{"date": d["date"], display_key: d[display_key if display_key in d else f"{key}_g"]} for d in daily_breakdown]
-
-        # Simple trend: compare first half vs second half average calories
+        # Simple trend: compare first half vs second half of the requested metric
         trend = "stable"
         if n >= 4:
+            # Determine which key to compute trend on
+            if metric == "all":
+                trend_key = "calories_kcal"
+            else:
+                trend_key = f"{metric}_kcal" if metric == "calories" else f"{metric}_g"
+
             mid = n // 2
-            first_half_avg = sum(d["calories_kcal"] for d in daily_breakdown[:mid] if "calories_kcal" in d) / mid if "calories_kcal" in daily_breakdown[0] else 0
-            second_half_avg = sum(d["calories_kcal"] for d in daily_breakdown[mid:] if "calories_kcal" in d) / (n - mid) if "calories_kcal" in daily_breakdown[0] else 0
+            first_half_avg = sum(d[trend_key] for d in daily_breakdown[:mid]) / mid
+            second_half_avg = sum(d[trend_key] for d in daily_breakdown[mid:]) / (n - mid)
             if second_half_avg > first_half_avg * 1.05:
                 trend = "increasing"
             elif second_half_avg < first_half_avg * 0.95:
                 trend = "decreasing"
+
+        # Filter breakdown columns when specific metric requested (after trend calculation)
+        if metric != "all":
+            display_key = f"{metric}_kcal" if metric == "calories" else f"{metric}_g"
+            daily_breakdown = [{"date": d["date"], display_key: d[display_key]} for d in daily_breakdown]
 
         logger.info(f"get_history: {days} days, {n} data points, metric={metric}")
 

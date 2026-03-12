@@ -15,7 +15,7 @@ def get_db_path():
 def get_connection():
     db_path = get_db_path()
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.row_factory = sqlite3.Row
         return conn
     except Exception as e:

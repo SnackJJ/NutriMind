@@ -25,14 +25,14 @@ class GeneratedQuery(BaseModel):
 class QueryBatch(BaseModel):
     queries: list[GeneratedQuery]
 
-# --- Target Quantities (approx 5800 total) ---
+# --- Target Quantities (approx 5000 total: ~2500 SFT + ~2500 GRPO) ---
 TARGETS = {
-    "T0": 250,       
-    "T1": 1200,      
-    "T2": 1500,      
-    "T3": 1750,      
-    "T4": 800,       
-    "Error": 280     
+    "T0": 200,
+    "T1": 1050,
+    "T2": 1300,
+    "T3": 1500,
+    "T4": 700,
+    "Error": 250,
 }
 BATCH_SIZE = 50 
 
@@ -227,7 +227,7 @@ async def call_gemini_and_save(prompt_text: str, batch_id: str, output_file: str
 
 async def main():
     # 1. Read existing collection seeds
-    seed_pool_path = "data/queries/candidate_seeds.json"
+    seed_pool_path = "data/queries/candidate_seeds_v2.json"
     print(f"Loading seeds from {seed_pool_path}...")
     with open(seed_pool_path, "r", encoding="utf-8") as f:
         all_seeds = json.load(f)
@@ -236,7 +236,7 @@ async def main():
     seed_groups = {"T0": [], "T1": [], "T2": [], "T3": [], "T4": [], "Error": []}
     for s in all_seeds:
         t = str(s.get("tier", ""))
-        if t.startswith("T0"): seed_groups["T0"].append(s)
+        if t.startswith("T0") or t == "Pure QA": seed_groups["T0"].append(s)
         elif t.startswith("T1"): seed_groups["T1"].append(s)
         elif t.startswith("T2"): seed_groups["T2"].append(s)
         elif t.startswith("T3"): seed_groups["T3"].append(s)
@@ -256,7 +256,7 @@ async def main():
                 try:
                     q = json.loads(line)
                     t = q.get("tier", "")
-                    if t.startswith("T0"): existing_counts["T0"] += 1
+                    if t.startswith("T0") or t == "Pure QA": existing_counts["T0"] += 1
                     elif t.startswith("T1"): existing_counts["T1"] += 1
                     elif t.startswith("T2"): existing_counts["T2"] += 1
                     elif t.startswith("T3"): existing_counts["T3"] += 1

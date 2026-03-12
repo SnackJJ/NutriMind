@@ -106,7 +106,10 @@ class HybridRetriever:
                 logger.info("Reranker loaded successfully")
             except Exception as e:
                 self._reranker_failed = True
-                logger.warning(f"Reranker failed to load: {e}. Falling back to RRF scores.")
+                logger.warning(
+                    f"Reranker failed to load: {e}. Falling back to RRF scores. "
+                    f"If using HuggingFace models, ensure HF_ENDPOINT or HF_HOME is set correctly."
+                )
         return self._reranker
 
     def retrieve(self, query: str, domain_filter: str = None) -> list[dict]:

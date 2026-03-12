@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,12 +16,12 @@ from src.tools.get_goal_adherence import get_goal_adherence
 from src.config import settings
 
 TEACHER_MODELS = {
-    "T0-qa": "qwen-plus",
-    "T1": "qwen-plus",
-    "T2": "qwen-plus",
-    "T3": "qwen-plus",
-    "T4": "qwen-plus",
-    "error_recovery": "qwen-plus",
+    "T0-qa": "qwen3.5-plus",
+    "T1": "qwen3.5-plus",
+    "T2": "qwen3.5-plus",
+    "T3": "qwen3.5-plus",
+    "T4": "qwen3.5-plus",
+    "error_recovery": "qwen3.5-plus",
 }
 
 # Per-tier max turns to avoid wasting API calls
@@ -221,6 +222,28 @@ TOOL_DISPATCH = {
     "get_goal_adherence": get_goal_adherence,
 }
 
+def normalize_tier(tier_hint: str) -> str:
+    """Normalize tier variants to standard tier names.
+
+    Examples:
+        T1-basic, T1-advanced, T1-ranking, T1-conversion -> T1
+        T2-daily-check, T2-edit -> T2
+        T3-supplement, T3-eating-out -> T3
+        T4-extreme-calorie -> T4
+        error_recovery, T0-qa -> unchanged
+        T0 -> T0-qa (bare T0 maps to T0-qa)
+    """
+    if tier_hint in MAX_TURNS:
+        return tier_hint
+
+    # Bare "T0" should map to "T0-qa"
+    if tier_hint == "T0":
+        return "T0-qa"
+
+    # Extract base tier (e.g., "T1" from "T1-basic")
+    base = tier_hint.split("-")[0] if "-" in tier_hint else tier_hint
+    return base if base in MAX_TURNS else "T2"
+
 def execute_tool(name: str, arguments: dict) -> dict:
     try:
         fn = TOOL_DISPATCH.get(name)
@@ -237,7 +260,7 @@ def truncate_tool_result(result: dict, max_chars: int = MAX_TOOL_RESULT_CHARS) -
     if len(result_str) <= max_chars:
         return result
 
-    # For list results (e.g., search_food matches), truncate the list
+    # For list results (e.g., get_food_nutrition matches), truncate the list
     if isinstance(result.get("data"), list):
         truncated = result.copy()
         data = truncated["data"]
@@ -247,10 +270,13 @@ def truncate_tool_result(result: dict, max_chars: int = MAX_TOOL_RESULT_CHARS) -
         truncated["_truncated"] = True
         return truncated
 
-    # For other results, add truncation marker
-    result["_truncated"] = True
-    result["_original_length"] = len(result_str)
-    return result
+    # For non-list results, truncate the JSON string and wrap as summary
+    return {
+        "status": result.get("status", "success"),
+        "_truncated": True,
+        "_original_length": len(result_str),
+        "data_summary": result_str[:max_chars],
+    }
 
 
 def is_error_result(content: str) -> bool:
@@ -388,11 +414,16 @@ def simulate_trajectory(query: str, tier_hint: str = "T2") -> dict:
             })
 
     # Check if we need to force a final answer
-    # Cases: (1) last msg is tool response, (2) last msg is empty assistant, (3) last msg has tool_calls
+    # Cases: (1) last msg is tool response, (2) last msg is empty assistant,
+    #        (3) last msg has tool_calls, (4) last msg is think-only (no user-facing answer)
     last_msg = messages[-1]
+    last_content = (last_msg.get("content") or "").strip()
+    # Strip <think>...</think> blocks to check if there's actual user-facing content
+    content_without_think = re.sub(r"<think>.*?</think>", "", last_content, flags=re.DOTALL).strip()
     needs_final = (
         last_msg.get("role") == "tool" or
-        (last_msg.get("role") == "assistant" and not (last_msg.get("content") or "").strip()) or
+        (last_msg.get("role") == "assistant" and not last_content) or
+        (last_msg.get("role") == "assistant" and last_content and not content_without_think) or
         (last_msg.get("role") == "assistant" and last_msg.get("tool_calls"))
     )
 
@@ -405,6 +436,16 @@ def simulate_trajectory(query: str, tier_hint: str = "T2") -> dict:
         # If last msg is empty assistant or has tool_calls, remove it before forcing
         if last_msg.get("role") == "assistant":
             messages.pop()
+
+        # Low-quality forced completion signals — these produce useless SFT training data
+        _LOW_QUALITY_SIGNALS = [
+            "i recommend consulting",
+            "refer to the tool",
+            "based on the information i've gathered",
+            "i apologize, but i encountered",
+            "please consult a",
+            "i wasn't able to find",
+        ]
 
         try:
             final_response = call_api_with_retry(
@@ -419,19 +460,20 @@ def simulate_trajectory(query: str, tier_hint: str = "T2") -> dict:
             if "tool_calls" in final_dict:
                 del final_dict["tool_calls"]
 
-            # Validate the forced response has content
-            if not (final_dict.get("content") or "").strip():
-                print(f"[WARNING] Forced completion also empty, adding fallback")
-                final_dict["content"] = "Based on the information I've gathered, I recommend consulting the specific data provided by the tools above for accurate nutritional guidance."
+            forced_content = (final_dict.get("content") or "").strip()
+
+            # Empty or low-quality forced completion → fail the trajectory
+            if not forced_content:
+                raise ValueError("Forced completion produced empty response")
+
+            forced_lower = forced_content.lower()
+            if any(sig in forced_lower for sig in _LOW_QUALITY_SIGNALS):
+                raise ValueError(f"Low-quality forced completion: {forced_content[:120]}")
 
             messages.append(final_dict)
         except Exception as e:
-            print(f"[WARNING] Failed to get forced final answer: {e}")
-            # Add a minimal fallback to prevent completely broken trajectory
-            messages.append({
-                "role": "assistant",
-                "content": "I apologize, but I encountered an issue completing my analysis. Please refer to the tool results above for the nutritional information."
-            })
+            # Re-raise so batch_collect routes this to *_failed.jsonl
+            raise ValueError(f"Forced completion failed for '{query[:60]}': {e}") from e
 
     tier = infer_tier(messages)
     return {
@@ -478,7 +520,7 @@ def batch_collect(queries: list, output_path: str, workers: int = 5, requests_pe
 
     def collect_one(item: dict):
         query = item["query"]
-        tier_hint = item.get("tier_hint") or item.get("tier", "T2")
+        tier_hint = normalize_tier(item.get("tier_hint") or item.get("tier", "T2"))
         start_time = time.time()
         result = simulate_trajectory(query, tier_hint)
         # Respect rate limit
@@ -518,7 +560,7 @@ def batch_collect(queries: list, output_path: str, workers: int = 5, requests_pe
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--queries", type=str, default="data/queries/collection_queries.json")
+    parser.add_argument("--queries", type=str, default="data/queries/sft_candidate_pool.jsonl")
     parser.add_argument("--output", type=str, default="data/trajectories/real_trajectories.jsonl")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--workers", type=int, default=5, help="Number of parallel collection threads")

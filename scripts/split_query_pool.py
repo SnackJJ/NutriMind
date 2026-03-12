@@ -131,8 +131,8 @@ def main():
     parser.add_argument(
         "--sft-ratio",
         type=float,
-        default=0.43,
-        help="Fraction of each tier allocated to SFT (default: 0.43 ≈ 2500/5800)",
+        default=0.50,
+        help="Fraction of each tier allocated to SFT (default: 0.50 = 2500/5000)",
     )
     parser.add_argument(
         "--seed",

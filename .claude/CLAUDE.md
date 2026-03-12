@@ -2,7 +2,7 @@
 
 ## Tech Stack
 - Python 3.10+, uv (package management)
-- Base Model: Qwen2.5-3B-Instruct (student), Qwen-Max/Plus (teacher)
+- Base Model: Qwen2.5-3B-Instruct (student), qwen3.5-plus (teacher)
 - Training: transformers + trl (SFT + GRPO) + peft (LoRA)
 - Inference: vLLM (prod) / Transformers (dev)
 - Database: SQLite (USDA SR Legacy + Foundation Foods)
@@ -16,10 +16,10 @@
 - `src/retrieval/` — Contextual Retrieval RAG v3 ✅ COMPLETE (1635 chunks, ChromaDB + BM25 indexed, 23/23 eval tests pass)
 - `src/training/sft/` — Teacher trajectory collection & validation
 - `configs/` — model.yaml, orchestrator.yaml, tools.yaml
-- `data/` — USDA DB (8109 foods + user tables), parsed docs (26 files), data/knowledge/ (1635 chunks + contextualized + cache), knowledge_db/ (ChromaDB), knowledge_bm25/index.pkl, trajectories, SFT/GRPO data
+- `data/` — **NEEDS FULL REBUILD** (accidentally deleted 2026-03-11); rebuild order: Track A (RAG) + Track B (USDA) + Track C (query pool) → Track D (trajectories)
 - `docs/plans/` — 7-phase execution plans + phase1.2 RAG rewrite
 - `docs/specs/` — Technical specifications
-- `scripts/` — Data pipeline (USDA download, document processing, init_user_tables.py)
+- `scripts/` — Data pipeline (USDA download, document processing, init_user_tables.py, export_usda_foods.py)
 
 ## File Map
 
@@ -61,3 +61,9 @@ Cross-cutting plans (no single spec):
 - [2026-03-09] Merged `search_food` + `calculate_meal` → `get_food_nutrition` — eliminates tool overlap, reduces 3B model decision burden (7→6 tools); single tool handles both single-food and multi-food queries; T1 tier now uses get_food_nutrition for all food lookups
 - [2026-03-09] Trajectory collector improvements — per-tier MAX_TURNS (T0:3, T1:5, T2:8, T3:12, T4:3), tenacity retry with exponential backoff, failed queries saved to *_failed.jsonl, tool result truncation (4000 chars max), JSON error detection via parsing instead of string match
 - [2026-03-09] Knowledge base gap fix — Tier 3 sources added (NIH NIDDK: gallstones/GERD/IBS/celiac diet pages + MedlinePlus food allergy page); root cause: medical_nutrition domain had 0 GI disease content, food_safety had 0 food allergy content; fix also expands DOMAIN_RULES keywords for both domains; collect_sources.py PDF validation bug fixed (was rejecting HTML downloads); NIAID blocked scraping (405) → replaced with MedlinePlus (nlm.nih.gov); pipeline rebuild required after this change
+- [2026-03-11] data/ directory accidentally deleted — full rebuild required; all three tracks (RAG, USDA, query pool) must be regenerated; candidate_seeds.json (57 seeds) already committed to data/queries/
+- [2026-03-11] Teacher model changed qwen-plus → qwen3.5-plus in TEACHER_MODELS dict (src/training/sft/collect_trajectories.py); also qwen3.5-plus-2026-02-15 is a valid alias
+- [2026-03-11] Query pool target reduced 5800 → 5000: new TARGETS T0=200/T1=1050/T2=1300/T3=1500/T4=700/Error=250; SFT/GRPO split changed from 43/57 → 50/50 (2500+2500); expected ~1000-1300 validated trajectories after validation passes
+- [2026-03-11] Added scripts/export_usda_foods.py — exports food names from usda.db to data/usda_foods.json; required by expand_query_pool.py before T1 query expansion; run after B3 (init_user_tables.py)
+- [2026-03-11] DGA 2020-2025 manually downloaded as compressed version; actual filename: Dietary_Guidelines_for_Americans_2020-2025-compressed_1.pdf (not dga_2020_2025.pdf); registered in manifest.json manually; WHO/MyPlate/ACOG sources skipped — DGA covers the same scope
+- [2026-03-11] candidate_seeds.json finalized at 62 seeds: removed 7 (T1-brand/T1-ranking-absorption/T1-conversion/T3-eating-out×2/T2-edit/T2-delete), added 6 (T1-specific-amount/T2-daily-check/T3-supplement/T4-extreme-calorie/error_recovery×2)
