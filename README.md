@@ -1,6 +1,6 @@
 # NutriMind
 
-A nutrition-focused AI agent powered by a fine-tuned 3B parameter language model.
+A nutrition-focused AI agent powered by a fine-tuned 4B parameter language model.
 
 ## Overview
 
@@ -27,7 +27,7 @@ NutriMind is an intelligent nutrition assistant that helps users:
 
 ## Tech Stack
 
-- **Model**: Qwen2.5-3B-Instruct (fine-tuned with SFT + GRPO)
+- **Model**: Qwen3-4B (fine-tuned with SFT + GRPO)
 - **RAG**: Contextual Retrieval + ChromaDB + BM25 + Reranker
 - **Database**: SQLite (USDA SR Legacy + Foundation Foods)
 - **Training**: transformers + trl + peft (LoRA)

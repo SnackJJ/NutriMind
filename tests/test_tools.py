@@ -173,6 +173,43 @@ def patch_connections(db_path):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Mock food retriever for isolated tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Map of test food queries to their fdc_ids in _TEST_FOODS
+_TEST_FOOD_MAP = {
+    "chicken": 1,
+    "chicken breast": 1,
+    "rice": 2,
+    "rice white": 2,
+    "egg": 3,
+}
+
+
+class MockFoodRetriever:
+    """Mock retriever that returns fdc_ids matching _TEST_FOODS."""
+
+    def retrieve(self, query: str, allow_fallback: bool = True):
+        query_lower = query.lower()
+        for key, fdc_id in _TEST_FOOD_MAP.items():
+            if key in query_lower:
+                return [{
+                    "content": f"Test food for {query}",
+                    "metadata": {"fdc_id": fdc_id},
+                    "rerank_score": 0.95,
+                }]
+        return []  # Not found
+
+
+@contextmanager
+def patch_food_retriever():
+    """Patch the food retriever to use mock data matching _TEST_FOODS."""
+    mock_retriever = MockFoodRetriever()
+    with patch("src.tools.get_food_nutrition._get_food_retriever", return_value=mock_retriever):
+        yield
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # get_food_nutrition
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -181,7 +218,7 @@ from src.tools.get_food_nutrition import get_food_nutrition
 
 class TestGetFoodNutrition:
     def test_single_food_success(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             result = get_food_nutrition([{"food_name": "chicken breast", "amount_grams": 100.0}])
         assert result["status"] == "success"
         assert result["data"]["total"]["calories_kcal"] == pytest.approx(165.0, abs=0.5)
@@ -189,13 +226,13 @@ class TestGetFoodNutrition:
         assert result["data"]["breakdown"][0]["amount_grams"] == 100.0
 
     def test_unknown_food_returns_error(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             result = get_food_nutrition([{"food_name": "xyzzy_nonexistent_food_12345", "amount_grams": 100.0}])
         assert result["status"] == "error"
         assert result["error_type"] == "all_foods_not_found"
 
     def test_amount_scaling(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             r100 = get_food_nutrition([{"food_name": "chicken breast", "amount_grams": 100.0}])
             r200 = get_food_nutrition([{"food_name": "chicken breast", "amount_grams": 200.0}])
         assert r100["status"] == "success"
@@ -209,7 +246,7 @@ class TestGetFoodNutrition:
             {"food_name": "chicken breast", "amount_grams": 100.0},
             {"food_name": "rice white", "amount_grams": 100.0},
         ]
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             r_combined = get_food_nutrition(foods)
             r_chicken  = get_food_nutrition([foods[0]])
             r_rice     = get_food_nutrition([foods[1]])
@@ -222,7 +259,7 @@ class TestGetFoodNutrition:
         assert r_combined["data"]["total"]["calories_kcal"] == pytest.approx(expected, abs=1.0)
 
     def test_unknown_food_partial_failure(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             result = get_food_nutrition([{"food_name": "xyzzy_nonexistent_12345", "amount_grams": 100.0}])
         assert result["status"] in ("partial_failure", "error")
 
@@ -236,7 +273,7 @@ from src.tools.log_meal import log_meal
 
 class TestLogMeal:
     def test_valid_meal_logged_successfully(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             result = log_meal(
                 meal_type="lunch",
                 foods=[{"food_name": "chicken breast", "amount_grams": 150.0}],
@@ -247,19 +284,19 @@ class TestLogMeal:
         assert result["total_calories"] > 0
 
     def test_invalid_meal_type_returns_error(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             result = log_meal(meal_type="brunch", foods=[{"food_name": "egg", "amount_grams": 100.0}])
         assert result["status"] == "error"
         assert result["error_type"] == "invalid_meal_type"
 
     def test_empty_foods_returns_error(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             result = log_meal(meal_type="breakfast", foods=[])
         assert result["status"] == "error"
         assert result["error_type"] == "missing_required_field"
 
     def test_meal_persisted_to_db(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             result = log_meal(
                 meal_type="dinner",
                 foods=[{"food_name": "egg", "amount_grams": 100.0}],
@@ -296,7 +333,7 @@ class TestGetTodaySummary:
         assert data["remaining_calories"] == data["calorie_budget"]
 
     def test_after_logging_returns_summary(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             log_meal("breakfast", [{"food_name": "egg", "amount_grams": 100.0}])
             result = get_today_summary()
         assert result["status"] == "success"
@@ -307,7 +344,7 @@ class TestGetTodaySummary:
 
     def test_calorie_budget_from_goals(self, user_db):
         # Calorie budget should match the default goal of 2000 kcal
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             log_meal("snack", [{"food_name": "chicken breast", "amount_grams": 100.0}])
             result = get_today_summary()
         assert result["status"] == "success"
@@ -347,7 +384,7 @@ class TestGetHistory:
         assert result["error_type"] == "no_data_in_range"
 
     def test_with_data_returns_breakdown(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             log_meal("lunch", [{"food_name": "egg", "amount_grams": 100.0}])
             result = get_history(days=7)
         assert result["status"] == "success"
@@ -426,7 +463,7 @@ class TestGetGoalAdherence:
         assert result["error_type"] == "no_data_in_range"
 
     def test_with_meals_all_metrics(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             log_meal("lunch", [{"food_name": "chicken breast", "amount_grams": 200.0}])
             result = get_goal_adherence(days=7, metric="all")
         assert result["status"] == "success"
@@ -438,7 +475,7 @@ class TestGetGoalAdherence:
             assert "adherence_pct" in data["metrics"][m]
 
     def test_with_meals_single_metric(self, user_db):
-        with patch_connections(user_db):
+        with patch_connections(user_db), patch_food_retriever():
             log_meal("dinner", [{"food_name": "egg", "amount_grams": 100.0}])
             result = get_goal_adherence(days=7, metric="calories")
         assert result["status"] == "success"
