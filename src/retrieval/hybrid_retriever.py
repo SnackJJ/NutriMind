@@ -1,18 +1,22 @@
 """Hybrid retriever combining semantic search (ChromaDB) + BM25 + reranking.
 
 Features:
-- ChromaDB native domain filtering (boolean metadata)
-- BM25 with domain post-filter
+- ChromaDB semantic search (bge-small-en-v1.5)
+- BM25 keyword search
 - Reciprocal Rank Fusion (RRF) merge
 - Lazy-loaded BGE reranker with graceful fallback
 - Query preprocessing with abbreviation expansion
 - Threshold only when reranker is available (RRF scores are not comparable)
+
+Note: Domain filtering was removed in 2026-03. With ~1700 chunks, the four-stage
+pipeline provides sufficient precision without hard filtering.
 """
 
 import json
 import logging
 import pickle
 import re
+import threading
 from typing import Dict, List, Optional
 
 import chromadb
@@ -65,11 +69,12 @@ def preprocess_query(query: str) -> str:
 
 
 class HybridRetriever:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, collection_name: str = "nutrition_knowledge", instruction: str = "Represent this sentence for searching relevant passages: "):
         # --- Semantic index ---
         chroma_path = config.get("chroma_db_path", "data/knowledge_db")
         self.chroma_client = chromadb.PersistentClient(path=chroma_path)
-        self.collection = self.chroma_client.get_collection("nutrition_knowledge")
+        self.collection = self.chroma_client.get_collection(collection_name)
+        self.instruction = instruction
 
         # --- Embedding model ---
         embedding_model_name = config.get("embedding_model", "BAAI/bge-small-en-v1.5")
@@ -84,9 +89,10 @@ class HybridRetriever:
         self.bm25_chunk_contents = bm25_data["chunk_contents"]
         self.bm25_chunk_metadatas = bm25_data["chunk_metadatas"]
 
-        # --- Reranker (lazy load) ---
+        # --- Reranker (lazy load with thread lock) ---
         self._reranker = None
         self._reranker_failed = False
+        self._reranker_lock = threading.Lock()
         self._reranker_model_name = config.get("reranker_model", "BAAI/bge-reranker-base")
 
         # --- Parameters ---
@@ -100,74 +106,77 @@ class HybridRetriever:
     @property
     def reranker(self):
         if self._reranker is None and not self._reranker_failed:
-            try:
-                from sentence_transformers import CrossEncoder
-                self._reranker = CrossEncoder(self._reranker_model_name)
-                logger.info("Reranker loaded successfully")
-            except Exception as e:
-                self._reranker_failed = True
-                logger.warning(
-                    f"Reranker failed to load: {e}. Falling back to RRF scores. "
-                    f"If using HuggingFace models, ensure HF_ENDPOINT or HF_HOME is set correctly."
-                )
+            with self._reranker_lock:
+                # Double-check after acquiring lock
+                if self._reranker is None and not self._reranker_failed:
+                    try:
+                        from sentence_transformers import CrossEncoder
+                        self._reranker = CrossEncoder(self._reranker_model_name)
+                        logger.info("Reranker loaded successfully")
+                    except Exception as e:
+                        self._reranker_failed = True
+                        logger.warning(
+                            f"Reranker failed to load: {e}. Falling back to RRF scores. "
+                            f"If using HuggingFace models, ensure HF_ENDPOINT or HF_HOME is set correctly."
+                        )
         return self._reranker
 
-    def retrieve(self, query: str, domain_filter: str = None) -> list[dict]:
-        """Run the full hybrid retrieval pipeline.
+    def retrieve(self, query: str, mode: str = "hybrid", allow_fallback: bool = True) -> list[dict]:
+        """Run the hybrid retrieval pipeline or specialized search.
 
         Args:
             query: Natural language question.
-            domain_filter: Optional domain name to filter results.
+            mode: "hybrid" (default), "semantic" (ChromaDB only), or "keyword" (BM25 only).
+            allow_fallback: Whether to return the best result with low_confidence=True
+                            if no results pass the threshold.
 
         Returns:
             List of result dicts with content, metadata, and scores.
         """
         query = preprocess_query(query)
 
-        # 1. Semantic search (ChromaDB native domain filtering)
-        query_embedding = self._embed_query(query)
-        where_clause = {f"domain_{domain_filter}": True} if domain_filter else None
-
-        sem_results = self._parse_chroma_results(
-            self.collection.query(
-                query_embeddings=[query_embedding],
-                n_results=self.semantic_top_k,
-                where=where_clause,
+        # 1. Semantic search (ChromaDB)
+        sem_results = []
+        if mode in ("hybrid", "semantic"):
+            query_embedding = self._embed_query(query)
+            sem_results = self._parse_chroma_results(
+                self.collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=self.semantic_top_k,
+                )
             )
-        )
 
-        # 2. BM25 keyword search + domain filter
-        bm25_tokens = simple_tokenize(query)
-        bm25_scores = self.bm25.get_scores(bm25_tokens)
-        bm25_top_idx = np.argsort(bm25_scores)[-(self.bm25_top_k * 2):][::-1]
-
+        # 2. BM25 keyword search
         bm25_results = []
-        for i in bm25_top_idx:
-            if bm25_scores[i] <= 0:
-                continue
-            meta = self.bm25_chunk_metadatas[i]
-            if domain_filter and not meta.get(f"domain_{domain_filter}", False):
-                continue
-            bm25_results.append({
-                "id": self.bm25_chunk_ids[i],
-                "content": self.bm25_chunk_contents[i],
-                "metadata": meta,
-                "score": float(bm25_scores[i]),
-            })
-            if len(bm25_results) >= self.bm25_top_k:
-                break
+        if mode in ("hybrid", "keyword"):
+            bm25_tokens = simple_tokenize(query)
+            bm25_scores = self.bm25.get_scores(bm25_tokens)
+            bm25_top_idx = np.argsort(bm25_scores)[-self.bm25_top_k:][::-1]
 
-        # 3. RRF Merge
-        fused = self._rrf_merge(sem_results, bm25_results)
+            for i in bm25_top_idx:
+                if bm25_scores[i] <= 0:
+                    continue
+                bm25_results.append({
+                    "id": self.bm25_chunk_ids[i],
+                    "content": self.bm25_chunk_contents[i],
+                    "metadata": self.bm25_chunk_metadatas[i],
+                    "score": float(bm25_scores[i]),
+                })
+
+        # 3. Merge / Candidates selection
+        if mode == "hybrid":
+            candidates = self._rrf_merge(sem_results, bm25_results)
+        elif mode == "semantic":
+            candidates = sem_results
+        else:  # keyword
+            candidates = bm25_results
 
         # 4. Rerank
-        rerank_candidates = fused[:self.rerank_top_k]
+        rerank_candidates = candidates[:self.rerank_top_k]
         if rerank_candidates:
             rerank_candidates = self._rerank(query, rerank_candidates)
 
         # 5. Threshold + low_confidence fallback
-        #    RRF scores (~0.01-0.03) and reranker scores are on different scales.
-        #    Only apply threshold when reranker is available.
         if self.reranker is not None:
             final = [
                 c for c in rerank_candidates
@@ -175,13 +184,13 @@ class HybridRetriever:
             ][:self.final_top_k]
 
             # Low confidence fallback
-            if not final and rerank_candidates:
+            if not final and rerank_candidates and allow_fallback:
                 best = rerank_candidates[0]
                 best["low_confidence"] = True
                 final = [best]
-                logger.info("No results above threshold, returning best candidate with low_confidence flag")
+                logger.debug(f"No results above threshold ({self.relevance_threshold}), mode={mode}")
         else:
-            # Reranker unavailable: trust RRF ranking, take top_k directly
+            # Reranker unavailable: trust ranking, take top_k directly
             final = rerank_candidates[:self.final_top_k]
 
         return final
@@ -189,7 +198,7 @@ class HybridRetriever:
     def _embed_query(self, query: str) -> list[float]:
         """BGE models use instruction prefix for queries."""
         return self._embedding_model.encode(
-            "Represent this sentence for searching relevant passages: " + query,
+            self.instruction + query,
             normalize_embeddings=True,
         ).tolist()
 

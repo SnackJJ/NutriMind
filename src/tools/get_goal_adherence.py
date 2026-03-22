@@ -1,4 +1,8 @@
-"""get_goal_adherence tool — analyse adherence to nutrition goals."""
+"""get_goal_adherence tool — analyse adherence to nutrition goals.
+
+DEPRECATED [2026-03-13]: Merged into get_history(compare_to_goal=True).
+This file is retained for reference only. Do not use in new trajectories.
+"""
 
 from datetime import date, timedelta
 

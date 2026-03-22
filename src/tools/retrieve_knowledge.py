@@ -24,44 +24,54 @@ def _get_retriever() -> HybridRetriever:
 
 
 
-def retrieve_knowledge(query: str, domain: str = None, top_k: int = 3) -> dict:
+def retrieve_knowledge(query: str, mode: str = "hybrid", top_k: int = 3) -> dict:
     """Search the nutrition knowledge base.
 
     Args:
         query: Natural language question or topic.
-        domain: Optional domain filter (micronutrients, sports_nutrition, etc.).
+        mode: Retrieval strategy: "hybrid" (default), "semantic", or "keyword".
         top_k: Number of passages to return (default 3).
 
     Returns:
-        dict with status + passages including source attribution.
+        dict with status, retrieval_quality, top_relevance_score, and passages.
     """
     if not query or not query.strip():
         return {"status": "error", "error_type": "empty_query", "message": "Query cannot be empty"}
 
     try:
         retriever = _get_retriever()
-        results = retriever.retrieve(query=query, domain_filter=domain)
+        results = retriever.retrieve(query=query, mode=mode)
 
         if not results:
-            return {"status": "error", "error_type": "no_relevant_results", "message": "No relevant results found"}
+            return {
+                "status": "success",
+                "retrieval_quality": "none",
+                "top_relevance_score": 0.0,
+                "data": {"passages": []}
+            }
 
         passages = []
+        max_score = 0.0
         for r in results[:top_k]:
             meta = r["metadata"]
+            score = r.get("rerank_score", r.get("rrf_score", 0.0))
+            max_score = max(max_score, score)
+
             passage = {
                 "content": r["content"],
                 "source": meta.get("document", "unknown"),
                 "source_id": meta.get("source_id", "unknown"),
                 "section": meta.get("section", ""),
                 "url": meta.get("url", ""),
-                "relevance_score": r.get("rerank_score", r.get("rrf_score", 0.0)),
+                "relevance_score": round(score, 4),
             }
-            if r.get("low_confidence"):
-                passage["low_confidence"] = True
             passages.append(passage)
 
+        # No retrieval_quality classification - model judges relevance
+        # by examining top_relevance_score + passage source/section/content
         return {
             "status": "success",
+            "top_relevance_score": round(max_score, 4),
             "data": {"passages": passages},
         }
 

@@ -5,60 +5,93 @@ Merges the former search_food (single-food query) and calculate_meal
 ANY food nutrition query.
 """
 
+import threading
+import yaml
 from src.utils.db import get_connection
 from src.utils.logger import logger
+from src.retrieval.hybrid_retriever import HybridRetriever
+
+_food_retriever: HybridRetriever | None = None
+_food_init_lock = threading.Lock()
 
 
-def _normalize_food_name(food_name: str) -> list[str]:
-    """Split food name into words for SQL LIKE matching."""
-    return food_name.strip().lower().replace(",", " ").split()
+def _get_food_retriever() -> HybridRetriever:
+    """Lazy-load the hybrid retriever for food search."""
+    global _food_retriever
+    if _food_retriever is None:
+        with _food_init_lock:
+            if _food_retriever is None:
+                with open("configs/tools.yaml", "r") as f:
+                    full_config = yaml.safe_load(f)
+                    rag_config = full_config.get("rag", {})
+                    food_config = full_config.get("food_search", {})
+
+                # Use model config from rag section
+                food_config.update({
+                    "embedding_model": rag_config.get("embedding_model"),
+                    "reranker_model": rag_config.get("reranker_model")
+                })
+
+                _food_retriever = HybridRetriever(
+                    food_config,
+                    collection_name="usda_foods",
+                    instruction="Represent this food item for retrieval: "
+                )
+                logger.info("Food HybridRetriever initialized")
+    return _food_retriever
+
+
 
 
 def _lookup_single(food_name: str, amount_grams: float) -> dict:
-    """Look up a single food in the USDA DB and scale nutrients by amount."""
-    conn = get_connection()
-    if not conn:
-        return {"status": "error", "error_type": "db_error", "message": "Database not available"}
-
-    multiplier = amount_grams / 100.0
-
+    """Look up a single food using hybrid search and fetch details from USDA DB."""
     try:
-        cursor = conn.cursor()
-        words = _normalize_food_name(food_name)
+        retriever = _get_food_retriever()
+        results = retriever.retrieve(food_name, allow_fallback=False)
 
-        sql = """SELECT description, category,
-                        energy_kcal, protein_g, total_fat_g, carbohydrate_g,
-                        fiber_g, sugars_g, sodium_mg, cholesterol_mg,
-                        saturated_fat_g, iron_mg, calcium_mg, potassium_mg,
-                        vitamin_a_mcg, vitamin_c_mg, vitamin_d_mcg, water_g
-                 FROM foods
-                 WHERE """
-
-        conditions = ["LOWER(description) LIKE ?"] * len(words)
-        sql += " AND ".join(conditions)
-        sql += (
-            f" ORDER BY"
-            f" CASE WHEN LOWER(description) LIKE '{words[0]},%' OR LOWER(description) = '{words[0]}' THEN 1 ELSE 2 END,"
-            f" CASE WHEN LOWER(description) LIKE '%whole%' THEN 1 ELSE 2 END,"
-            f" CASE WHEN LOWER(description) LIKE '%raw%' THEN 1 ELSE 2 END,"
-            f" LENGTH(description) ASC LIMIT 1"
-        )
-
-        params = tuple(f"%{w}%" for w in words)
-        cursor.execute(sql, params)
-        row = cursor.fetchone()
-
-        # Fall back to ANY-word match if strict ALL-words match finds nothing
-        if not row and len(words) > 1:
-            sql_fallback = sql.replace(" AND ", " OR ")
-            cursor.execute(sql_fallback, params)
-            row = cursor.fetchone()
-
-        if not row:
+        if not results:
             return {
                 "status": "error",
                 "error_type": "food_not_found",
                 "message": f"Food '{food_name}' not found in USDA database.",
+            }
+
+        best_match = results[0]
+        score = best_match.get("rerank_score", best_match.get("rrf_score", 0.0))
+        low_confidence = best_match.get("low_confidence", False)
+
+        # Confidence tiers based on hybrid score
+        if score > 0.85 and not low_confidence:
+            confidence = "high"
+        elif score > 0.5 and not low_confidence:
+            confidence = "medium"
+        else:
+            confidence = "low"
+
+        fdc_id = best_match["metadata"]["fdc_id"]
+
+        conn = get_connection()
+        if not conn:
+            return {"status": "error", "error_type": "db_error", "message": "Database not available"}
+
+        multiplier = amount_grams / 100.0
+        cursor = conn.cursor()
+
+        sql = """SELECT description, category,
+                        energy_kcal, protein_g, total_fat_g, carbohydrate_g,
+                        fiber_g, sugars_g, sodium_mg, cholesterol_mg,
+                        saturated_fat_g, iron_mg, calcium_mg, potassium_mg
+                 FROM foods
+                 WHERE fdc_id = ?"""
+        cursor.execute(sql, (fdc_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            return {
+                "status": "error",
+                "error_type": "food_id_broken",
+                "message": f"FDC ID {fdc_id} found in index but missing in database.",
             }
 
         return {
@@ -67,6 +100,8 @@ def _lookup_single(food_name: str, amount_grams: float) -> dict:
                 "food_name": row[0],
                 "category": row[1] or "",
                 "amount_grams": amount_grams,
+                "match_confidence": confidence,
+                "match_score": round(score, 4),
                 "calories_kcal": round(row[2] * multiplier, 1),
                 "protein_g": round(row[3] * multiplier, 1),
                 "fat_g": round(row[4] * multiplier, 1),
@@ -82,10 +117,8 @@ def _lookup_single(food_name: str, amount_grams: float) -> dict:
             },
         }
     except Exception as e:
-        logger.error(f"get_food_nutrition lookup error: {e}")
+        logger.error(f"get_food_nutrition hybrid lookup error: {e}")
         return {"status": "error", "error_type": "internal_error", "message": str(e)}
-    finally:
-        conn.close()
 
 
 def get_food_nutrition(foods: list) -> dict:

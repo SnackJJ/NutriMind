@@ -91,7 +91,8 @@ SELECT
     ROUND(SUM(mli.protein_g), 1)         AS total_protein_g,
     ROUND(SUM(mli.fat_g), 1)             AS total_fat_g,
     ROUND(SUM(mli.carbs_g), 1)           AS total_carbs_g,
-    ROUND(SUM(mli.fiber_g), 1)           AS total_fiber_g
+    ROUND(SUM(mli.fiber_g), 1)           AS total_fiber_g,
+    GROUP_CONCAT(COALESCE(mli.food_name, ''), ', ')  AS food_summary
 FROM meal_logs ml
 JOIN meal_log_items mli ON ml.log_id = mli.log_id
 GROUP BY ml.user_id, DATE(ml.logged_at);

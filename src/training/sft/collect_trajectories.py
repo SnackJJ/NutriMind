@@ -1,9 +1,21 @@
+"""
+Trajectory collection for SFT training.
+
+Uses API function calling for teacher (stable output), then converts to pure text
+format for SFT training. See ADR-001 for rationale.
+
+Architecture:
+- Teacher: API function calling with enable_thinking=True
+- Conversion: api_response_to_sft_text() transforms to <tool_call> format
+- Student: ToolParser (src/orchestrator/tool_parser.py) - NOT used here
+"""
 import json
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -12,27 +24,15 @@ from src.tools.log_meal import log_meal
 from src.tools.get_today_summary import get_today_summary
 from src.tools.get_history import get_history
 from src.tools.retrieve_knowledge import retrieve_knowledge
-from src.tools.get_goal_adherence import get_goal_adherence
 from src.config import settings
 
-TEACHER_MODELS = {
-    "T0-qa": "qwen3.5-plus",
-    "T1": "qwen3.5-plus",
-    "T2": "qwen3.5-plus",
-    "T3": "qwen3.5-plus",
-    "T4": "qwen3.5-plus",
-    "error_recovery": "qwen3.5-plus",
-}
+TEACHER_MODEL_T0 = "qwen3.5-flash"
+TEACHER_MODEL_OTHERS = "qwen3.5-397b-a17b"
+# Default for direct calls outside batch_collect
+TEACHER_MODEL = TEACHER_MODEL_OTHERS 
 
-# Per-tier max turns to avoid wasting API calls
-MAX_TURNS = {
-    "T0-qa": 3,          # Direct answer, minimal interaction
-    "T1": 5,             # Single tool + buffer for retry
-    "T2": 8,             # Multi-step, 2-3 tools + retries
-    "T3": 12,            # Complex conditional flows
-    "T4": 3,             # Should refuse immediately
-    "error_recovery": 10, # Extra turns for error handling
-}
+# Global upper limit to prevent infinite loops; actual quality gating is done in validation
+MAX_TURNS = 20
 
 # Max characters for tool result to prevent context overflow
 MAX_TOOL_RESULT_CHARS = 4000
@@ -42,40 +42,30 @@ client = OpenAI(
     base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
 
+# =============================================================================
+# API Function Calling Tools Definition
+# =============================================================================
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=30),
-    retry=retry_if_exception_type((Exception,)),
-    reraise=True
-)
-def call_api_with_retry(**kwargs):
-    """Wrapper for API calls with exponential backoff retry."""
-    return client.chat.completions.create(**kwargs)
-
-TOOLS_SCHEMA = [
+TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "get_food_nutrition",
-            "description": "Look up nutrition information for one or more foods from USDA database. Returns detailed nutrients (calories, protein, fat, carbs, fiber, sugars, sodium, vitamins, etc.) for each food, plus totals if multiple foods. Use for ANY food nutrition query - single food or full meal.",
+            "description": "Look up nutrition for one or more foods from the USDA database. Returns detailed nutrients per food (calories, protein, fat, carbs, fiber, sugars, sodium, vitamins) + totals + macro_ratio. Each item includes match_confidence (high/medium/low).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "foods": {
                         "type": "array",
-                        "description": "List of foods to look up. For single food query, just provide one item.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "food_name": {"type": "string", "description": "Food name (English preferred)"},
-                                "amount_grams": {
-                                    "type": "number",
-                                    "description": "Amount in grams. Estimate from natural units: '1 large egg'->50, '1 medium banana'->118, '1 cup milk'->244, '1 slice bread'->30"
-                                }
+                                "food_name": {"type": "string", "description": "Name of the food to look up"},
+                                "amount_grams": {"type": "number", "description": "Amount in grams"}
                             },
                             "required": ["food_name", "amount_grams"]
-                        }
+                        },
+                        "description": "List of foods with amounts"
                     }
                 },
                 "required": ["foods"]
@@ -90,7 +80,11 @@ TOOLS_SCHEMA = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "meal_type": {"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"]},
+                    "meal_type": {
+                        "type": "string",
+                        "enum": ["breakfast", "lunch", "dinner", "snack"],
+                        "description": "Type of meal"
+                    },
                     "foods": {
                         "type": "array",
                         "items": {
@@ -100,9 +94,13 @@ TOOLS_SCHEMA = [
                                 "amount_grams": {"type": "number"}
                             },
                             "required": ["food_name", "amount_grams"]
-                        }
+                        },
+                        "description": "List of foods in the meal"
                     },
-                    "timestamp": {"type": "string"}
+                    "timestamp": {
+                        "type": "string",
+                        "description": "ISO-8601 timestamp (optional)"
+                    }
                 },
                 "required": ["meal_type", "foods"]
             }
@@ -115,7 +113,8 @@ TOOLS_SCHEMA = [
             "description": "Retrieve today's nutritional intake summary and remaining calorie budget.",
             "parameters": {
                 "type": "object",
-                "properties": {}
+                "properties": {},
+                "required": []
             }
         }
     },
@@ -123,13 +122,25 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_history",
-            "description": "Query multi-day nutritional history and trends.",
+            "description": "Query multi-day nutritional history and trends. Set compare_to_goal=true when user asks about goal progress or adherence rate.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "days": {"type": "integer", "default": 7},
-                    "metric": {"type": "string", "enum": ["calories", "protein", "fat", "carbs", "all"], "default": "all"}
-                }
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days to query (default 7, max 90)"
+                    },
+                    "metric": {
+                        "type": "string",
+                        "enum": ["calories", "protein", "fat", "carbs", "all"],
+                        "description": "Which metric to retrieve (default 'all')"
+                    },
+                    "compare_to_goal": {
+                        "type": "boolean",
+                        "description": "Whether to compare against user's goals (default false)"
+                    }
+                },
+                "required": []
             }
         }
     },
@@ -137,81 +148,195 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "retrieve_knowledge",
-            "description": "Retrieve nutrition knowledge from authoritative English-language RAG knowledge base.",
+            "description": "Search the authoritative nutrition knowledge base (RAG). Use for dietary guidelines, medical nutrition principles, supplement information, sports nutrition, micronutrients, and life stage recommendations. Do NOT use for food facts/macros — use get_food_nutrition instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string"},
-                    "top_k": {"type": "integer", "default": 3},
-                    "domain": {
+                    "query": {
                         "type": "string",
-                        "enum": [
-                            "micronutrients",
-                            "dietary_guidelines",
-                            "sports_nutrition",
-                            "life_stage",
-                            "meal_planning",
-                            "food_safety",
-                            "supplements",
-                            "medical_nutrition",
-                            "weight_management"
-                        ]
+                        "description": "Search query for the knowledge base"
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["hybrid", "semantic", "keyword"],
+                        "description": "Retrieval strategy. Use 'hybrid' for general questions, 'semantic' for concepts, 'keyword' for specific terms after a hybrid failure."
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 3, max 5)"
                     }
                 },
                 "required": ["query"]
             }
         }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_goal_adherence",
-            "description": "Analyze adherence to nutrition goals over a specified period.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "days": {"type": "integer", "default": 7, "description": "Number of days to analyze (max 90)"},
-                    "metric": {"type": "string", "enum": ["calories", "protein", "fat", "carbs", "all"], "default": "all"}
-                }
-            }
-        }
     }
 ]
 
-# Inject thought requirement into every tool schema natively so the API forces CoT before execution
-for tool in TOOLS_SCHEMA:
-    props = tool["function"]["parameters"]["properties"]
-    props["thought"] = {
-        "type": "string",
-        "description": "Step-by-step reasoning in English about what data is needed and why. MUST ALWAYS BE FILLED FIRST."
-    }
-    req = tool["function"]["parameters"].setdefault("required", [])
-    if "thought" not in req:
-        req.insert(0, "thought")
+
+# =============================================================================
+# API Response to SFT Text Conversion
+# =============================================================================
+
+def api_response_to_sft_text(
+    thinking_content: str | None,
+    tool_calls: list[dict[str, Any]] | None,
+    text_content: str | None
+) -> str:
+    """Convert API response components to pure text SFT format.
+
+    This function transforms the structured API response into the text format
+    that the student model will learn to produce.
+
+    Args:
+        thinking_content: The thinking/reasoning content from API (may be None)
+        tool_calls: List of tool call dicts from API (may be None or empty)
+        text_content: Plain text content from API (may be None)
+
+    Returns:
+        Formatted string with <think> and <tool_call> tags as needed
+
+    Examples:
+        >>> api_response_to_sft_text("analyzing...", [{"name": "get_food_nutrition", "arguments": {"foods": [...]}}], None)
+        '<think>\nanalyzing...\n</think>\n<tool_call>\n{"name": "get_food_nutrition", "arguments": {"foods": [...]}}\n</tool_call>'
+
+        >>> api_response_to_sft_text("synthesis...", None, "The answer is...")
+        '<think>\nsynthesis...\n</think>\nThe answer is...'
+    """
+    parts = []
+
+    # 1. Add thinking block if present
+    if thinking_content and thinking_content.strip():
+        parts.append(f"<think>\n{thinking_content.strip()}\n</think>")
+
+    # 2. Add tool calls if present
+    if tool_calls:
+        for tc in tool_calls:
+            # Handle both OpenAI object format and dictionary format
+            if hasattr(tc, "function"):
+                name = tc.function.name
+                args_str = tc.function.arguments
+                try:
+                    args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                except json.JSONDecodeError:
+                    args = {}
+            else:
+                # Fallback for dictionary format
+                func = tc.get("function", tc)
+                name = func.get("name", "")
+                args = func.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+
+            tool_json = json.dumps(
+                {"name": name, "arguments": args},
+                ensure_ascii=False,
+                indent=2
+            )
+            parts.append(f"<tool_call>\n{tool_json}\n</tool_call>")
+
+    # 3. Add text content if present (final answer)
+    if text_content and text_content.strip():
+        parts.append(text_content.strip())
+
+    return "\n".join(parts)
+
+
+def format_tool_response(result: dict[str, Any], indent: int | None = 2) -> str:
+    """Format tool execution result as <tool_response> block.
+
+    Args:
+        result: Tool execution result dict
+        indent: JSON indentation (None for compact)
+
+    Returns:
+        Formatted string with <tool_response> tags
+    """
+    json_str = json.dumps(result, ensure_ascii=False, indent=indent, default=str)
+    return f"<tool_response>\n{json_str}\n</tool_response>"
+
+
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=30),
+    retry=retry_if_exception_type((Exception,)),
+    reraise=True
+)
+def call_api_with_retry(**kwargs):
+    """Wrapper for API calls with exponential backoff retry."""
+    return client.chat.completions.create(**kwargs)
+
 
 SYSTEM_PROMPT = """You are NutriMind, a specialized AI nutrition assistant.
 
 ## LANGUAGE RULES
-- ALL output must be in English: reasoning, tool parameters, and final answers.
+- ALL output must be in English.
 - User may write in Chinese or English — always respond in English.
 
-## BEHAVIOR
-Before every tool call, reason step-by-step in <think>...</think> tags.
-For specific food data, facts, macros, or medical knowledge, you MUST ALWAYS use the available tools. For general knowledge or simple questions (e.g. "what are empty calories?"), you may answer directly. 
-CRITICAL RULE: NEVER MAKE PARALLEL/MULTIPLE TOOL CALLS. ONLY call ONE tool at a time. Wait for the tool result before proceeding.
+## BEHAVIOR GUIDELINES
 
-## SAFETY BOUNDARY (T4)
-If the user mentions: dialysis, post-surgery recovery, active cancer, organ transplant, or is taking medications that interact with food (e.g. warfarin/anticoagulants, chemotherapy drugs, immunosuppressants, MAOIs) — DO NOT use tools.
-Instead, respond directly:
-"Your situation involves complex medical nutrition management that exceeds my safe service boundary. Please consult your physician or a registered dietitian."
+1. **Analyze before acting**: Determine what information you need before calling a tool. If the request is general, conversational, or answerable from your own knowledge, respond directly without tools.
 
-## AVAILABLE TOOLS
-- get_food_nutrition(foods[{food_name, amount_grams}]): Look up nutrition for one or more foods. Returns detailed nutrients per food + totals. Use for ANY food query.
-- log_meal(meal_type, foods[]): Record a meal to user history
-- get_today_summary(): Today's intake and remaining calorie budget
-- get_history(days, metric): Multi-day nutrition trends
-- retrieve_knowledge(query, top_k, domain): Search authoritative nutrition knowledge base
-- get_goal_adherence(days, metric): Analyze adherence to nutrition goals over a period"""
+2. **Analyze results**: When you receive a tool result, check for data quality issues (anomalous values, semantic mismatches, low confidence) before using it in your response.
+
+3. **Concise answers**: Provide clear, actionable nutrition advice. Distill and synthesize tool results into your own words — do NOT copy-paste raw content from retrieved passages.
+
+4. **Capability awareness**: If a request exceeds your toolset (e.g., edit/delete a logged meal), inform the user and suggest alternatives.
+
+## HARD CONSTRAINTS
+
+1. **One tool per turn**: Call only one tool at a time, then wait for the result.
+
+2. **Formatting rules**:
+   - Simple queries (single food lookup, today's summary, etc.): 1-2 plain paragraphs.
+   - Use Markdown tables ONLY for direct side-by-side data comparisons.
+   - Maximum one level of header. No nested bullet points.
+   - Complex advisory queries may use a short structured format, but keep it concise.
+
+3. **Data audit**: If any returned value exceeds reasonable bounds (calories > 10,000 kcal/day, protein > 1,000 g/day), flag it as a data anomaly, do NOT use the data, and ask the user to verify their logs.
+
+## SAFETY BOUNDARY
+
+If the user's situation involves any of the following, do NOT call any tools. Respond directly with the boundary statement below:
+- Dialysis or post-organ transplant nutrition
+- Post-surgery recovery nutrition
+- Active cancer treatment
+- Medications that interact with food (warfarin, chemotherapy, immunosuppressants, MAOIs)
+
+Response: "Your situation involves complex medical nutrition management that exceeds my safe service boundary. Please consult your physician or a registered dietitian."
+
+## TOOL USAGE NOTES
+
+### get_food_nutrition
+Look up nutrition data for one or more foods.
+- If `match_confidence` is "low": check whether the returned `food_name` semantically matches your query. If it does not match (e.g., you queried "potato, raw" but got "Bread, potato"), retry once with USDA-standard naming (e.g., "Potatoes, flesh and skin, raw"). If the second attempt also fails, ask the user to clarify.
+- If `match_confidence` is "high" but the returned `food_name` is clearly a different food from what was queried, treat it as a mismatch and retry as above.
+
+### log_meal
+Record a meal to user history.
+- Only use when the user explicitly wants to log/record a meal.
+- You cannot edit or delete existing entries.
+
+### get_today_summary
+Today's intake summary and remaining budget.
+- Use for questions about today's totals, remaining calories/macros, or current progress.
+
+### get_history
+Multi-day nutritional trends and goal adherence.
+- Use `compare_to_goal=true` when the user asks about goal progress or adherence rates.
+- Do NOT use for today-only queries (use `get_today_summary` instead).
+
+### retrieve_knowledge
+RAG search over nutrition knowledge base (dietary guidelines, supplements, medical nutrition principles).
+- Do NOT use for food nutrition facts — use `get_food_nutrition` instead.
+- **Retrieval strategy**:
+  - Start with `mode: "hybrid"` (default).
+  - Check `top_relevance_score` AND examine the passage `source`/`section` to judge relevance.
+  - If score > 0.7 AND passage content clearly addresses your query: use the result.
+  - If score < 0.4 OR passage topic is off-topic (e.g., you asked about VLCD risks but got a passage about calcium): reformulate your query OR switch mode (try "keyword" for precise terms, "semantic" for conceptual queries).
+  - After three attempts with poor results: stop searching. Answer from your own knowledge and state: "My nutrition knowledge base does not currently cover this topic in detail. Here is general information based on my training.\""""
 
 TOOL_DISPATCH = {
     "get_food_nutrition": get_food_nutrition,
@@ -219,30 +344,11 @@ TOOL_DISPATCH = {
     "get_today_summary": get_today_summary,
     "get_history": get_history,
     "retrieve_knowledge": retrieve_knowledge,
-    "get_goal_adherence": get_goal_adherence,
 }
 
-def normalize_tier(tier_hint: str) -> str:
-    """Normalize tier variants to standard tier names.
 
-    Examples:
-        T1-basic, T1-advanced, T1-ranking, T1-conversion -> T1
-        T2-daily-check, T2-edit -> T2
-        T3-supplement, T3-eating-out -> T3
-        T4-extreme-calorie -> T4
-        error_recovery, T0-qa -> unchanged
-        T0 -> T0-qa (bare T0 maps to T0-qa)
-    """
-    if tier_hint in MAX_TURNS:
-        return tier_hint
+# Removed normalize_tier as model selection is now uniform
 
-    # Bare "T0" should map to "T0-qa"
-    if tier_hint == "T0":
-        return "T0-qa"
-
-    # Extract base tier (e.g., "T1" from "T1-basic")
-    base = tier_hint.split("-")[0] if "-" in tier_hint else tier_hint
-    return base if base in MAX_TURNS else "T2"
 
 def execute_tool(name: str, arguments: dict) -> dict:
     try:
@@ -287,207 +393,204 @@ def is_error_result(content: str) -> bool:
     except (json.JSONDecodeError, TypeError, AttributeError):
         return False
 
-def infer_tier(messages: list) -> str:
-    tool_calls = []
-    for msg in messages:
-        if msg.get("role") == "assistant" and msg.get("tool_calls"):
-            tool_calls.extend([tc["function"]["name"] for tc in msg["tool_calls"]])
 
-    if not tool_calls:
-        final_answers = [m.get("content", "") for m in messages if m.get("role") == "assistant" and not m.get("tool_calls")]
-        safety_keywords = ["safe service boundary", "registered dietitian", "consult your physician"]
-        if any(kw in ans for ans in final_answers for kw in safety_keywords):
+def infer_tier(messages: list) -> str:
+    """Infer trajectory tier by counting <tool_call> occurrences in assistant messages."""
+    tool_call_count = 0
+    has_tool_error = False
+
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", "") or ""
+        tool_calls_in_msg = re.findall(r"<tool_call>", content)
+        tool_call_count += len(tool_calls_in_msg)
+
+    # Check tool results for errors
+    for msg in messages:
+        if msg.get("role") == "user":
+            content = msg.get("content", "") or ""
+            if "<tool_response>" in content:
+                inner = re.search(r"<tool_response>\s*(.*?)\s*</tool_response>", content, re.DOTALL)
+                if inner and is_error_result(inner.group(1)):
+                    has_tool_error = True
+
+    t4_keywords = ["dialysis", "post-surgery", "active cancer", "organ transplant", "warfarin", "chemotherapy"]
+    
+    if tool_call_count == 0:
+        # Check for T4 safety boundary response
+        final_answers = [m.get("content", "").lower() for m in messages if m.get("role") == "assistant"]
+        # Only label T4 if it hits the strict prompt-injected boundary
+        if any(word in ans for ans in final_answers for word in t4_keywords) or any("safe service boundary" in ans for ans in final_answers):
             return "T4"
         return "T0-qa"
 
-    # Use proper JSON parsing to detect errors
-    if any(m.get("role") == "tool" and is_error_result(m.get("content", "")) for m in messages):
+    if has_tool_error:
         return "error_recovery"
-    if len(tool_calls) == 1:
+    if tool_call_count == 1:
         return "T1"
-    if len(tool_calls) <= 3:
+    if tool_call_count <= 3:
         return "T2"
     return "T3"
 
-def simulate_trajectory(query: str, tier_hint: str = "T2") -> dict:
-    model = TEACHER_MODELS.get(tier_hint, TEACHER_MODELS["T2"])
-    messages = [
+
+def simulate_trajectory(query: str, model: str = TEACHER_MODEL) -> dict:
+    """Collect a single trajectory using API function calling.
+
+    Uses DashScope API with tools parameter for stable output,
+    then converts to pure text format for SFT training.
+    """
+
+    # API messages use standard format (no <tool_call> tags)
+    api_messages = [
         {"role": "system", "content": SYSTEM_PROMPT.strip()},
         {"role": "user", "content": query}
     ]
 
-    max_turns = MAX_TURNS.get(tier_hint, MAX_TURNS["T2"])
-    for turn in range(max_turns):
+    # SFT messages will have converted text format
+    sft_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT.strip()},
+        {"role": "user", "content": query}
+    ]
+
+    for turn in range(MAX_TURNS):
         response = call_api_with_retry(
             model=model,
-            messages=messages,
-            tools=TOOLS_SCHEMA,
-            tool_choice="auto",
+            messages=api_messages,
+            tools=TOOLS,
+            extra_body={"enable_thinking": True},
         )
-        msg = response.choices[0].message
 
-        # We need to serialize msg and exclude None carefully, as pydantic object serialization might differ based on SDK version
-        msg_dict = msg.model_dump(exclude_none=True)
+        message = response.choices[0].message
+        # DashScope API uses "reasoning_content" field for thinking (not "thinking_content")
+        reasoning_content = getattr(message, "reasoning_content", None)
+        tool_calls = message.tool_calls
+        text_content = message.content
 
-        # Wrap pre-tool-call reasoning as <think> block for SFT training
-        # Qwen returns reasoning in content field (not a separate reasoning_content)
-        # When there are tool_calls and content has reasoning text, wrap it
-        content = msg_dict.get("content", "") or ""
-        if msg.tool_calls and content.strip():
-            msg_dict["content"] = f"<think>{content.strip()}</think>"
+        # Convert API response to SFT text format
+        sft_content = api_response_to_sft_text(reasoning_content, tool_calls, text_content)
 
-        messages.append(msg_dict)
+        if not sft_content.strip():
+            print(f"[WARNING] Empty response at turn {turn}, nudging model")
+            api_messages.append({"role": "user", "content": "Please provide your answer."})
+            continue
 
-        # Exit loop only if: (1) no tool_calls AND (2) has actual content
-        # This prevents exiting on empty responses
-        content = msg_dict.get("content", "") or ""
-        if not msg.tool_calls and content.strip():
+        # Add to SFT messages (converted format)
+        sft_messages.append({"role": "assistant", "content": sft_content})
+
+        # Check if this is a tool call or final answer
+        if not tool_calls:
+            # No tool call — this is the final answer
+            # Also add to API messages for completeness
+            api_messages.append({"role": "assistant", "content": text_content or ""})
             break
 
-        # If model returned empty response (no tool_calls, no content), retry once
-        if not msg.tool_calls and not content.strip():
-            print(f"[WARNING] Empty response at turn {turn}, retrying with explicit instruction")
-            # Add a nudge to get the model to respond
-            messages.pop()  # Remove the empty response
-            messages.append({"role": "user", "content": "Please provide your answer based on the information gathered."})
-            retry_response = call_api_with_retry(
-                model=model,
-                messages=messages,
-                # REMOVED tools and tool_choice to force pure text response safely
-            )
-            retry_msg = retry_response.choices[0].message
-            retry_dict = retry_msg.model_dump(exclude_none=True)
-            # Remove the nudge message and add the retry response
-            messages.pop()
-            messages.append(retry_dict)
-            break
+        # Process tool call
+        tc = tool_calls[0]  # Sequential: one tool per turn
+        func = tc.function
+        name = func.name
+        try:
+            args = json.loads(func.arguments) if isinstance(func.arguments, str) else func.arguments
+        except json.JSONDecodeError:
+            args = {}
 
-        # Filter out empty/invalid tool calls (DashScope sometimes returns name='', arguments='', or id='')
-        valid_tool_calls = [
-            tc for tc in msg.tool_calls
-            if tc.function.name and tc.function.name.strip() and tc.id and tc.id.strip()
-        ]
+        # Add assistant message to API conversation (for next turn context)
+        api_messages.append({
+            "role": "assistant",
+            "content": text_content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": func.arguments}
+                }
+            ]
+        })
 
-        if not valid_tool_calls:
-            # All tool calls were invalid/empty, treat as final answer
-            if "tool_calls" in messages[-1]:
-                del messages[-1]["tool_calls"]
-            break
-            
-        # FORCE SINGLE TOOL CALL constraint for 3B learning
-        if len(valid_tool_calls) > 1:
-            valid_tool_calls = [valid_tool_calls[0]]
-            
-        # Also truncate the saved assistant message so the trajectory reflects valid single call
-        valid_ids = {tc.id for tc in valid_tool_calls}
-        messages[-1]["tool_calls"] = [tc_dict for tc_dict in messages[-1].get("tool_calls", []) if tc_dict.get("id") in valid_ids]
+        # Execute tool
+        real_result = execute_tool(name, args)
+        truncated_result = truncate_tool_result(real_result)
+        result_json = json.dumps(truncated_result, ensure_ascii=False, default=str)
 
-        # Extract thought and execute tool
-        for idx, tc_dict in enumerate(messages[-1]["tool_calls"]):
-            name = tc_dict["function"]["name"]
-            try:
-                args = json.loads(tc_dict["function"]["arguments"]) if tc_dict["function"]["arguments"] else {}
-                
-                # Extract 'thought' into 'content' to restore <think> behavior
-                thought_content = args.pop("thought", "")
-                if thought_content:
-                    # Append it (in case multiple tool calls existed before truncation, we just populate content once)
-                    if not messages[-1].get("content") or messages[-1]["content"].strip() == "":
-                        messages[-1]["content"] = f"<think>\n{thought_content}\n</think>\n"
-                
-                # Re-serialize arguments purely for training
-                tc_dict["function"]["arguments"] = json.dumps(args, ensure_ascii=False)
-                
-            except json.JSONDecodeError as e:
-                args = {}
-                print(f"[WARNING] Invalid JSON in args for {name}: {e}")
-                
-            real_result = execute_tool(name, args)
-            # Truncate result to prevent context overflow
-            truncated_result = truncate_tool_result(real_result)
+        # Add tool result to API messages (standard format)
+        api_messages.append({
+            "role": "tool",
+            "tool_call_id": tc.id,
+            "content": result_json
+        })
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tc_dict["id"],
-                "name": name,
-                "content": json.dumps(truncated_result, ensure_ascii=False, default=str)
-            })
+        # Add tool result to SFT messages (our format)
+        sft_messages.append({
+            "role": "user",
+            "content": format_tool_response(truncated_result, indent=None)
+        })
 
-    # Check if we need to force a final answer
-    # Cases: (1) last msg is tool response, (2) last msg is empty assistant,
-    #        (3) last msg has tool_calls, (4) last msg is think-only (no user-facing answer)
-    last_msg = messages[-1]
-    last_content = (last_msg.get("content") or "").strip()
-    # Strip <think>...</think> blocks to check if there's actual user-facing content
-    content_without_think = re.sub(r"<think>.*?</think>", "", last_content, flags=re.DOTALL).strip()
-    needs_final = (
-        last_msg.get("role") == "tool" or
-        (last_msg.get("role") == "assistant" and not last_content) or
-        (last_msg.get("role") == "assistant" and last_content and not content_without_think) or
-        (last_msg.get("role") == "assistant" and last_msg.get("tool_calls"))
-    )
+    # Check if trajectory is complete
+    last_sft = sft_messages[-1]
+    last_role = last_sft.get("role", "")
+    last_content = last_sft.get("content", "") or ""
 
-    if needs_final:
-        reason = "tool response" if last_msg.get("role") == "tool" else \
-                 "empty assistant" if not (last_msg.get("content") or "").strip() else \
-                 "assistant with pending tool_calls"
-        print(f"[WARNING] Incomplete trajectory ({reason}) — forcing final completion")
+    is_tool_response = last_role == "user" and "<tool_response>" in last_content
+    is_think_only = last_role == "assistant" and "<tool_call>" not in last_content and "<think>" in last_content and not last_content.replace("<think>", "").replace("</think>", "").strip()
 
-        # If last msg is empty assistant or has tool_calls, remove it before forcing
-        if last_msg.get("role") == "assistant":
-            messages.pop()
+    if is_tool_response or is_think_only:
+        print(f"[WARNING] Incomplete trajectory — forcing final completion")
 
-        # Low-quality forced completion signals — these produce useless SFT training data
-        _LOW_QUALITY_SIGNALS = [
-            "i recommend consulting",
-            "refer to the tool",
-            "based on the information i've gathered",
-            "i apologize, but i encountered",
-            "please consult a",
-            "i wasn't able to find",
-        ]
+        if is_think_only:
+            sft_messages.pop()
+            api_messages.pop()
 
         try:
+            # Force final answer (no tools)
             final_response = call_api_with_retry(
                 model=model,
-                messages=messages,
-                # REMOVED tools and tool_choice to force pure text response safely
+                messages=api_messages,
+                extra_body={"enable_thinking": True},
             )
+
             final_msg = final_response.choices[0].message
-            final_dict = final_msg.model_dump(exclude_none=True)
+            final_thinking = getattr(final_msg, "reasoning_content", None)
+            final_content = final_msg.content
 
-            # Strip out any tool calls the model might have hallucinated despite missing tools
-            if "tool_calls" in final_dict:
-                del final_dict["tool_calls"]
-
-            forced_content = (final_dict.get("content") or "").strip()
-
-            # Empty or low-quality forced completion → fail the trajectory
-            if not forced_content:
+            if not final_content or not final_content.strip():
                 raise ValueError("Forced completion produced empty response")
 
-            forced_lower = forced_content.lower()
-            if any(sig in forced_lower for sig in _LOW_QUALITY_SIGNALS):
-                raise ValueError(f"Low-quality forced completion: {forced_content[:120]}")
+            _LOW_QUALITY_SIGNALS = [
+                "i recommend consulting",
+                "refer to the tool",
+                "based on the information i've gathered",
+                "i apologize, but i encountered",
+                "please consult a",
+                "i wasn't able to find",
+            ]
 
-            messages.append(final_dict)
+            if any(sig in final_content.lower() for sig in _LOW_QUALITY_SIGNALS):
+                raise ValueError(f"Low-quality forced completion: {final_content[:120]}")
+
+            sft_final = api_response_to_sft_text(final_thinking, None, final_content)
+            sft_messages.append({"role": "assistant", "content": sft_final})
+
         except Exception as e:
-            # Re-raise so batch_collect routes this to *_failed.jsonl
             raise ValueError(f"Forced completion failed for '{query[:60]}': {e}") from e
 
-    tier = infer_tier(messages)
+    tier = infer_tier(sft_messages)
     return {
         "query": query,
         "tier": tier,
-        "messages": messages,
+        "messages": sft_messages,  # Return SFT format messages
         "metadata": {
             "teacher_model": model,
             "real_tool_executed": True,
-            "turns": len([m for m in messages if m["role"] == "tool"]),
+            "collection_mode": "api_function_calling",
+            "turns": sum(
+                1 for m in sft_messages
+                if m["role"] == "user" and "<tool_response>" in (m.get("content") or "")
+            ),
         }
     }
 
-def batch_collect(queries: list, output_path: str, workers: int = 5, requests_per_minute: int = 60):
+
+def batch_collect(queries: list, output_path: str, model: str = None, workers: int = 5, requests_per_minute: int = 60):
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     failed_file = output_file.parent / f"{output_file.stem}_failed.jsonl"
@@ -520,9 +623,18 @@ def batch_collect(queries: list, output_path: str, workers: int = 5, requests_pe
 
     def collect_one(item: dict):
         query = item["query"]
-        tier_hint = normalize_tier(item.get("tier_hint") or item.get("tier", "T2"))
         start_time = time.time()
-        result = simulate_trajectory(query, tier_hint)
+        # Determine which teacher model to use for this query
+        if model is not None:
+            effective_model = model
+        else:
+            tier = item.get("tier") or item.get("tier_hint") or ""
+            if tier.startswith("T0"):
+                effective_model = TEACHER_MODEL_T0
+            else:
+                effective_model = TEACHER_MODEL_OTHERS
+        
+        result = simulate_trajectory(query, model=effective_model)
         # Respect rate limit
         elapsed = time.time() - start_time
         if elapsed < min_interval:
@@ -546,7 +658,6 @@ def batch_collect(queries: list, output_path: str, workers: int = 5, requests_pe
                     with open(failed_file, "a", encoding="utf-8") as f:
                         f.write(json.dumps({
                             "query": item["query"],
-                            "tier_hint": item.get("tier_hint") or item.get("tier", "T2"),
                             "error": str(e),
                             "error_type": type(e).__name__
                         }, ensure_ascii=False) + "\n")
@@ -557,6 +668,7 @@ def batch_collect(queries: list, output_path: str, workers: int = 5, requests_pe
     if stats["failed"] > 0:
         print(f"⚠️  {stats['failed']} failed queries saved to {failed_file}")
 
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -564,6 +676,9 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=str, default="data/trajectories/real_trajectories.jsonl")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--workers", type=int, default=5, help="Number of parallel collection threads")
+    parser.add_argument("--tier", type=str, help="Filter queries by tier (e.g., T1, T2)")
+    parser.add_argument("--model", type=str, default=None, help="Teacher model name. If None (default), use dynamic logic: T0=flash, others=397b.")
+    parser.add_argument("--dry-run", action="store_true", help="Print queries that would be collected without calling API")
     args = parser.parse_args()
 
     # Create dummy query file if it doesn't exist to test
@@ -575,7 +690,8 @@ if __name__ == "__main__":
             {"query": "I am on dialysis. What should I eat for dinner?", "tier_hint": "T4"}
         ]
         with open(args.queries, 'w') as f:
-            json.dump(dummy_queries, f)
+            for q in dummy_queries:
+                f.write(json.dumps(q) + "\n")
 
     with open(args.queries, 'r') as f:
         first_char = f.read(1)
@@ -585,7 +701,17 @@ if __name__ == "__main__":
         else:
             data = [json.loads(line) for line in f if line.strip()]
 
+    if args.tier:
+        data = [item for item in data if (item.get("tier") or "").startswith(args.tier)]
+        print(f"[INFO] Filtered by source tier '{args.tier}': {len(data)} queries found")
+
     if args.limit > 0:
         data = data[:args.limit]
 
-    batch_collect(data, args.output, workers=args.workers)
+    if args.dry_run:
+        print("\n[DRY RUN] Queries to be collected:")
+        for i, item in enumerate(data):
+            print(f"{i+1}. [{item.get('tier')}] {item['query']}")
+        print(f"\nTotal: {len(data)} queries. No API calls will be made.")
+    else:
+        batch_collect(data, args.output, model=args.model, workers=args.workers)
