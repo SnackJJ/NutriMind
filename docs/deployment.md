@@ -76,7 +76,7 @@ python scripts/demo_cli.py --backend vllm --vllm_url http://localhost:8000/v1
 
 ```yaml
 model:
-  name: "Qwen/Qwen2.5-3B-Instruct"  # or path to fine-tuned model
+  name: "Qwen/Qwen3-4B"  # or path to fine-tuned model
   max_seq_length: 2048
 
 inference:

@@ -1,14 +1,29 @@
 # Phase 3: SFT 训练
 
-> 优先级: Foundation | 预估工时: 2-3 天 | 依赖: Phase 2
+> 优先级: Foundation | 预估工时: 2-3 天 | 依赖: Phase 2.6 (Trajectory Collection)
 
 ## 🎯 目标
 
-在 Qwen2.5-3B-Instruct 上进行 SFT，建立模型的 function calling 格式、工具选择和基本 agentic 能力基线。
+在 Qwen3-4B 上进行 SFT，建立模型的 function calling 格式、工具选择和基本 agentic 能力基线。
+
+## 📊 数据概况 (2026-03-22 实测)
+
+| 统计项 | 值 |
+|--------|-----|
+| 训练样本数 | 1,449 |
+| 总 token 数 (1 epoch) | 4,172,166 |
+| 总 token 数 (3 epochs) | 12,516,498 |
+| 平均 token/样本 | 2,879 |
+| P95 token 长度 | 5,342 |
+| 超 8192 样本数 | 11 (0.8%, 截断) |
+
+**Tier 分布**: T0=78, T1=413, T2=319, T3=282, T4=199, error-recovery=158
 
 ## 📋 交付物
 
-- [x] SFT 训练脚本 (`training/sft/train.py`)
+- [x] SFT 训练脚本 (`src/training/sft/train.py`)
+- [x] Adapter 合并脚本 (`src/training/sft/merge_adapter.py`)
+- [x] 评估脚本 (`src/training/sft/evaluate.py`)
 - [ ] SFT 后模型 checkpoint
 - [ ] 基线评估报告 (T1 ≥ 95%, Format ≥ 98%)
 - [ ] 训练日志与曲线 (Wandb)
@@ -18,28 +33,29 @@
 ### Task 3.1: 训练脚本准备 (0.5 天) ✅
 
 - [x] **3.1.1** 实现 `training/sft/train.py`
-  - 加载 Qwen2.5-3B-Instruct (bfloat16)
-  - 配置 LoRA (r=16, alpha=32, target: q/k/v/o_proj)
-  - 配置 SFTTrainer
+  - 加载 Qwen3-4B (4bit, Unsloth)
+  - 配置 LoRA (r=16, alpha=16, target: q/k/v/o/gate/up/down_proj)
+  - 配置 SFTTrainer (loss masking: assistant turns only)
   ```python
   TrainingArguments(
-      output_dir="./models/nutrimind-3b-sft",
+      output_dir="./models/nutrimind-4b-sft",
       num_train_epochs=3,
-      per_device_train_batch_size=4,
-      gradient_accumulation_steps=4,
+      per_device_train_batch_size=1,
+      gradient_accumulation_steps=16,
       learning_rate=2e-5,
       warmup_ratio=0.1,
       logging_steps=10,
       save_strategy="epoch",
       bf16=True,
-      gradient_checkpointing=True,
+      optim="adamw_8bit",
   )
   ```
 
 - [x] **3.1.2** 实现数据加载
-  - 从 `training/sft/data/train.jsonl` 加载
-  - 转换为 chat format (与 Qwen2.5 tokenizer 适配)
-  - `max_seq_length=2048`, `packing=True`
+  - 从 `data/trajectories/sft_train_trajectory.jsonl` 加载
+  - 转换为 chat format (与 Qwen3 tokenizer 适配, `apply_chat_template(enable_thinking=True)`)
+  - `max_seq_length=8192`, `packing=False`, `group_by_length=True`
+  - Loss masking: `train_on_responses_only(instruction_part="<|im_start|>user\n", response_part="<|im_start|>assistant\n")`
 
 - [x] **3.1.3** 配置 Wandb 追踪
   - Project: `nutrimind-sft`
@@ -53,8 +69,9 @@
   - tmux session 保活
 
 - [ ] **3.2.2** 启动训练
-  - 预估: ~3000 样本 × 3 epoch × seq_len 2048
-  - RTX 4090 (24GB): 预估 2-4 小时
+  - 实测: 1,449 样本 × 3 epoch = 4,347 样本
+  - effective batch = 1 × 16 = 16 → ~272 steps total (~91 steps/epoch)
+  - RTX 4090 (24GB): 预估 15-18 GB VRAM
   - 监控: GPU 利用率 > 90%, 显存使用合理
 
 - [ ] **3.2.3** 中间检查
@@ -69,7 +86,7 @@
   from peft import PeftModel
   model = PeftModel.from_pretrained(base_model, adapter_path)
   merged_model = model.merge_and_unload()
-  merged_model.save_pretrained("models/nutrimind-3b-sft-merged")
+  merged_model.save_pretrained("models/nutrimind-4b-sft-merged")
   ```
   > 实现: `src/training/sft/merge_adapter.py`
 
@@ -92,7 +109,7 @@
   - **Tool Selection Accuracy**: 是否选了正确的工具
   - **T1 Accuracy**: 单步任务端到端正确率
   - **Answer Quality**: LLM-as-judge (Qwen-Max)
-  - 对比 base model (Qwen2.5-3B-Instruct) 作为参照
+  - 对比 base model (Qwen3-4B) 作为参照
   > 实现: `src/training/sft/evaluate.py`
 
 - [ ] **3.4.3** 输出评估报告

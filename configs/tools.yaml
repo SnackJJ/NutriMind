@@ -24,3 +24,15 @@ rag:
   # Contextualization
   context_model: "gemini-2.5-flash"
   context_cache_path: "data/knowledge/context_cache.json"
+
+food_search:
+  # Index paths
+  chroma_db_path: "data/usda_db"
+  bm25_index_path: "data/usda_bm25/index.pkl"
+  # Retrieval parameters
+  semantic_top_k: 30
+  bm25_top_k: 30
+  rerank_top_k: 15
+  final_top_k: 5
+  relevance_threshold: 0.35
+  rrf_k: 60

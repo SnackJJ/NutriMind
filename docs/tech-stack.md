@@ -10,9 +10,9 @@ Python 3.10+
 
 | Component | Technology | Purpose |
 |-----------|------------|---------|
-| **Base Model** | Qwen2.5-3B-Instruct | Fine-tuned as planner/router |
+| **Base Model** | Qwen3-4B | Fine-tuned as planner/router |
 | **Expert Model** | Qwen-Max (primary), GPT-4o (fallback) | Complex planning tasks |
-| **Serving** | vLLM | High-throughput 3B inference |
+| **Serving** | vLLM | High-throughput 4B inference |
 | **Food Database** | SQLite | USDA SR Legacy + Foundation Foods |
 | **Vector Store** | Chroma (dev) / Supabase pgvector (prod) | RAG knowledge retrieval |
 | **Embedding** | bge-small-en-v1.5 | Local embedding model |

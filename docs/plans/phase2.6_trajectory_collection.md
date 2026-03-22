@@ -12,6 +12,41 @@ The pipeline consists of three stages:
 
 ---
 
+## 0. Prerequisite: Fix `get_food_nutrition` Search Quality
+
+**Do not proceed to data collection until this step is complete.**
+
+### Root Cause
+
+Analysis of collected trajectories revealed that multi-turn `<think>` degradation in T2/T3 data is not primarily a collection-pipeline problem — it is a **tool retrieval quality problem**:
+
+- `get_food_nutrition` uses `LIKE`-based SQL substring matching with an OR/AND fallback
+- Generic food terms (`"cola"`, `"juice"`, `"bread"`) frequently match semantically incorrect USDA entries on the first attempt
+- This forces 3-4 retry rounds, during which the teacher model outputs template `<think>` blocks (`"I should call get_food_nutrition to get the required information."`) because it has no new information to reason about
+- Many queries that should be T1 (single-turn) become T2/T3 due to retrieval failures — **poisoned T3 data**
+
+Consequence: if we collect with the current tool, a large fraction of multi-turn trajectories teach the student model "repeated retrieval = repeated template think", which is the exact behavior we want to eliminate.
+
+### Tasks
+
+- [ ] **Task 0.1 — Alias table**: Create `data/food_aliases.json` mapping 100–200 common consumer terms to their USDA SR Legacy description. Priority: soft drinks, brand generics (coke, oj), ambiguous short-forms (egg, milk, bread, rice, oil).
+  - Format: `{"cola": "Beverages, carbonated, cola, regular", "oj": "Orange juice, raw", ...}`
+- [ ] **Task 0.2 — Confidence scoring**: Add `match_confidence: high | medium | low` to `_lookup_single` return. Rules:
+  - `high`: USDA description starts with query word OR description == alias target
+  - `medium`: all query words matched (AND path)
+  - `low`: fallback OR match triggered
+- [ ] **Task 0.3 — Dry-run contamination estimate**: Run the SFT candidate pool through a simulated lookup (no teacher model, just check how many food items get `low` confidence on first try) to quantify contamination rate before collecting.
+- [ ] **Task 0.4 — Confirm fix**: After alias + confidence changes, re-run dry-run. Target: `low` confidence rate on first attempt < 10% of food lookups.
+
+### Effect on Pipeline
+
+After this fix:
+- Most T1/T2 queries that previously required 3-4 retries will resolve in 1 call
+- Remaining true T3 queries (conditional branching) will have clean single-turn tool results → teacher model's intermediate `<think>` will contain genuine analysis
+- The `match_confidence: low` field gives the teacher model an explicit signal to analyze the mismatch, producing the correct retry reasoning pattern
+
+---
+
 ## 1. Pre-processing: Query Pool Split
 **Script**: `scripts/split_query_pool.py`
 
@@ -26,22 +61,79 @@ The pipeline consists of three stages:
 
 ## 2. Trajectory Collection
 
-### 2.1 Simulation Loop
+### 2.1 Pure Text Tool Calling Architecture
+
+> **Decision Reference**: [ADR-001: Pure Text Tool Calling](../decisions/001-pure-text-tool-calling.md)
+
+We use **pure text mode** instead of DashScope's function calling API:
+- **No `tools` parameter**: Do not pass tool definitions to the API
+- **No `tool_choice` parameter**: Let model output tools as plain text
+- **System prompt injection**: Embed tool definitions in system prompt
+- **Agent-side parsing**: Parser extracts `<tool_call>` tags and executes locally
+
+**Why?**
+1. Function calling API discards `<think>` content (critical for SFT)
+2. API returns structured format (`tool_calls` array) ≠ our SFT target format
+3. Student deployment has no function calling layer — format gap
+
+**Result**: Teacher output format == SFT training target == Student inference format. Zero conversion.
+
+### 2.2 Simulation Loop
+
 **Script**: `src/training/sft/collect_trajectories.py`
 
 **Mechanism**:
-1. Initialize Teacher Model (qwen-max via DashScope).
-2. For each query in SFT Candidate Pool:
-   - Send query to Teacher Model with the standard NutriMind system prompt (full English, `<think>` tags, JSON schema tool calling).
-   - Intercept tool calls locally, execute against local SQLite USDA database, return results.
-   - Loop until Teacher Model yields a final text answer.
+1. Initialize Teacher Model (qwen3.5-plus via DashScope) — **no `tools` parameter**.
+2. Build system prompt with embedded tool definitions from `configs/tools.yaml`.
+3. For each query in SFT Candidate Pool:
+   - Send query to Teacher Model with system prompt.
+   - **Parse response**: Use `ToolParser` to detect `<tool_call>` tags.
+   - **Execute tool**: If found, extract JSON, call tool function, wrap result as `<tool_response>`.
+   - **Append to context**: Add assistant message + user message (tool response).
+   - **Loop**: Continue generation until no `<tool_call>` in output (final answer).
    - Serialize entire conversation as a single trajectory.
+
+**Parser integration** (shared code with inference):
+```python
+from src.orchestrator.tool_parser import ToolParser
+
+parser = ToolParser()  # Same parser used in orchestrator
+
+async def collect_single_trajectory(query: str) -> dict:
+    messages = [
+        {"role": "system", "content": build_system_prompt()},
+        {"role": "user", "content": query}
+    ]
+
+    while True:
+        response = await call_teacher_model(messages)  # Pure text, no tools param
+        assistant_content = response.choices[0].message.content
+
+        # Parse for tool call
+        tool_call = parser.extract_tool_call(assistant_content)
+
+        if tool_call is None:
+            # No tool call = final answer
+            messages.append({"role": "assistant", "content": assistant_content})
+            break
+
+        # Execute tool
+        result = execute_tool(tool_call["name"], tool_call["arguments"])
+        tool_response = f'<tool_response>\n{json.dumps(result)}\n</tool_response>'
+
+        # Append both messages
+        messages.append({"role": "assistant", "content": assistant_content})
+        messages.append({"role": "user", "content": tool_response})
+
+    return {"messages": messages}
+```
 
 **Required implementation**:
 - **Input format**: Read from `.jsonl` (not `.json`).
 - **Async concurrency**: Use `asyncio.Semaphore` with a conservative limit (e.g., `semaphore=5`) to respect DashScope rate limits.
 - **Rate limit handling**: Implement exponential backoff retry (base=1s, max_retries=5) on 429/rate-limit responses.
 - **Resumability**: Before processing each query, check if its ID already exists in `real_trajectories.jsonl`. Skip if present.
+- **Parser reuse**: Import `ToolParser` from `src/orchestrator/tool_parser.py` — same code used during student inference.
 
 **Output**: `data/trajectories/real_trajectories.jsonl`
 
@@ -184,14 +276,16 @@ LLM-as-a-Judge evaluation (use a different model from the Teacher to avoid self-
 
 ## SFT Training Data Format Reference
 
+**Collection mode**: Pure text (no function-calling API). Teacher model outputs `<think>` and `<tool_call>` as plain text tokens. Tool results are appended as `role: "user"` with `<tool_response>` wrapper. This makes the collected format identical to student inference format — zero conversion gap.
+
 ```json
 {
   "messages": [
-    {"role": "system", "content": "You are NutriMind, a nutrition assistant..."},
+    {"role": "system", "content": "You are NutriMind..."},
     {"role": "user", "content": "How much protein is in 100g chicken breast?"},
-    {"role": "assistant", "content": "<think>User wants nutritional info...</think>\n{\"name\": \"get_food_nutrition\", ...}"},
-    {"role": "tool", "content": "{\"protein\": 31.0, ...}"},
-    {"role": "assistant", "content": "<think>Got the data...</think>\n100g of chicken breast contains approximately 31g of protein..."}
+    {"role": "assistant", "content": "<think>Simple food lookup (T1)...</think>\n<tool_call>\n{\"name\": \"get_food_nutrition\", \"arguments\": {\"foods\": [{\"food_name\": \"chicken breast\", \"amount_grams\": 100}]}}\n</tool_call>"},
+    {"role": "user", "content": "<tool_response>\n{\"status\": \"success\", \"data\": {\"breakdown\": [{\"match_confidence\": \"high\", ...}]}}\n</tool_response>"},
+    {"role": "assistant", "content": "<think>match_confidence is high. 100g chicken breast: 165 kcal, 31g protein.</think>\n100g of chicken breast contains approximately 31g of protein and 165 calories..."}
   ]
 }
 ```
@@ -202,13 +296,22 @@ All tiers share the same system prompt and message format. The tier label is met
 
 ## Execution Checklist
 
+### Step 0: Tool Quality Fix (PREREQUISITE)
+- [ ] Create `data/food_aliases.json` with 100–200 entries
+- [ ] Add `match_confidence` field to `_lookup_single` in `src/tools/get_food_nutrition.py`
+- [ ] Run dry-run contamination estimate; confirm `low` confidence rate < 10%
+
 ### Pre-processing
 - [ ] Run `split_query_pool.py` to produce SFT Candidate Pool and GRPO Prompt Pool.
 - [ ] Verify stratified tier distribution in both pools.
 
 ### Collection
+- [ ] Create `src/orchestrator/tool_parser.py` — shared parser for `<tool_call>` extraction + validation.
 - [ ] Create `src/tools/mock_user_state.py` with query-aware state generation.
 - [ ] Update `collect_trajectories.py`:
+  - Pure text mode (no `tools`/`tool_choice` params)
+  - System prompt with embedded tool definitions
+  - Import `ToolParser` from `src/orchestrator/tool_parser.py`
   - `.jsonl` input format
   - Async concurrency with semaphore
   - Exponential backoff retry

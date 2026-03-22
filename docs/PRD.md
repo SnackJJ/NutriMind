@@ -18,9 +18,9 @@
 
 ## 1. Vision
 
-NutriMind Agent explores **how to make a 3B model a reliable agentic problem-solver in a specific domain**. Through SFT + RL (GRPO) training, a lightweight Qwen2.5-3B learns to answer nutrition queries, invoke tools for precise computation and data retrieval, and chain multi-step tool calls to handle complex tasks. When the task involves complex medical nutrition management, the model declares a safety boundary and recommends professional consultation.
+NutriMind Agent explores **how to make a small model a reliable agentic problem-solver in a specific domain**. Through SFT + RL (GRPO) training, a lightweight Qwen3-4B learns to answer nutrition queries, invoke tools for precise computation and data retrieval, and chain multi-step tool calls to handle complex tasks. When the task involves complex medical nutrition management, the model declares a safety boundary and recommends professional consultation.
 
-**Core Research Question**: How far can RL push a 3B model's agentic capabilities in a domain-specific setting, and where is the boundary that necessitates a safety declaration?
+**Core Research Question**: How far can RL push a small model's agentic capabilities in a domain-specific setting, and where is the boundary that necessitates a safety declaration?
 
 
 ## 2. Core Architecture
@@ -35,9 +35,9 @@ NutriMind Agent explores **how to make a 3B model a reliable agentic problem-sol
               │                             │
               ▼                             ▼
 ┌───────────────┐              ┌───────────────┐
-│  3B Agentic   │              │  Local Tools  │
+│  4B Agentic   │              │  Local Tools  │
 │    Model      │              │  (Python)     │
-│ (Qwen2.5-3B) │              │               │
+│  (Qwen3-4B)  │              │               │
 └───────────────┘              └───────────────┘
                                         │
         ┌─────────┐┌─────────┐┌────────┐┌────────┐┌─────────┐┌────────┐┌──────────┐
@@ -50,7 +50,7 @@ NutriMind Agent explores **how to make a 3B model a reliable agentic problem-sol
 
 **Components:**
 - **Orchestrator**: Manages the agentic loop (observe → think → act → observe) → [specs/orchestrator.md](specs/orchestrator.md)
-- **3B Agentic Model**: SFT + GRPO fine-tuned Qwen2.5-3B-Instruct. Handles nutrition QA, tool selection, multi-step planning, and escalation decisions
+- **4B Agentic Model**: SFT + GRPO fine-tuned Qwen3-4B. Handles nutrition QA, tool selection, multi-step planning, and escalation decisions
 - **Local Tools**: Deterministic Python functions for data retrieval, calculation, and logging → [specs/tools.md](specs/tools.md)
 
 ## 3. Agentic Complexity Taxonomy
@@ -199,7 +199,7 @@ Weights are hyperparameters to be tuned. Initial: heavier weight on R_format and
 |-------|-------------|----------|
 | **Phase 1** | Orchestrator + 8 atomic tools | Foundation |
 | **Phase 2** | SFT data generation (T1-T4 distribution, quality filtering, **full English**) | Foundation |
-| **Phase 3** | SFT training on Qwen2.5-3B-Instruct | Foundation |
+| **Phase 3** | SFT training on Qwen3-4B | Foundation |
 | **Phase 4** | GRPO reward function design + RL training | **Core work** |
 | **Phase 5** | Ablation experiments (SFT vs SFT+RL, per-tier analysis) | **Core work** |
 | **Phase 6** | Offline evaluation + analysis of agentic capability boundary | **Core work** |

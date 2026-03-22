@@ -10,7 +10,7 @@
 
 - [ ] 完整消融实验结果矩阵
 - [ ] SFT vs SFT+GRPO 分层对比报告
-- [ ] 3B (SFT+GRPO) vs GPT-4o API 成本-性能对比
+- [ ] 4B (SFT+GRPO) vs GPT-4o API 成本-性能对比
 - [ ] 各奖励维度贡献分析
 - [ ] LaTeX/Markdown 格式化报告
 
@@ -22,7 +22,7 @@
 
 | 实验 ID | 模型配置 | 目的 |
 |---------|---------|------|
-| **A** | Qwen2.5-3B-Instruct (base, no fine-tune) | Zero-shot 基线 |
+| **A** | Qwen3-4B (base, no fine-tune) | Zero-shot 基线 |
 | **B** | SFT-only (Phase 3 模型) | SFT 基线 |
 | **C** | SFT + GRPO (Phase 4 模型) | 完整方案 |
 | **D** | GPT-4o (直接 API 调用, 同样的 tools) | 上限参照 |

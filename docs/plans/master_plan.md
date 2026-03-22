@@ -4,9 +4,9 @@
 
 ## 📋 项目概览
 
-**核心目标**: 探索通过 SFT + GRPO 训练，让 Qwen2.5-3B 成为营养领域可靠的 agentic problem-solver，建立 3B 模型在固定 6 工具集内的能力边界，通过安全声明兜底高风险场景。
+**核心目标**: 探索通过 SFT + GRPO 训练，让 Qwen3-4B 成为营养领域可靠的 agentic problem-solver，建立 4B 模型在固定 6 工具集内的能力边界，通过安全声明兜底高风险场景。
 
-**核心研究问题**: RL 能将 3B 模型的 agentic 能力推到多远？哪里是必须触发安全边界声明的临界点？
+**核心研究问题**: RL 能将 4B 模型的 agentic 能力推到多远？哪里是必须触发安全边界声明的临界点？
 
 ---
 
@@ -85,7 +85,7 @@ Phase 1 (基础设施)
 
 | 组件 | 技术选型 |
 |------|---------|
-| 基座模型 | Qwen2.5-3B-Instruct |
+| 基座模型 | Qwen3-4B |
 | 教师模型 (数据采集用) | Qwen-Max / Gemini 2.5 Flash (仅用于采集 SFT 轨迹) |
 | 推理服务 | vLLM (生产) / Transformers (开发) |
 | 食物数据库 | SQLite (USDA SR Legacy + Foundation Foods) |
@@ -136,7 +136,7 @@ NutriMind/
 | 3B 模型无法可靠生成 JSON 工具调用 | 高 | 中 | SFT 中加大 T1 格式训练比例；增加 format compliance 奖励权重 |
 | GRPO 训练不稳定 / reward hacking | 高 | 中 | 渐进式权重调整；多维度奖励分散风险；设置 hard constraint |
 | T3 条件分支能力难以学习 | 中 | 高 | 增加 T3 种子数据多样性；设计更细粒度的 conditional reward |
-| USDA 数据食物名模糊匹配准确率不足 | 中 | 中 | FTS 搜索 + alias 表 + 模型端处理歧义 |
+| USDA 数据食物名模糊匹配准确率不足 → think 退化 | 高 | 高 (已确认) | **Phase 2.6 Step 0 前置修复**: alias 表 (100-200条) + `match_confidence` 字段 + 干跑污染率估算 (目标 <10%)；tool 修好后再收集数据 |
 | GPU 显存不足 (3B + GRPO) | 中 | 低 | LoRA + gradient checkpointing + bfloat16 |
 | SFT 数据质量不一 (合成数据偏差) | 中 | 中 | 自动验证流程 + 10% 人工抽查 |
 
