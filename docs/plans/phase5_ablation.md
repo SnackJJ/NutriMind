@@ -1,155 +1,233 @@
-# Phase 5: 消融实验 (Ablation Experiments)
+# Phase 5: Ablation Experiments
 
-> 优先级: **Core Work** | 预估工时: 3-4 天 | 依赖: Phase 4
+> Priority: **Core Work** | Estimated: 3-4 days | Depends on: Phase 4
 
-## 🎯 目标
+## 🎯 Goal
 
-通过系统性消融实验，量化 RL 对 agentic 能力各层面的贡献，为 resume narrative 提供有力数据支撑。
+Systematically quantify the contribution of each training component (SFT → GRPO iterations → GiGPO), providing strong data support for resume narrative and technical blog.
 
-## 📋 交付物
+## 📋 Deliverables
 
-- [ ] 完整消融实验结果矩阵
-- [ ] SFT vs SFT+GRPO 分层对比报告
-- [ ] 4B (SFT+GRPO) vs GPT-4o API 成本-性能对比
-- [ ] 各奖励维度贡献分析
-- [ ] LaTeX/Markdown 格式化报告
+- [ ] Complete ablation result matrix (7 experiments × per-tier metrics)
+- [ ] SFT vs GRPO vs GiGPO layered comparison report
+- [ ] GRPO vs GiGPO head-to-head analysis (core finding)
+- [ ] 4B (SFT+GiGPO) vs GPT-4o cost-performance comparison
+- [ ] Reward iteration contribution analysis (v1 → v2 → v3)
+- [ ] Reward hacking case studies with resolution details
+- [ ] Formatted report (Markdown + charts)
 
-## 📝 详细任务
+---
 
-### Task 5.1: 实验设计 (0.5 天)
+## 📝 Detailed Tasks
 
-- [ ] **5.1.1** 定义消融实验矩阵
+### Task 5.1: Experiment Design (0.5 days)
 
-| 实验 ID | 模型配置 | 目的 |
-|---------|---------|------|
-| **A** | Qwen3-4B (base, no fine-tune) | Zero-shot 基线 |
-| **B** | SFT-only (Phase 3 模型) | SFT 基线 |
-| **C** | SFT + GRPO (Phase 4 模型) | 完整方案 |
-| **D** | GPT-4o (直接 API 调用, 同样的 tools) | 上限参照 |
-| **E** | SFT + GRPO (仅 R_format + R_tool) | 最小 reward 消融 |
-| **F** | SFT + GRPO (无 R_conditional) | 条件 reward 消融 |
+#### 5.1.1 Ablation Matrix
 
-- [ ] **5.1.2** 设计统一评估测试集
-  - **T1 测试集**: 100 条 (不在训练集中)
-  - **T2 测试集**: 80 条 (不在训练集中)
-  - **T3 测试集**: 60 条 (不在训练集中)
-  - **T4 测试集**: 40 条（Type B 触发安全声明）+ 40 条 T1-T3（Type A 不应触发声明）
-  - **Pure QA**: 20 条
-  - **错误处理**: 20 条
-  - 总计: 320 条
+| Exp | Model Config | Algorithm | Reward | Purpose | Priority |
+|-----|-------------|-----------|--------|---------|----------|
+| **A** | Qwen3-4B (base, no fine-tune) | — | — | Zero-shot baseline | Required |
+| **B** | SFT-only (Phase 3) | — | — | SFT baseline | Required |
+| **C** | SFT → GRPO-v1 | GRPO | v1 (3-dim rules) | Minimal RL | Required |
+| **D** | SFT → GRPO-v2 | GRPO | v2 (+efficiency, +conditional) | Full GRPO | **Core** |
+| **F** | SFT → GiGPO | GiGPO | v2 | **Direct SFT→GiGPO (fair comparison with D)** | **Core** |
+| **G** | GPT-4o (API, same tools) | — | — | Upper bound reference | Required |
+| **E** | GRPO-v2 → GRPO-v3 | GRPO | v3 (+LLM-Judge) | Open-ended quality | Optional |
 
-- [ ] **5.1.3** 定义评估指标
-  - Per-tier success rate
-  - Format validity rate
-  - Average tool count per task (效率)
-  - Redundant tool call rate
-  - Error recovery rate
-  - **T4 安全声明 precision / recall**（是否正确识别高危场景并输出免责声明）
-  - Answer quality (LLM-judge)
-  - End-to-end latency
+**Key comparisons**:
+- B vs D: SFT vs SFT+GRPO (RL contribution)
+- **D vs F: GRPO vs GiGPO (credit assignment contribution) ← core finding** (same base, same reward, same steps — only difference is advantage estimation)
+- C → D: Reward iteration progression (v1 → v2)
+- F vs G: 4B+GiGPO vs GPT-4o (cost-performance)
+- E: Optional — LLM-Judge exploration, run only if time permits
 
-### Task 5.2: 评估基础设施 (0.5 天)
+#### 5.1.2 Unified Evaluation Test Set (held out from all training)
 
-- [ ] **5.2.1** 实现统一评估框架 `training/evaluate.py`
-  ```python
-  def evaluate_model(model_config, test_set, tools_env) -> EvalReport:
-      """Run full agentic evaluation for one model configuration."""
-      results = []
-      for sample in test_set:
-          trajectory = run_agentic_loop(model_config, sample["query"], tools_env)
-          metrics = compute_metrics(trajectory, sample["metadata"])
-          results.append(metrics)
-      return aggregate_results(results)
-  ```
+| Tier | Count | Description |
+|------|-------|-------------|
+| T1 | 100 | Single-step tool calls |
+| T2 | 80 | Multi-step chains |
+| T3 | 60 | Conditional branching |
+| T4-positive | 40 | Should trigger safety declaration |
+| T4-negative | 40 | Should NOT trigger safety (false positive test) |
+| Pure QA | 20 | No tool needed |
+| Error recovery | 20 | Injected tool failures |
+| **Total** | **360** | |
 
-- [ ] **5.2.2** 实现 GPT-4o 对比评估
-  - 用同样的 system prompt + tool schemas 调用 GPT-4o
-  - 记录: 准确率、工具使用模式、延迟、成本
+#### 5.1.3 Evaluation Metrics
 
-- [ ] **5.2.3** 实现结果自动生成
-  - JSON 结构化输出
-  - Markdown 报告模板
-  - 对比表格自动生成
+**Per-tier metrics**:
+- Task success rate (primary)
+- Format validity rate
+- Average tool calls per task
+- Redundant tool call rate
 
-### Task 5.3: 核心消融 — SFT vs SFT+GRPO (1 天)
+**Safety metrics**:
+- T4 precision (correctly identified high-risk)
+- T4 recall (didn't miss high-risk)
+- False positive rate (over-escalation)
 
-- [ ] **5.3.1** 运行实验 A (Base model)
-- [ ] **5.3.2** 运行实验 B (SFT-only)
-- [ ] **5.3.3** 运行实验 C (SFT+GRPO)
-- [ ] **5.3.4** 生成核心对比表
+**Quality metrics**:
+- Answer factual accuracy (rule-based)
+- Answer quality (LLM-judge, for recommendation tasks)
+- Hallucination rate (claims vs tool evidence)
 
-  ```
-  ┌─────────────────────────────────────────────────────────┐
-  │          SFT vs SFT+GRPO — Per-Tier Comparison          │
-  ├──────────┬────────┬──────────┬───────────┬──────────────┤
-  │ Metric   │  Base  │ SFT-only │ SFT+GRPO │  Δ (RL)     │
-  ├──────────┼────────┼──────────┼───────────┼──────────────┤
-  │ T1 Acc   │        │          │           │              │
-  │ T2 Succ  │        │          │           │              │
-  │ T3 Corr  │        │          │           │              │
-  │ T4 Safety│        │          │           │              │
-  │ Format   │        │          │           │              │
-  │ Redund.  │        │          │           │              │
-  │ Recovery │        │          │           │              │
-  │ QA Qual  │        │          │           │              │
-  └──────────┴────────┴──────────┴───────────┴──────────────┘
-  ```
+**Efficiency metrics**:
+- End-to-end latency
+- Cost per request (for GPT-4o comparison)
 
-- [ ] **5.3.5** 分层深入分析
-  - T2 失败案例分析: 哪些工具链模式 RL 改进了？
-  - T3 失败案例分析: 哪类条件分支更难学？
-  - 错误恢复分析: RL 是否改善了重试行为？
+---
 
-### Task 5.4: 成本-性能消融 — 3B vs GPT-4o (0.5 天)
+### Task 5.2: Evaluation Infrastructure (0.5 days)
 
-- [ ] **5.4.1** 运行实验 D (GPT-4o)
-- [ ] **5.4.2** 生成成本-性能对比
+- [ ] **5.2.1** Implement `training/evaluate.py` — unified eval runner
+- [ ] **5.2.2** Implement GPT-4o comparison (same system prompt + tool schemas)
+- [ ] **5.2.3** Implement result table auto-generation
 
-  ```
-  ┌────────────────────────────────────────────────────────┐
-  │         3B (SFT+GRPO) vs GPT-4o — Cost-Performance     │
-  ├──────────┬───────────────┬──────────┬──────────────────┤
-  │ Metric   │ 3B (SFT+GRPO) │  GPT-4o  │  Ratio          │
-  ├──────────┼───────────────┼──────────┼──────────────────┤
-  │ T1 Acc   │               │          │                  │
-  │ T2 Succ  │               │          │                  │
-  │ T3 Corr  │               │          │                  │
-  │ Latency  │               │          │                  │
-  │ Cost/req │               │          │                  │
-  │ $/1K req │               │          │                  │
-  └──────────┴───────────────┴──────────┴──────────────────┘
-  ```
+---
 
-### Task 5.5: Reward 维度消融 (1 天)
+### Task 5.3: Core Ablation — Training Progression (1 day)
 
-- [ ] **5.5.1** 训练实验 E (仅 R_format + R_tool_selection)
-  - 设置 w3=w4=w5=w6=0
-  - 快速训练 (可用更少步数)
+Run all model checkpoints on the 360-prompt test set.
 
-- [ ] **5.5.2** 训练实验 F (移除 R_conditional)
-  - 设置 w4=0, 其余不变
-  - 观察 T3 条件分支是否仍有改善
+- [ ] **5.3.1** Run Exp A (base model)
+- [ ] **5.3.2** Run Exp B (SFT-only)
+- [ ] **5.3.3** Run Exp C (GRPO-v1)
+- [ ] **5.3.4** Run Exp D (GRPO-v2)
+- [ ] **5.3.5** Run Exp E (GiGPO)
+- [ ] **5.3.6** Generate progression table:
 
-- [ ] **5.5.3** 生成 Reward 维度贡献分析
-  - 各维度对最终性能的边际贡献
-  - 哪些维度是必需的，哪些是锦上添花
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│            Training Progression — Per-Tier Success Rate               │
+├──────────┬──────┬──────┬─────────┬─────────┬────────┬───────────────┤
+│ Metric   │ Base │ SFT  │ GRPO-v1 │ GRPO-v2 │ GiGPO  │ Δ(GiGPO-SFT) │
+├──────────┼──────┼──────┼─────────┼─────────┼────────┼───────────────┤
+│ T1 Acc   │      │      │         │         │        │               │
+│ T2 Succ  │      │      │         │         │        │               │
+│ T3 Corr  │      │      │         │         │        │               │
+│ T4 Prec  │      │      │         │         │        │               │
+│ T4 Recall│      │      │         │         │        │               │
+│ Format   │      │      │         │         │        │               │
+│ Redund.  │      │      │         │         │        │               │
+│ Recovery │      │      │         │         │        │               │
+└──────────┴──────┴──────┴─────────┴─────────┴────────┴───────────────┘
+```
 
-### Task 5.6: 报告撰写 (0.5 天)
+- [ ] **5.3.7** Deep analysis per tier:
+  - T2 failure analysis: Which tool chain patterns did RL improve? Which remain hard?
+  - T3 failure analysis: Which conditional branches are hardest to learn?
+  - Error recovery analysis: Does RL improve retry behavior?
 
-- [ ] **5.6.1** 整合所有实验数据
-- [ ] **5.6.2** 输出结构化报告
-  - **核心发现**: RL 对每个 Tier 的量化提升
-  - **Insight 1**: T2-T3 提升的关键因素
-  - **Insight 2**: 3B 模型的能力天花板在哪里
-  - **Insight 3**: 成本-性能最优点分析
-  - **Insight 4**: Reward 设计的权衡
+---
 
-## ✅ Phase 5 完成标准
+### Task 5.4: GRPO vs GiGPO Head-to-Head (0.5 days) — Core Finding
 
-| 检查项 | 标准 |
-|--------|------|
-| 消融矩阵 | 所有 6 个实验完成 |
-| SFT vs SFT+GRPO | T2-T3 有统计显著提升 |
-| GPT-4o 对比 | 成本-性能数据齐全 |
-| Reward 消融 | 各维度贡献量化 |
-| 报告 | 结构化 + 数据可视化 |
+This is the **most important comparison** for the project narrative.
+
+#### 5.4.1 Primary Comparison: SFT → GRPO vs SFT → GiGPO (Strict Control)
+
+**Design rationale**: To fairly compare GRPO vs GiGPO, both must start from the **same checkpoint** and train for the **same number of steps**. The only variable is the advantage estimation method.
+
+- [ ] **5.4.1a** Train: SFT → GRPO (N steps, reward v2)
+- [ ] **5.4.1b** Train: SFT → GiGPO (N steps, reward v2)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│   GRPO vs GiGPO — Strictly Controlled Comparison                   │
+├──────────┬────────────────┬────────────────┬─────────────────────┤
+│ Metric   │ SFT→GRPO (N)   │ SFT→GiGPO (N)  │ Δ                   │
+├──────────┼────────────────┼────────────────┼─────────────────────┤
+│ T1 Acc   │                │                │ (expect ~same)       │
+│ T2 Succ  │                │                │ (expect GiGPO > GRPO)│
+│ T3 Corr  │                │                │ (expect GiGPO >> GRPO)│
+│ Avg Steps│                │                │                      │
+│ Tool Div │                │                │                      │
+└──────────┴────────────────┴────────────────┴─────────────────────┘
+```
+
+**Control variables**:
+- Same base model: SFT checkpoint
+- Same reward function: v2
+- Same training steps: N
+- Same hyperparameters (lr, kl_coef, etc.)
+- **Only difference**: advantage estimation (trajectory-level vs step-level)
+
+#### 5.4.2 Secondary Comparison: Progressive Training Value
+
+- [ ] **5.4.2a** Compare SFT→GiGPO vs SFT→GRPO→GiGPO
+  - Does iterative GRPO→GiGPO outperform direct GiGPO?
+  - If yes: validates the progressive training strategy
+  - If no: direct GiGPO is simpler and preferred
+
+#### 5.4.3 Qualitative Analysis
+
+- [ ] **5.4.3a** Pick 10 T3 examples where GiGPO succeeds but GRPO fails
+  - What did GiGPO learn about the branching step?
+  - How does the step-level advantage differ at the decision point?
+  - Visualize anchor state grouping for selected examples
+
+---
+
+### Task 5.5: Cost-Performance — 4B vs GPT-4o (0.5 days)
+
+- [ ] **5.5.1** Run Exp G (GPT-4o)
+- [ ] **5.5.2** Generate cost-performance table:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│         4B (SFT+GiGPO) vs GPT-4o — Cost-Performance      │
+├──────────┬───────────────┬──────────┬────────────────────┤
+│ Metric   │ 4B+GiGPO      │  GPT-4o  │  4B/GPT-4o Ratio   │
+├──────────┼───────────────┼──────────┼────────────────────┤
+│ T1 Acc   │               │          │                     │
+│ T2 Succ  │               │          │                     │
+│ T3 Corr  │               │          │                     │
+│ Latency  │               │          │                     │
+│ Cost/req │               │          │                     │
+│ $/1K req │               │          │                     │
+└──────────┴───────────────┴──────────┴────────────────────┘
+```
+
+---
+
+### Task 5.6: Reward Iteration Analysis (0.5 days)
+
+- [ ] **5.6.1** Per-reward-version analysis: What did each iteration add?
+
+```
+v1 → v2: Expected improvement in T2/T3, reduction in redundant calls
+v2 → v3: Expected improvement in recommendation answer quality
+```
+
+- [ ] **5.6.2** Reward hacking case studies
+  - Document at least 1 concrete hacking instance discovered during training
+  - Show: what happened → how it was detected → what was fixed → result after fix
+  - This is the **most interview-compelling** content
+
+- [ ] **5.6.3** Reward dimension contribution: If v1 (3-dim) gets 80% of v2's performance, are the extra dimensions worth the complexity?
+
+---
+
+### Task 5.7: Report (0.5 days)
+
+- [ ] **5.7.1** Compile all results into structured report
+- [ ] **5.7.2** Key findings:
+  - **Finding 1**: RL (GRPO) improves T2/T3 by X% over SFT-only
+  - **Finding 2**: GiGPO improves T2/T3 by Y% over GRPO through step-level credit assignment
+  - **Finding 3**: Iterative reward design catches reward hacking that one-shot design would miss
+  - **Finding 4**: 4B+GiGPO achieves Z% of GPT-4o's capability at 1/N the cost
+  - **Finding 5**: [Whatever unexpected thing you discover]
+
+---
+
+## ✅ Phase 5 Completion Criteria
+
+| Checkpoint | Criteria |
+|------------|---------|
+| Ablation matrix | All 7 experiments completed |
+| GRPO vs GiGPO | Head-to-head comparison with controlled variables |
+| Training progression | Clear monotonic improvement from SFT → v1 → v2 → GiGPO |
+| GPT-4o comparison | Cost-performance data complete |
+| Reward hacking | At least 1 documented case study |
+| Report | Structured, data-backed, with visualizations |

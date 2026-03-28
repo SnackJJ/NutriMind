@@ -39,8 +39,8 @@ NutriMind is an intelligent nutrition assistant that helps users:
 | `get_food_nutrition` | Look up nutritional info for foods |
 | `log_meal` | Record meals with portions |
 | `get_today_summary` | View daily intake summary |
-| `get_history` | Query historical meal data |
-| `get_goal_adherence` | Check progress toward goals |
+| `get_history` | Query historical meal data (with optional goal adherence analysis) |
+| `set_goal` | Set or update nutrition targets (calories, protein, fat, carbs) |
 | `retrieve_knowledge` | Search nutrition knowledge base |
 
 ## Project Structure

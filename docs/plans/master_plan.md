@@ -4,9 +4,12 @@
 
 ## 📋 项目概览
 
-**核心目标**: 探索通过 SFT + GRPO 训练，让 Qwen3-4B 成为营养领域可靠的 agentic problem-solver，建立 4B 模型在固定 6 工具集内的能力边界，通过安全声明兜底高风险场景。
+**核心目标**: 探索通过 SFT + iterative GRPO + GiGPO 训练，让 Qwen3-4B 成为营养领域可靠的 agentic problem-solver，验证步骤级 credit assignment (GiGPO) 对 multi-turn tool-calling agent 的有效性。
 
-**核心研究问题**: RL 能将 4B 模型的 agentic 能力推到多远？哪里是必须触发安全边界声明的临界点？
+**核心研究问题**:
+1. RL 能将 4B 模型的 agentic 能力推到多远？
+2. GiGPO 的步骤级 advantage 相比 GRPO 在多步任务上能带来多大提升？
+3. 迭代式 reward 设计（v1→v2→v3）比一步到位的复杂 reward 效果更好吗？
 
 ---
 
@@ -14,11 +17,11 @@
 
 | 阶段 | 名称 | 优先级 | 预估工时 | 依赖 | 关键交付物 |
 |------|------|--------|---------|------|-----------|
-| **Phase 1** | 基础设施搭建 (Orchestrator + 8 原子工具) | Foundation | 5-7 天 | 无 | 可运行的 agentic loop + 8 个原子工具实现 |
+| **Phase 1** | 基础设施搭建 (Orchestrator + 5 工具) | Foundation | 5-7 天 | 无 | 可运行的 agentic loop + 5 个工具实现 |
 | **Phase 2** | SFT 种子与初步轨迹收集 (T1-T4) | Foundation | 4-5 天 | Phase 1 | ~1,500 条 SFT + 3,000 GRPO Prompts |
 | **Phase 3** | SFT 训练 | Foundation | 2-3 天 | Phase 2 | SFT 基线模型 (T1 ≥ 95%, Format ≥ 98%) |
-| **Phase 4** | GRPO 奖励函数设计 + RL 训练 | **Core** | 5-7 天 | Phase 3 | GRPO 优化模型 (T2 ≥ 80%, T3 ≥ 75%) |
-| **Phase 5** | 消融实验 (SFT vs SFT+RL, 分层分析) | **Core** | 3-4 天 | Phase 4 | 消融对比报告 |
+| **Phase 4** | Iterative GRPO + GiGPO RL Training | **Core** | 2-3 weeks | Phase 3 | GRPO-v1/v2/v3 + GiGPO models, reward hacking case studies |
+| **Phase 5** | Ablation Experiments (SFT vs GRPO vs GiGPO) | **Core** | 3-4 天 | Phase 4 | 6 核心实验 ablation report, GRPO vs GiGPO head-to-head |
 | **Phase 6** | 离线评估 + Agentic 能力边界分析 | **Core** | 3-4 天 | Phase 5 | 完整评估报告 + 边界分析 |
 | **Phase 7** | 部署 (vLLM serving) + 监控 | Wrap-up | 2-3 天 | Phase 6 | 可部署的完整系统 |
 
@@ -91,7 +94,8 @@ Phase 1 (基础设施)
 | 食物数据库 | SQLite (USDA SR Legacy + Foundation Foods) |
 | 向量存储 | Chroma |
 | Embedding | bge-small-en-v1.5 |
-| 训练框架 | transformers + trl (SFT + GRPO) |
+| 训练框架 | Unsloth (SFT) + veRL (GRPO/GiGPO) |
+| RL Rollout | vLLM (via veRL, multi-turn environment-in-the-loop) |
 | LoRA | peft |
 | 运行时 | Python 3.10+ |
 
@@ -133,12 +137,13 @@ NutriMind/
 
 | 风险 | 严重性 | 可能性 | 应对策略 |
 |------|--------|--------|---------|
-| 3B 模型无法可靠生成 JSON 工具调用 | 高 | 中 | SFT 中加大 T1 格式训练比例；增加 format compliance 奖励权重 |
+| 4B 模型无法可靠生成 JSON 工具调用 | 高 | 低 | SFT 中加大 T1 格式训练比例；增加 format compliance 奖励权重 |
 | GRPO 训练不稳定 / reward hacking | 高 | 中 | 渐进式权重调整；多维度奖励分散风险；设置 hard constraint |
 | T3 条件分支能力难以学习 | 中 | 高 | 增加 T3 种子数据多样性；设计更细粒度的 conditional reward |
 | USDA 数据食物名模糊匹配准确率不足 → think 退化 | 高 | 高 (已确认) | **Phase 2.6 Step 0 前置修复**: alias 表 (100-200条) + `match_confidence` 字段 + 干跑污染率估算 (目标 <10%)；tool 修好后再收集数据 |
-| GPU 显存不足 (3B + GRPO) | 中 | 低 | LoRA + gradient checkpointing + bfloat16 |
+| GPU 显存不足 (4B + GRPO) | 中 | 低 | LoRA + gradient checkpointing + bfloat16 |
 | SFT 数据质量不一 (合成数据偏差) | 中 | 中 | 自动验证流程 + 10% 人工抽查 |
+| verl-agent 的 GiGPO 实现不成熟或 API 不兼容 | 高 | 中 | **Fallback**: 1) 自行实现 step-level advantage 计算模块；2) 若完全不可用，改为只做 GRPO 多轮 + 手工分析 step-level pattern |
 
 ---
 
@@ -162,10 +167,10 @@ NutriMind/
 
 | 里程碑 | 检查条件 | 预期完成 |
 |--------|---------|---------|
-| **M1: 基础设施就绪** | Orchestrator 可运行 agentic loop；8 个原子工具均有单元测试通过 | Phase 1 结束 |
+| **M1: 基础设施就绪** | Orchestrator 可运行 agentic loop；5 个工具均有单元测试通过 | Phase 1 结束 |
 | **M2: 数据就绪** | ~1500 条 SFT + 3000 条 GRPO Prompts 生成完成，格式验证通过率 > 95% | Phase 2 结束 |
 | **M3: SFT 基线达标** | T1 ≥ 95%, Format ≥ 98%，无严重退化 | Phase 3 结束 |
-| **M4: RL 增益验证** | T2 ≥ 80%, T3 ≥ 75%，相比 SFT-only 有可量化提升 | Phase 4 结束 |
-| **M5: 消融完成** | SFT vs SFT+GRPO 对比数据齐全，分层分析完成 | Phase 5 结束 |
+| **M4: RL 增益验证** | GRPO-v2: T2 ≥ 80%, T3 ≥ 75%；GiGPO vs GRPO 有可量化差异 | Phase 4 结束 |
+| **M5: 消融完成** | 6 核心实验完成 (A-D, F, G)，GRPO vs GiGPO head-to-head 分析，reward hacking 案例文档；Exp E (v3) optional | Phase 5 结束 |
 | **M6: 评估报告完成** | 所有 PRD Section 6 指标评估完成，边界分析文档产出 | Phase 6 结束 |
 | **M7: 系统可部署** | vLLM 服务启动，端到端 demo 可运行 | Phase 7 结束 |
