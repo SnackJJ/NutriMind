@@ -278,7 +278,21 @@ Returns `breakdown[0]` with full nutrient details for that one food.
     "protein_g": "number",
     "fat_g": "number",
     "carbs_g": "number",
-    "meals_logged": ["array of meal summaries"]
+    "fiber_g": "number",
+    "meal_count": "number",
+    "food_summary": "string — comma-separated list of all foods eaten today",
+    "meals_logged": [
+      {
+        "meal_id": "string",
+        "meal_type": "string — breakfast | lunch | dinner | snack",
+        "logged_at": "string — ISO-8601 timestamp",
+        "food_names": "string — comma-separated list of foods in this meal",
+        "calories_kcal": "number",
+        "protein_g": "number",
+        "fat_g": "number",
+        "carbs_g": "number"
+      }
+    ]
   },
   "error_cases": ["no_profile_found"]
 }
@@ -382,6 +396,57 @@ Returns `breakdown[0]` with full nutrient details for that one food.
 
 ---
 
+### Tool 6: `set_goal`
+
+| Attribute | Value |
+|-----------|-------|
+| **Description** | Set or update a specific nutrition target for the user |
+| **When to use** | User wants to define or change daily calorie/macro goals, or specify weight management direction (lose/maintain/gain) |
+| **When NOT to use** | User asks about goal progress (use `get_history(compare_to_goal=True)`) |
+| **Latency / Cost** | < 50ms / Free |
+
+```json
+{
+  "name": "set_goal",
+  "parameters": {
+    "metric": {
+      "type": "string",
+      "enum": ["calories", "protein", "fat", "carbs"],
+      "required": true,
+      "description": "Which nutrition metric to set a target for"
+    },
+    "target_value": {
+      "type": "number",
+      "required": true,
+      "description": "Daily target value (kcal for calories, grams for macros). Calories: 1000-5000 kcal; macros: > 0g"
+    },
+    "goal_type": {
+      "type": "string",
+      "enum": ["lose", "maintain", "gain"],
+      "required": false,
+      "description": "Overall weight management direction. Persisted to user profile when provided."
+    }
+  },
+  "returns": {
+    "status": "success",
+    "data": {
+      "metric": "string — the metric that was updated",
+      "previous_value": "number | null — old target value (null if first time)",
+      "new_value": "number — the newly set target",
+      "goal_type": "string — current goal direction (lose/maintain/gain)"
+    }
+  },
+  "error_cases": ["invalid_metric", "value_out_of_range", "invalid_goal_type"]
+}
+```
+
+**Validation rules**:
+- `calories`: must be between 1000-5000 kcal
+- `protein/fat/carbs`: must be > 0g
+- `goal_type`: must be one of `lose`, `maintain`, `gain` (optional)
+
+---
+
 ## T4: Safety Boundary Declaration (No Tool)
 
 **T4 is NOT a tool call.** When a user's query involves complex medical nutrition
@@ -438,6 +503,7 @@ simplest judgment and only progressing deeper when needed:
 │   • TODAY's intake / remaining budget?   → get_today_summary        │
 │   • Past N DAYS' trends / averages?      → get_history              │
 │   • Goal progress / adherence rate?      → get_history(compare_to_goal=true) │
+│   • User wants to SET/CHANGE a goal?     → set_goal                 │
 │   • Evidence-based dietary guidelines?   → retrieve_knowledge       │
 │                                                                     │
 │   If a single tool suffices → call it and answer (T1)               │
@@ -449,6 +515,7 @@ simplest judgment and only progressing deeper when needed:
 │   • get_food_nutrition → log_meal       (compute then persist)      │
 │   • get_food_nutrition → log_meal → get_today_summary (full track)  │
 │   • get_food_nutrition → retrieve_knowledge (lookup + contextualize)│
+│   • set_goal → get_today_summary        (set target then show status)│
 │                                                                     │
 │   Plan the minimal tool sequence, execute step-by-step.             │
 │   If the next step depends on a result → proceed to Stage 3         │
@@ -458,8 +525,9 @@ simplest judgment and only progressing deeper when needed:
 │   Execute first tool → inspect result → decide next action (T3):    │
 │   • get_today_summary → over budget? → retrieve_knowledge           │
 │   • get_history(compare_to_goal=true) → low adherence? → retrieve_knowledge │
+│   • get_history(compare_to_goal=true) → consistently over? → set_goal (lower target) │
 │   • get_history → declining trend? → retrieve_knowledge             │
-│   • get_food_nutrition → not found / low_confidence? → retry with USDA-style name → ask user to clarify |
+│   • get_food_nutrition → not found / low_confidence? → retry with USDA-style name → ask user to clarify │
 │                                                                     │
 │   Branch based on intermediate data, not pre-planned.               │
 └─────────────────────────────────────────────────────────────────────┘
@@ -475,9 +543,9 @@ Use the **minimum number of tools** needed to produce a complete, accurate answe
 
 | Tier | Tool Pattern | Example |
 |------|-------------|---------|
-| **T1** | Single tool call | `get_food_nutrition` → answer; `get_history` → answer |
-| **T2** | Multi-step tool chain (2-3 tools) | `get_food_nutrition` → `log_meal` → `get_today_summary` → answer |
-| **T3** | Multi-step with conditional branching | `get_history(compare_to_goal=true)` → *branch*: if low adherence → `retrieve_knowledge` → answer |
+| **T1** | Single tool call | `get_food_nutrition` → answer; `set_goal` → answer |
+| **T2** | Multi-step tool chain (2-3 tools) | `set_goal` → `get_today_summary` → answer; `get_food_nutrition` → `log_meal` → answer |
+| **T3** | Multi-step with conditional branching | `get_history(compare_to_goal=true)` → *branch*: if consistently over → `set_goal` → answer |
 | **T4** | Safety boundary declaration (no tool) | `<think>` → direct disclaimer → recommend professional |
 
 ---

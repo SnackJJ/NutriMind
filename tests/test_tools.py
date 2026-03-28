@@ -96,7 +96,8 @@ SELECT
     ROUND(SUM(mli.protein_g),     1) AS total_protein_g,
     ROUND(SUM(mli.fat_g),         1) AS total_fat_g,
     ROUND(SUM(mli.carbs_g),       1) AS total_carbs_g,
-    ROUND(SUM(mli.fiber_g),       1) AS total_fiber_g
+    ROUND(SUM(mli.fiber_g),       1) AS total_fiber_g,
+    GROUP_CONCAT(COALESCE(mli.food_name, ''), ', ') AS food_summary
 FROM meal_logs ml
 JOIN meal_log_items mli ON ml.log_id = mli.log_id
 GROUP BY ml.user_id, DATE(ml.logged_at);
@@ -164,7 +165,6 @@ def patch_connections(db_path):
         "src.tools.get_today_summary.get_connection",
         "src.tools.get_history.get_connection",
         "src.tools.set_goal.get_connection",
-        "src.tools.get_goal_adherence.get_connection",
     ]
     with ExitStack() as stack:
         for t in targets:
@@ -434,53 +434,3 @@ class TestSetGoal:
         row = conn.execute("SELECT goal FROM user_profiles WHERE user_id='default'").fetchone()
         conn.close()
         assert row["goal"] == "lose"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# get_goal_adherence
-# ─────────────────────────────────────────────────────────────────────────────
-
-from src.tools.get_goal_adherence import get_goal_adherence
-
-
-class TestGetGoalAdherence:
-    def test_invalid_metric_returns_error(self, user_db):
-        with patch_connections(user_db):
-            result = get_goal_adherence(metric="sodium")
-        assert result["status"] == "error"
-        assert result["error_type"] == "invalid_metric"
-
-    def test_invalid_days_returns_error(self, user_db):
-        with patch_connections(user_db):
-            result = get_goal_adherence(days=0)
-        assert result["status"] == "error"
-        assert result["error_type"] == "invalid_date_range"
-
-    def test_no_meals_returns_error(self, user_db):
-        with patch_connections(user_db):
-            result = get_goal_adherence(days=7)
-        assert result["status"] == "error"
-        assert result["error_type"] == "no_data_in_range"
-
-    def test_with_meals_all_metrics(self, user_db):
-        with patch_connections(user_db), patch_food_retriever():
-            log_meal("lunch", [{"food_name": "chicken breast", "amount_grams": 200.0}])
-            result = get_goal_adherence(days=7, metric="all")
-        assert result["status"] == "success"
-        data = result["data"]
-        assert "metrics" in data
-        for m in ("calories", "protein", "fat", "carbs"):
-            assert m in data["metrics"]
-            assert "target_value" in data["metrics"][m]
-            assert "adherence_pct" in data["metrics"][m]
-
-    def test_with_meals_single_metric(self, user_db):
-        with patch_connections(user_db), patch_food_retriever():
-            log_meal("dinner", [{"food_name": "egg", "amount_grams": 100.0}])
-            result = get_goal_adherence(days=7, metric="calories")
-        assert result["status"] == "success"
-        data = result["data"]
-        assert data["metric"] == "calories"
-        assert "target_value" in data
-        assert "daily_average" in data
-        assert "adherence_pct" in data

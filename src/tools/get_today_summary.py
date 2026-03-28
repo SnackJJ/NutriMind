@@ -13,7 +13,9 @@ def get_today_summary() -> dict:
 
     Returns:
         {status, data: {date, total_calories, calorie_budget, remaining_calories,
-                        protein_g, fat_g, carbs_g, fiber_g, meal_count, meals_logged}}
+                        protein_g, fat_g, carbs_g, fiber_g, meal_count, food_summary,
+                        meals_logged: [{meal_id, meal_type, logged_at, food_names,
+                                        calories_kcal, protein_g, fat_g, carbs_g}]}}
     """
     conn = get_connection()
     if not conn:
@@ -25,7 +27,7 @@ def get_today_summary() -> dict:
         # Daily totals from the summary view
         row = conn.execute(
             """SELECT total_calories, total_protein_g, total_fat_g,
-                      total_carbs_g, total_fiber_g, meal_count
+                      total_carbs_g, total_fiber_g, meal_count, food_summary
                FROM daily_summary
                WHERE user_id = ? AND log_date = ?""",
             (USER_ID, today),
@@ -59,6 +61,7 @@ def get_today_summary() -> dict:
                     "carbs_g":    0.0,
                     "fiber_g":    0.0,
                     "meal_count": 0,
+                    "food_summary": "",
                     "meals_logged": [],
                 },
             }
@@ -71,7 +74,8 @@ def get_today_summary() -> dict:
                       ROUND(SUM(mli.calories_kcal), 1) AS kcal,
                       ROUND(SUM(mli.protein_g), 1)     AS protein_g,
                       ROUND(SUM(mli.fat_g), 1)         AS fat_g,
-                      ROUND(SUM(mli.carbs_g), 1)       AS carbs_g
+                      ROUND(SUM(mli.carbs_g), 1)       AS carbs_g,
+                      GROUP_CONCAT(mli.food_name, ', ') AS food_names
                FROM meal_logs ml
                JOIN meal_log_items mli ON ml.log_id = mli.log_id
                WHERE ml.user_id = ? AND DATE(ml.logged_at) = ?
@@ -85,6 +89,7 @@ def get_today_summary() -> dict:
                 "meal_id":   str(m["log_id"]),
                 "meal_type": m["meal_type"],
                 "logged_at": m["logged_at"],
+                "food_names":    m["food_names"] or "",
                 "calories_kcal": float(m["kcal"] or 0),
                 "protein_g":     float(m["protein_g"] or 0),
                 "fat_g":         float(m["fat_g"] or 0),
@@ -107,6 +112,7 @@ def get_today_summary() -> dict:
                 "carbs_g":    float(row["total_carbs_g"] or 0),
                 "fiber_g":    float(row["total_fiber_g"] or 0),
                 "meal_count": row["meal_count"],
+                "food_summary": row["food_summary"] or "",
                 "meals_logged": meals_logged,
             },
         }

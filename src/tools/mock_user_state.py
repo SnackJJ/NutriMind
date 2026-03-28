@@ -43,22 +43,25 @@ Query: "{query}"
 
 Generate a JSON object with these fields:
 - calorie_budget: daily calorie goal (1200-3500, typical 2000)
-- today_eaten: calories consumed today (0-calorie_budget*1.3)
-- protein_g: protein eaten today (30-200)
-- fat_g: fat eaten today (20-150)
-- carbs_g: carbs eaten today (50-400)
+- protein_target: daily protein goal in grams (60-200)
+- fat_target: daily fat goal in grams (30-150)
+- carbs_target: daily carbs goal in grams (20-400)
+- today_eaten: calories consumed today (0 to calorie_budget * 1.3)
+- protein_g: protein eaten today (0 to protein_target * 1.5)
+- fat_g: fat eaten today (0 to fat_target * 1.5)
+- carbs_g: carbs eaten today (0 to carbs_target * 1.5)
 - fiber_g: fiber eaten today (5-50)
 - meal_count: number of meals logged today (0-5)
 - history_trend: "increasing" | "decreasing" | "stable"
 - history_7d_avg_calories: 7-day average (similar to today_eaten ±20%)
 - goal_adherence_pct: percentage of days within target (40-95)
+- context_foods: A list of 8-10 food names that are SEMANTICALLY CONSISTENT with the query context (e.g., if query is about keto, include steak, eggs, avocado; if vegan, include beans, tofu, quinoa).
 
-IMPORTANT: Make the values SEMANTICALLY CONSISTENT with the query.
+IMPORTANT: Make all values and foods SEMANTICALLY CONSISTENT with the query.
 Examples:
-- "I've been eating too much" → today_eaten > calorie_budget
-- "Am I on track with my protein?" → reasonable protein_g, needs goal comparison
-- "I've been cutting calories this week" → history_trend: "decreasing"
-- "How many calories do I have left?" → today_eaten < calorie_budget (has remaining)
+- "keto" → carbs_target should be low (<50g), context_foods should be keto-friendly.
+- "I've been eating too much" → today_eaten > calorie_budget.
+- "bulk up" → calorie_budget and protein_target should be on the higher side.
 
 Return ONLY valid JSON, no explanation."""
 
@@ -88,20 +91,28 @@ def _call_mock_generator(query: str) -> dict[str, Any]:
 def _generate_fallback_state() -> dict[str, Any]:
     """Generate random but realistic fallback state when LLM fails."""
     budget = random.choice([1500, 1800, 2000, 2200, 2500])
+    p_target = random.choice([80, 100, 120, 150])
+    f_target = random.choice([50, 65, 80])
+    c_target = random.choice([150, 200, 250, 300])
+    
     eaten_ratio = random.uniform(0.3, 1.1)
     today_eaten = round(budget * eaten_ratio)
 
     return {
         "calorie_budget": budget,
+        "protein_target": p_target,
+        "fat_target": f_target,
+        "carbs_target": c_target,
         "today_eaten": today_eaten,
-        "protein_g": round(random.uniform(40, 120), 1),
-        "fat_g": round(random.uniform(30, 90), 1),
-        "carbs_g": round(random.uniform(100, 300), 1),
+        "protein_g": round(p_target * random.uniform(0.5, 1.2), 1),
+        "fat_g": round(f_target * random.uniform(0.5, 1.2), 1),
+        "carbs_g": round(c_target * random.uniform(0.5, 1.2), 1),
         "fiber_g": round(random.uniform(10, 35), 1),
         "meal_count": random.randint(1, 4),
         "history_trend": random.choice(["stable", "increasing", "decreasing"]),
         "history_7d_avg_calories": round(budget * random.uniform(0.85, 1.05)),
         "goal_adherence_pct": round(random.uniform(50, 85), 1),
+        "context_foods": ["Oatmeal", "Chicken Breast", "Steamed Rice", "Apple", "Greek Yogurt", "Salad", "Coffee", "Egg", "Protein Shake"],
     }
 
 
@@ -117,7 +128,7 @@ def generate_mock_state(query: str) -> dict[str, Any]:
     try:
         state = _call_mock_generator(query)
         # Validate required fields exist
-        required = ["calorie_budget", "today_eaten", "protein_g", "fat_g", "carbs_g"]
+        required = ["calorie_budget", "today_eaten", "protein_g", "fat_g", "carbs_g", "context_foods"]
         if not all(k in state for k in required):
             raise ValueError(f"Missing required fields in LLM response: {state}")
         return state
@@ -143,10 +154,10 @@ def mock_today_summary(state: dict[str, Any]) -> dict[str, Any]:
     budget = state.get("calorie_budget", 2000)
     eaten = state.get("today_eaten", 1200)
     meal_count = state.get("meal_count", 2)
-
+    common_foods = state.get("context_foods", ["Oatmeal", "Chicken Breast", "Steamed Rice", "Apple", "Greek Yogurt", "Salad", "Coffee", "Egg", "Protein Shake"])
+    
     # Generate realistic meal breakdown if meals were logged
     meals_logged = []
-    common_foods = ["Oatmeal", "Chicken Breast", "Steamed Rice", "Apple", "Greek Yogurt", "Salad", "Coffee", "Egg", "Protein Shake"]
     
     if meal_count > 0:
         meal_types = ["breakfast", "lunch", "dinner", "snack"][:meal_count]
@@ -207,6 +218,7 @@ def mock_history(
 
     base_calories = state.get("history_7d_avg_calories", state.get("today_eaten", 1800))
     trend = state.get("history_trend", "stable")
+    common_foods = state.get("context_foods", ["Chicken salad", "Greek yogurt", "Apple", "Omelet", "Pasta", "Banana", "Protein shake"])
 
     # Generate daily breakdown with trend
     daily_breakdown = []
@@ -223,6 +235,7 @@ def mock_history(
 
         day_calories = round(base_calories * trend_factor * random.uniform(0.85, 1.15), 1)
 
+        f1, f2 = random.sample(common_foods, 2)
         day_data = {
             "date": day_date.isoformat(),
             "calories_kcal": day_calories,
@@ -231,7 +244,7 @@ def mock_history(
             "carbs_g": round(state.get("carbs_g", 200) * random.uniform(0.8, 1.2), 1),
             "fiber_g": round(state.get("fiber_g", 25) * random.uniform(0.8, 1.2), 1),
             "meal_count": random.randint(2, 4),
-            "food_summary": "Chicken salad, Greek yogurt, Apple, Omelet" if i % 2 == 0 else "Pasta, Banana, Protein shake",
+            "food_summary": f"{f1}, {f2}",
         }
         daily_breakdown.append(day_data)
 
@@ -274,9 +287,8 @@ def mock_history(
                 target = budget
                 avg = daily_averages["calories_kcal"]
             else:
-                # Use reasonable defaults for macro targets
-                targets = {"protein": 90, "fat": 65, "carbs": 250}
-                target = targets.get(m, 100)
+                # Use targets from state to ensure consistency
+                target = state.get(f"{m}_target", 100.0)
                 avg = daily_averages.get(f"{m}_g", target)
 
             goal_adherence[m] = {
