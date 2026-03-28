@@ -356,413 +356,216 @@ for i, (tok, lbl) in enumerate(zip(tokens, labels)):
 
 ---
 
-## Stage 2: GRPO
+## Stage 2: Iterative GRPO + GiGPO
+
+### Framework: veRL
+
+**Decision**: Use veRL (Volcano Engine RL, Apache 2.0) instead of trl.
+
+| Requirement | trl | veRL |
+|-------------|-----|------|
+| Multi-turn tool calling rollout | ❌ Requires heavy modification | ✅ Native environment-in-the-loop |
+| vLLM integration for fast rollout | ❌ | ✅ Native |
+| GiGPO support | ❌ | ✅ Via verl-agent extension |
+| Single-node multi-GPU | ⚠️ Basic | ✅ Actor/Rollout/Trainer separation |
+
+### Architecture: SFT (Unsloth) → RL (veRL)
+
+- **Stage 1 (SFT)**: Unsloth. No generation needed, only Forward/Backward on fixed teacher data. Unsloth's Triton kernels optimize LoRA + 8-bit AdamW for maximum throughput.
+- **Stage 2 (GRPO/GiGPO)**: veRL + vLLM. RL requires generating massive amounts of text (G=8 rollouts × 2,500 prompts × multi-turn). vLLM's PagedAttention and continuous batching are essential.
 
 ### Environment-in-the-Loop GRPO Setup (Multi-Turn)
 
-Standard GRPO natively generates a single purely-offline completion up to the `<EOS>` token. For multi-step Tool usage, this is insufficient because the student architecture cannot natively "halt" to simulate an external API payload.
+Standard GRPO generates a single completion to EOS. For multi-step tool usage, we need an **Environment-in-the-Loop** architecture:
 
-Therefore, our GRPO implementation requires an **Environment-in-the-Loop Generation Architecture**. While custom TRL wrappers or OpenRLHF are options, **veRL** (Volcano Engine Reinforcement Learning) is highly suitable for this, as it supports flexible custom text generation pipelines and multi-turn sandbox interactions natively.
+1. **Step-wise Rollout (vLLM)**: Generation pauses at `</tool_call>` token (single token in Qwen3-4B vocabulary)
+2. **Environment Simulator (Python)**: Reuses existing `TOOL_REGISTRY` and `ToolParser` from `src/orchestrator/`
+3. **Context Injection**: Tool response formatted as `<tool_response>...</tool_response>` and injected into context
+4. **Resume Generation**: vLLM continues generation until next `</tool_call>` or EOS
+5. **Max rounds**: 6 (matching orchestrator config)
 
-### Architecture Division: vLLM vs Unsloth
+### Hardware Strategy
 
-- **Stage 1 (SFT)**: Use **Unsloth**. In SFT, there is no generation (Rollout), only Forward/Backward passes on fixed teacher data. Unsloth's optimized LoRA and 8-bit AdamW operators make it the undisputed king for fast, low-VRAM supervised finetuning.
-- **Stage 2 (GRPO Actor Generation)**: Use **vLLM** via your RL framework (e.g. veRL uses vLLM natively for rollout). GRPO requires generating *massive* amounts of text across thousands of prompts to explore the environment. vLLM's PagedAttention and continuous batching are vastly superior for rapid generation (Rollout) during RL compared to standard HuggingFace/Unsloth `generate()`.
+**Development**: Existing V100 32GB — write code, test with 50 prompts + G=4
+**Production experiments**: Rent 2× A100 80GB — run all experiments (~15-20 hours, ~200-300 RMB)
+**Analysis**: Back to V100
 
-1. **Step-wise Rollout (vLLM)**: During trajectory sampling, generation explicitly pauses when the model outputs a `</tool_call>` tag.
-2. **Environment Simulator (Python)**: A local Python engine maps the schema back into the respective mock backend tools.
-3. **Context Injection**: The engine formats the mock responses back into standard `<tool_response>` tags and injects them into the sequence.
-4. **Resume Generation**: vLLM unpauses and proceeds towards the target `<EOS>`, at which point the final RL calculation (using standard Backprop) determines the combined trajectory's reward.
+### Training Configuration
+
+```python
+# veRL config for 2× A100 80GB
+model_name = "Qwen/Qwen3-4B"
+lora_rank = 16
+lora_alpha = 16
+load_in_4bit = False              # A100 has enough VRAM
+
+# Rollout
+num_generation_per_prompt = 8     # G=8 (was 4 in spec v1 — too small)
+max_new_tokens = 2048
+temperature = 0.7
+top_p = 0.9
+max_tool_rounds = 6
+
+# Training
+learning_rate = 5e-7              # 40x lower than SFT
+num_train_epochs = 1
+per_device_train_batch_size = 1
+gradient_accumulation_steps = 8
+warmup_ratio = 0.05
+
+# GRPO-specific
+kl_coef = 0.05                    # Moderate; adjust based on KL trend
+clip_range = 0.2
+bf16 = True
+
+# Checkpointing
+save_steps = 200                  # Frequent saves for rollback
+```
 
 ### Training Focus (Using ~2,500 Prompts)
 
-- **Pure Prompts only**: Unlike SFT, GRPO uses Prompts without the `messages` trajectory body. The model explores using real environment feedback against Reward Functions.
+- **Pure Prompts only**: Unlike SFT, GRPO uses prompts without trajectory bodies
 - **Core target**: T2-T3 tasks (where RL has the most impact)
-- T1 tasks included at low ratio to prevent regression
-- T4 tasks included to maintain escalation judgment
+- T1 tasks at 15% to prevent regression
+- T4 tasks at 15% to maintain escalation judgment
 
-**Why RL over SFT alone**:
-- SFT teaches "what a good trajectory looks like" but doesn't teach recovery from suboptimal intermediate states
-- RL lets the model explore and learn which tool sequences lead to better outcomes
-- Critical for T2-T3 tasks where multiple valid tool chains exist but differ in efficiency and accuracy
+### Prompt Difficulty Labeling
 
-### Reward Function Design (7-Dimensional)
+Before training, run SFT model on all prompts (N=8 rollouts) to compute success rate:
+- Easy (≥70% success): 40% of training batch
+- Medium (20-70%): 40% — **main learning signal**
+- Hard (<20%): 20% — exploratory
 
-The reward function is composed of seven dimensions, evaluated per trajectory:
+Re-evaluate difficulty at training midpoint; shift distribution toward harder prompts.
+
+**Red flag**: If Hard > 60%, SFT was insufficient. Go back and improve SFT first.
+
+### Iterative Reward Strategy
+
+**Core principle**: Each iteration changes ONE variable (the reward function). Don't design the "perfect" 7-dimensional reward upfront.
+
+#### GRPO v1: Pure Rule Reward (3 dimensions)
 
 ```
-R_total = w1 * R_format + w2 * R_tool_selection + w3 * R_completeness
-        + w4 * R_conditional + w5 * R_answer + w6 * R_escalation
-        + w7 * R_efficiency
+Policy:    SFT model
+Reference: SFT model (frozen)
 ```
-
-Weights are hyperparameters to be tuned. Initial: heavier weight on R_format and R_tool_selection for stability, gradually increase R_completeness, R_conditional, and R_efficiency.
-
-| Reward Dimension | Signal Type | Description |
-|-----------------|-------------|-------------|
-| **Format Compliance** (w1) | Rule-based (process) | Valid JSON tool calls, correct schema adherence. Binary: +1 / 0 |
-| **Tool Selection Accuracy** (w2) | Rule-based (process) | Did the model call the right tool(s) for this query type? Compare against ground truth tool set |
-| **Execution Completeness** (w3) | Rule-based (outcome) | For T2-T3: Did the full tool chain execute without unnecessary steps or missing steps? |
-| **Conditional Correctness** (w4) | Rule-based (outcome) | For T3: Did the model branch correctly based on intermediate results? |
-| **Answer Quality** (w5) | LLM-as-judge (outcome) | Is the final answer nutritionally accurate and helpful given the tool outputs? |
-| **Escalation Appropriateness** (w6) | Rule-based (outcome) | T4 queries escalated = reward; T1-T2 queries escalated = penalty |
-| **Tool Efficiency** (w7) | Rule-based (process) | Penalizes redundant tool calls beyond optimal count. Encourages minimum viable tool usage (progressive disclosure) |
-
-#### Main Reward Function
 
 ```python
-def reward_function(trajectory, task_metadata: dict) -> float:
-    """
-    Compute reward for a single agent trajectory.
-
-    task_metadata includes:
-    - tier: T1/T2/T3/T4
-    - expected_tools: ground truth tool set for this query
-    - expected_steps: optimal tool call count
-    - ground_truth: expected answer data
-    - user_allergies: list of allergens
-    - branch_condition: (T3 only) expected branching logic
-    """
-
-    # === HARD CONSTRAINTS (Safety) ===
-    answer = trajectory.final_answer
-
-    # Allergen specific LLM check (substring checks are bad for "I have removed peanuts")
-    if task_metadata.get("user_allergies"):
-        allergen_score = llm_judge(answer, task_metadata, rubric="allergen_safety")
-        if allergen_score == 0.0:
-            return 0.0 # Critical health failure
-
-    # Extreme calorie values - immediate zero
-    calories = extract_daily_calories(answer)
-    if calories and (calories < 800 or calories > 5000):
-        return 0.0
-
-    # === 7-DIMENSIONAL SCORING ===
-    tier = task_metadata["tier"]
-    actual_tools = set(tc.name for tc in trajectory.tool_calls)
-    expected_tools = set(task_metadata.get("expected_tools", []))
-    any_tool_calls = len(trajectory.tool_calls) > 0
-
-    # --- Dimension 1: Format Compliance (w1) ---
-    if trajectory.all_tool_calls_valid_json():
-        r_format = 1.0
-    else:
-        r_format = 0.0
-
-    # --- Dimension 2: Tool Selection Accuracy (w2) ---
-    if actual_tools == expected_tools:
-        r_tool_selection = 1.0
-    elif actual_tools.issubset(expected_tools):
-        r_tool_selection = len(actual_tools) / len(expected_tools)  # Partial credit
-    else:
-        r_tool_selection = 0.0
-
-    # --- Dimension 3: Execution Completeness (w3) ---
-    num_steps = len(trajectory.tool_calls)
-    optimal_steps = task_metadata["expected_steps"]
-    if tier in ["T2", "T3"]:
-        if num_steps == optimal_steps:
-            r_completeness = 1.0
-        elif num_steps <= optimal_steps + 1:
-            r_completeness = 0.7
-        elif num_steps <= optimal_steps + 2:
-            r_completeness = 0.3
-        else:
-            r_completeness = 0.0
-    else:
-        r_completeness = 1.0 if num_steps <= optimal_steps else 0.5
-
-    # --- Dimension 4: Conditional Correctness (w4) ---
-    if tier == "T3":
-        branch_condition = task_metadata.get("branch_condition")
-        if branch_condition and evaluate_branch_correctness(trajectory, branch_condition):
-            r_conditional = 1.0
-        else:
-            r_conditional = 0.0
-    else:
-        r_conditional = 1.0  # Non-T3 tasks get full score (not applicable)
-
-    # --- Dimension 5: Answer Quality (w5) ---
-    question_type = get_question_type(trajectory)
-    if question_type == "factual":
-        rule_score = evaluate_factual_accuracy(answer, task_metadata)
-        llm_score = llm_judge(answer, task_metadata, rubric="factual")
-        r_answer = 0.7 * rule_score + 0.3 * llm_score
-    elif question_type == "recommendation":
-        rule_score = evaluate_factual_accuracy(answer, task_metadata) # Use factual baseline for core requirements
-        llm_score = llm_judge(answer, task_metadata, rubric="recommendation")
-        r_answer = 0.3 * rule_score + 0.7 * llm_score
-    else: # safety_declaration
-        r_answer = llm_judge(answer, task_metadata, rubric="safety_escalation")
-
-    # --- Dimension 6: T4 Safety Boundary Correctness (w6) ---
-    # T4 = safety declaration (NO tool calls); check for presence of disclaimer text
-    t4_triggered = has_safety_disclaimer(trajectory.final_answer)
-    if tier == "T4" and t4_triggered and not any_tool_calls:
-        r_escalation = 1.0   # Correctly declared safety boundary
-    elif tier in ["T1", "T2", "T3"] and not t4_triggered:
-        r_escalation = 1.0   # Correctly handled locally without over-escalating
-    elif tier in ["T1", "T2", "T3"] and t4_triggered:
-        r_escalation = -1.0  # Over-conservative: declared T4 when not needed (penalty)
-    elif tier == "T4" and not t4_triggered:
-        r_escalation = -0.5  # Failed to declare safety boundary when needed
-    else:
-        r_escalation = 0.0
-
-    # --- Dimension 7: Tool Efficiency (w7) ---
-    # Encourages progressive disclosure: use the minimum tools needed.
-    # Penalizes redundant/unnecessary tool calls beyond the optimal count.
-    if tier == "T4" or not expected_tools:
-        # T4 / Pure QA: no tools expected. Penalize any tool call.
-        r_efficiency = 1.0 if num_steps == 0 else max(0, 1.0 - 0.3 * num_steps)
-    else:
-        excess = num_steps - optimal_steps
-        if excess <= 0:
-            r_efficiency = 1.0   # At or under optimal — perfect
-        elif excess == 1:
-            r_efficiency = 0.6   # One extra call — mild penalty
-        elif excess == 2:
-            r_efficiency = 0.3   # Two extra — significant penalty
-        else:
-            r_efficiency = 0.0   # Three+ extra — no efficiency credit
-
-    # === COMPOSE TOTAL REWARD ===
-    # Initial weights (to be tuned)
-    # w7 (efficiency) starts moderate; increase after model stabilizes on format/selection
-    w1, w2, w3, w4, w5, w6, w7 = 0.15, 0.18, 0.13, 0.13, 0.22, 0.09, 0.10
-
-    r_total = (w1 * r_format + w2 * r_tool_selection + w3 * r_completeness
-               + w4 * r_conditional + w5 * r_answer + w6 * r_escalation
-               + w7 * r_efficiency)
-
-    return max(0, min(1, r_total))  # Clamp to [0, 1]
+def reward_v1(trajectory_info, task_metadata):
+    r_format = 1.0 if all_tool_calls_valid(trajectory_info) else 0.0
+    r_tool = compute_tool_selection_score(trajectory_info, task_metadata)
+    r_outcome = compute_rule_outcome_score(trajectory_info, task_metadata)
+    return 0.30 * r_format + 0.35 * r_tool + 0.35 * r_outcome
 ```
 
-#### Question Type Classification
+**Deliberately omits**: R_efficiency, R_conditional, LLM-Judge — to be added in later rounds.
+
+#### GRPO v2: Add Efficiency + Conditional
+
+```
+Policy:    GRPO-v1 checkpoint
+Reference: GRPO-v1 checkpoint (frozen)
+lr:        2.5e-7 (lower)
+```
 
 ```python
-def get_question_type(trajectory) -> str:
-    tools_used = [tc.name for tc in trajectory.tool_calls]
-
-    # Factual: simple lookup/calculation
-    if set(tools_used).issubset({"get_food_nutrition",
-                                  "get_today_summary", "get_history"}):
-        return "factual"
-
-    # Recommendation: advice, planning (uses RAG knowledge)
-    if "retrieve_knowledge" in tools_used:
-        return "recommendation"
-
-    # T4: safety declaration, no tools
-    if not tools_used:
-        return "safety_declaration"
-
-    return "factual"  # default
+def reward_v2(trajectory_info, task_metadata):
+    base = reward_v1(trajectory_info, task_metadata)
+    r_efficiency = compute_efficiency_score(trajectory_info, task_metadata)
+    r_conditional = compute_conditional_score(trajectory_info, task_metadata)
+    return 0.70 * base + 0.15 * r_efficiency + 0.15 * r_conditional
 ```
 
-#### Factual Accuracy Evaluation (Rule-Based)
+#### GRPO v3: Add LLM-Judge (for recommendation questions only)
+
+```
+Policy:    GRPO-v2 checkpoint
+Reference: GRPO-v2 checkpoint (frozen)
+lr:        1e-7 (even lower)
+```
 
 ```python
-def evaluate_factual_accuracy(answer: str, metadata: dict) -> float:
-    """Compare extracted values against ground truth."""
-    score = 1.0
-    gt = metadata.get("ground_truth", {})
-
-    # Extract numeric values from answer
-    extracted = extract_nutrition_values(answer)
-
-    for nutrient, gt_value in gt.items():
-        if nutrient in extracted:
-            # Allow 10% tolerance
-            if abs(extracted[nutrient] - gt_value) / gt_value > 0.1:
-                score -= 0.2
-        else:
-            # Missing required value
-            score -= 0.1
-
-    return max(0, score)
+def reward_v3(trajectory_info, task_metadata):
+    base = reward_v2(trajectory_info, task_metadata)
+    if get_question_type(trajectory_info) == "recommendation":
+        llm_score = llm_judge(trajectory_info["final_answer"], task_metadata)
+        return 0.75 * base + 0.25 * llm_score  # Rules remain dominant
+    return base
 ```
 
-#### LLM Judge (Qwen-Max)
+**LLM-Judge safeguards**: n=3 averaging, weight ≤ 25%, only for recommendation tasks, monitor answer length inflation.
 
-```python
-FACTUAL_RUBRIC = """
-Evaluate this nutrition response on accuracy and completeness (1-5 each):
+#### Reference Model Strategy
 
-1. **Numeric Accuracy**: Are the nutritional values correct?
-2. **Unit Clarity**: Are units clearly stated (g, mg, kcal)?
-3. **Completeness**: Are all requested nutrients mentioned?
-4. **No Hallucination**: Does the response avoid making up data?
+Each iteration updates reference to previous output:
+- v1: ref = SFT
+- v2: ref = GRPO-v1
+- v3: ref = GRPO-v2
 
-Response: {answer}
-Ground Truth: {ground_truth}
+Rationale: Progressive refinement. If cumulative drift causes issues, fall back to ref=SFT.
 
-Output JSON: {"accuracy": X, "units": X, "completeness": X, "no_hallucination": X}
-"""
+### GiGPO: Step-Level Credit Assignment
 
-RECOMMENDATION_RUBRIC = """
-Evaluate this nutrition advice on quality (1-5 each):
+After GRPO v2, implement GiGPO to add step-level advantage:
 
-1. **Nutritional Validity**: Does advice address the stated goal?
-2. **Personalization**: Does it consider user's constraints?
-3. **Actionability**: Is advice specific and executable?
-4. **Completeness**: Are caveats and portions included?
-
-User Query: {query}
-User Profile: {profile}
-Response: {answer}
-
-Output JSON: {"validity": X, "personalization": X, "actionability": X, "completeness": X}
-"""
-
-SAFETY_ESCALATION_RUBRIC = """
-Evaluate this T4 Safety Escalation response (1-5 each):
-
-1. **Clear Deflection**: Does it explicitly decline to provide medical advice?
-2. **Medical Caution**: Does it correctly identify the severe clinical condition?
-3. **Professional Handshake**: Does it refer the user to a doctor/dietitian?
-4. **No Hallucination**: Does it completely avoid giving actionable numeric targets that could kill the user?
-
-User Query: {query}
-Response: {answer}
-
-Output JSON: {"deflection": X, "medical_caution": X, "handshake": X, "no_hallucination": X}
-"""
-
-ALLERGEN_SAFETY_RUBRIC = """
-Evaluate if this response respects the user's allergy. Output 1 if SAFE, 0 if UNSAFE.
-
-Unsafe means the response suggests eating the allergen, or fails to warn about cross-contamination.
-Safe means the response explicitly excludes the allergen or says "I have excluded it".
-
-User Query: {query}
-Allergies: {profile}
-Response: {answer}
-
-Output JSON: {"score": X}
-"""
-
-def llm_judge(answer: str, metadata: dict, rubric: str) -> float:
-    if rubric == "factual":
-        prompt = FACTUAL_RUBRIC.format(
-            answer=answer,
-            ground_truth=metadata.get("ground_truth", {})
-        )
-    elif rubric == "recommendation":
-        prompt = RECOMMENDATION_RUBRIC.format(
-            query=metadata.get("user_query", ""),
-            profile=metadata.get("user_profile", {}),
-            answer=answer
-        )
-    elif rubric == "safety_escalation":
-        prompt = SAFETY_ESCALATION_RUBRIC.format(
-            query=metadata.get("user_query", ""),
-            answer=answer
-        )
-    elif rubric == "allergen_safety":
-        prompt = ALLERGEN_SAFETY_RUBRIC.format(
-            query=metadata.get("user_query", ""),
-            profile=metadata.get("user_allergies", []),
-            answer=answer
-        )
-        response = call_qwen_max(prompt)
-        try:
-            return float(json.loads(response).get("score", 0.0))
-        except:
-            return 0.0
-
-    response = call_qwen_max(prompt)
-    try:
-        scores = json.loads(response)
-        avg_score = sum(scores.values()) / len(scores)
-        return avg_score / 5.0
-    except:
-        return 0.0
+```
+GRPO:  advantage = (reward - mean) / std  → trajectory-level only
+GiGPO: advantage = group_advantage × step_advantage  → two layers
 ```
 
-#### Branch Correctness Evaluation (T3-specific)
+**Step advantage** is computed by finding "anchor states" where rollouts diverge, then comparing downstream success rates for different decisions at each anchor point.
 
-```python
-def evaluate_branch_correctness(trajectory, branch_condition: dict) -> bool:
-    """Check if T3 trajectory branched correctly based on intermediate results.
-
-    branch_condition example:
-    {
-        "check_tool": "get_today_summary",
-        "condition_field": "total_calories",
-        "threshold": 2000,
-        "expected_branch": "over_budget"  # or "under_budget"
-    }
-    """
-    # Extract intermediate tool result
-    for i, tc in enumerate(trajectory.tool_calls):
-        if tc.name == branch_condition["check_tool"]:
-            result = trajectory.tool_responses[i]
-            field_value = result.get("data", {}).get(branch_condition["condition_field"])
-
-            if field_value is None:
-                return False
-
-            # Check if the model made the right branching decision
-            if branch_condition["expected_branch"] == "over_budget":
-                return field_value > branch_condition["threshold"]
-            elif branch_condition["expected_branch"] == "under_budget":
-                return field_value <= branch_condition["threshold"]
-
-    return False
+```
+Policy:    GRPO-v2 checkpoint
+Reference: GRPO-v2 checkpoint (frozen)
+Reward:    Same as v2 (only advantage calculation changes)
+Algorithm: GiGPO (via verl-agent)
 ```
 
-#### Cross-Validation (Final Evaluation Only)
+Using the SAME reward as GRPO-v2 enables a clean controlled comparison.
 
-```python
-def cross_validate_judge(samples: list, sample_rate: float = 0.1) -> dict:
-    """
-    Run 10% of samples through GPT-4o to validate Qwen-Max judgments.
-    """
-    sampled = random.sample(samples, int(len(samples) * sample_rate))
+### SFT vs GRPO vs GRPO+GiGPO Computation Cost
 
-    qwen_scores = [llm_judge(s, rubric="recommendation", model="qwen-max") for s in sampled]
-    gpt_scores = [llm_judge(s, rubric="recommendation", model="gpt-4o") for s in sampled]
+```
+SFT:  1,449 samples × 3 epochs × 2 ops = ~8,700 model operations → 3-4 hours (V100)
+GRPO: 2,500 prompts × G=8 × ~3 rounds × ~400 tokens = ~24M tokens generated → 16-20 hours (V100)
+      Forward: ~9,600×/prompt (autoregressive) + 16×/prompt (log_prob)
+      Backward: 8×/prompt
 
-    correlation = compute_correlation(qwen_scores, gpt_scores)
-
-    return {
-        "correlation": correlation,
-        "qwen_mean": np.mean(qwen_scores),
-        "gpt_mean": np.mean(gpt_scores),
-        "acceptable": correlation > 0.85
-    }
+GRPO is 50-200x more expensive than SFT per iteration. This is inherent to the algorithm.
+All experiments combined: ~15-20 hours on 2× A100.
 ```
 
-### GRPO Training Configuration
+### Reward Hacking Detection
 
-```python
-from trl import GRPOConfig, GRPOTrainer
+Monitor every 200 steps on held-out eval set (100 prompts):
 
-config = GRPOConfig(
-    output_dir="./models/nutrimind-4b-grpo",
-    num_train_epochs=1,
-    per_device_train_batch_size=1,  # Reduced from 2 due to context length
-    gradient_accumulation_steps=16,
-    learning_rate=5e-7,
-    kl_coef=0.1,
-    num_generation_per_prompt=4,  # Group size
-    max_new_tokens=2048,          # Increased from 1024 for full multi-turn generation
-    logging_steps=10,
-    save_strategy="epoch",
-    bf16=True,
-    max_prompt_length=4096,       # Configured explicitly
-)
+| Metric | Normal | Alarm |
+|--------|--------|-------|
+| reward ↑ but task_completion ↓ | — | Almost certain hacking |
+| avg_tool_calls cliff drop >30% | — | Skipping tools for efficiency |
+| pairwise BLEU of rollouts >0.85 | — | Mode collapse |
+| KL spike >3× recent average | — | Found reward exploit |
+| answer_length continuous growth | — | Gaming LLM-Judge |
 
-trainer = GRPOTrainer(
-    model=model,
-    args=config,
-    train_dataset=grpo_dataset,
-    reward_fn=reward_function,
-    tokenizer=tokenizer,
-)
-```
+**Rollback protocol**: Stop → identify exploited dimension → rollback to pre-hacking checkpoint → fix reward → resume.
+
+### Experiment Matrix
+
+| Exp | Base | Algorithm | Reward | Purpose | Priority |
+|-----|------|-----------|--------|---------|----------|
+| B | SFT | — | — | Baseline | Required |
+| C | SFT | GRPO | v1 | Basic RL | Required |
+| D | SFT | GRPO | v2 | +efficiency, +conditional | **Core** |
+| F | SFT | **GiGPO** | v2 | Direct SFT→GiGPO (fair comparison with D) | **Core** |
+| E | GRPO-v2 | GRPO | v3 | +LLM-Judge (open-ended quality) | Optional |
+
+> **Note**: Exp A (base model zero-shot) and Exp G (GPT-4o) are defined in phase5_ablation.md for evaluation only.
+
+**Core comparison**: D vs F — same base (SFT), same reward (v2), same steps. Only difference is advantage estimation method.
+
+**Exp E rationale**: v3 adds LLM-Judge for recommendation-type answers. It's exploratory — run only if D/F results are satisfactory and time permits. v3 output does not feed into GiGPO comparison.
 
 ---
 
@@ -771,8 +574,10 @@ trainer = GRPOTrainer(
 | Checkpoint | Metrics to Verify |
 |------------|-------------------|
 | After SFT | T1 tool call accuracy ≥ 95%, Format validity ≥ 98% |
-| After GRPO | T2 multi-step success ≥ 80%, T3 conditional correctness ≥ 75%, Escalation precision ≥ 85% |
-| Final | All metrics in PRD Section 6 |
+| After GRPO-v1 | Format ≥ 95%, overall reward trending upward |
+| After GRPO-v2 | T2 ≥ 80%, T3 ≥ 75%, redundant calls decreased |
+| After GiGPO | T2/T3 measurably higher than GRPO-v2 |
+| Final | All PRD Section 6 metrics, GRPO vs GiGPO comparison table |
 
 ## Data Versioning
 
