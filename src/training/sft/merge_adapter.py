@@ -111,9 +111,9 @@ def main():
         help="Run verification after merging",
     )
     parser.add_argument(
-        "--save_16bit",
+        "--save_4bit",
         action="store_true",
-        help="Save in 16-bit precision (default: same as base model)",
+        help="Save in 4-bit precision instead of default 16-bit (smaller but less compatible with vLLM)",
     )
     parser.add_argument(
         "--max_seq_length",
@@ -157,24 +157,20 @@ def main():
         verify_merged_model(model, tokenizer)
 
     # Merge and save
-    logger.info(f"Merging adapter and saving to: {args.output_dir}")
-
-    if args.save_16bit:
-        # Save in 16-bit
-        model.save_pretrained_merged(
-            args.output_dir,
-            tokenizer,
-            save_method="merged_16bit",
-        )
+    if args.save_4bit:
+        save_method = "merged_4bit_forced"
+        logger.info(f"Merging adapter and saving 4-bit to: {args.output_dir}")
     else:
-        # Save in 4-bit (smaller, but need to dequantize for vLLM)
-        model.save_pretrained_merged(
-            args.output_dir,
-            tokenizer,
-            save_method="merged_4bit_forced",
-        )
+        save_method = "merged_16bit"
+        logger.info(f"Merging adapter and saving 16-bit to: {args.output_dir}")
 
-    logger.info(f"Merged model saved to: {args.output_dir}")
+    model.save_pretrained_merged(
+        args.output_dir,
+        tokenizer,
+        save_method=save_method,
+    )
+
+    logger.info(f"Merged model saved to: {args.output_dir} (method={save_method})")
 
     # Verify merged model if requested
     if args.verify:

@@ -23,6 +23,7 @@ from src.tools.get_food_nutrition import get_food_nutrition
 from src.tools.log_meal import log_meal
 from src.tools.get_today_summary import get_today_summary
 from src.tools.get_history import get_history
+from src.tools.set_goal import set_goal
 from src.tools.retrieve_knowledge import retrieve_knowledge
 from src.config import settings
 
@@ -336,13 +337,21 @@ RAG search over nutrition knowledge base (dietary guidelines, supplements, medic
   - Check `top_relevance_score` AND examine the passage `source`/`section` to judge relevance.
   - If score > 0.7 AND passage content clearly addresses your query: use the result.
   - If score < 0.4 OR passage topic is off-topic (e.g., you asked about VLCD risks but got a passage about calcium): reformulate your query OR switch mode (try "keyword" for precise terms, "semantic" for conceptual queries).
-  - After three attempts with poor results: stop searching. Answer from your own knowledge and state: "My nutrition knowledge base does not currently cover this topic in detail. Here is general information based on my training.\""""
+  - After three attempts with poor results: stop searching. Answer from your own knowledge and state: "My nutrition knowledge base does not currently cover this topic in detail. Here is general information based on my training."
+
+### set_goal
+Set or update a nutrition target (calories, protein, fat, carbs).
+- Use when the user wants to define or change their daily calorie/macro goals.
+- Optionally accepts `goal_type` ("lose", "maintain", "gain") to indicate weight management direction.
+- After setting a goal, consider calling `get_today_summary` to show current progress against the new target.
+- Do NOT use for querying goal progress — use `get_history(compare_to_goal=true)` instead.\""""
 
 TOOL_DISPATCH = {
     "get_food_nutrition": get_food_nutrition,
     "log_meal": log_meal,
     "get_today_summary": get_today_summary,
     "get_history": get_history,
+    "set_goal": set_goal,
     "retrieve_knowledge": retrieve_knowledge,
 }
 

@@ -13,9 +13,13 @@ import logging
 import os
 from pathlib import Path
 
+# Must import unsloth before transformers/peft for optimizations
+import unsloth  # noqa: F401
 import torch
 from datasets import Dataset
 from transformers import TrainingArguments
+from trl import SFTTrainer
+from unsloth import FastLanguageModel, is_bfloat16_supported, train_on_responses_only
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -176,16 +180,6 @@ def main():
     if not Path(args.data_path).exists():
         raise FileNotFoundError(f"Training data not found: {args.data_path}")
 
-    # Import Unsloth (must be after argparse to allow --help without GPU)
-    try:
-        from unsloth import FastLanguageModel, is_bfloat16_supported
-        from unsloth import train_on_responses_only
-    except ImportError:
-        logger.error("Unsloth not installed. Install with: pip install unsloth")
-        raise
-
-    from trl import SFTTrainer
-
     # Set up wandb
     if args.use_wandb:
         os.environ["WANDB_PROJECT"] = args.wandb_project
@@ -226,20 +220,27 @@ def main():
 
     # Load and prepare dataset
     logger.info(f"Loading data from: {args.data_path}")
-    dataset = load_trajectory_data(args.data_path)
+    full_dataset = load_trajectory_data(args.data_path)
 
     # Format messages using chat template
     logger.info("Formatting dataset with chat template (enable_thinking=True)")
     format_fn = formatting_func(tokenizer)
-    dataset = dataset.map(format_fn, remove_columns=["messages", "tier"])
+    full_dataset = full_dataset.map(format_fn, remove_columns=["messages", "tier"])
+
+    # Train/eval split (90/10)
+    split = full_dataset.train_test_split(test_size=0.1, seed=3407)
+    train_dataset = split["train"]
+    eval_dataset = split["test"]
+    logger.info(f"Split: {len(train_dataset)} train / {len(eval_dataset)} eval")
 
     # Calculate training steps
-    total_samples = len(dataset)
+    total_samples = len(train_dataset)
     effective_batch = args.batch_size * args.gradient_accumulation_steps
     steps_per_epoch = total_samples // effective_batch
     total_steps = steps_per_epoch * args.num_epochs
 
     logger.info(f"Training samples: {total_samples}")
+    logger.info(f"Eval samples: {len(eval_dataset)}")
     logger.info(f"Effective batch size: {effective_batch}")
     logger.info(f"Steps per epoch: {steps_per_epoch}")
     logger.info(f"Total training steps: {total_steps}")
@@ -255,10 +256,10 @@ def main():
         logging_steps=10,
         save_strategy="epoch",
         save_total_limit=3,
+        eval_strategy="epoch",
         fp16=not is_bfloat16_supported(),
         bf16=is_bfloat16_supported(),
         optim="adamw_8bit",
-        group_by_length=True,  # Length bucketing to reduce padding
         report_to=report_to,
         run_name=f"nutrimind-sft-r{args.lora_r}",
         seed=3407,
@@ -268,7 +269,8 @@ def main():
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
-        train_dataset=dataset,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         dataset_text_field="text",
         max_seq_length=args.max_seq_length,
         dataset_num_proc=2,

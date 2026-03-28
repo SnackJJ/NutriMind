@@ -468,9 +468,14 @@ def main():
                 f"format={fmt_pct:.1f}%, tool={tool_pct:.1f}%"
             )
 
-    # Target comparison
-    logger.info("\nTarget metrics:")
-    logger.info(f"  T1 Accuracy:   target ≥ 95%, actual = {100*tool_correct/total:.1f}%")
+    # Target comparison (per-tier where specified by spec)
+    logger.info("\nTarget metrics (spec: training.md § Evaluation Checkpoints):")
+    t1_stats = tier_stats.get("T1", {"total": 0, "tool_correct": 0})
+    if t1_stats["total"] > 0:
+        t1_tool_pct = 100 * t1_stats["tool_correct"] / t1_stats["total"]
+        logger.info(f"  T1 Accuracy:   target ≥ 95%, actual = {t1_tool_pct:.1f}% (n={t1_stats['total']})")
+    else:
+        logger.warning("  T1 Accuracy:   target ≥ 95%, actual = N/A (no T1 samples in eval set)")
     logger.info(f"  Format Valid:  target ≥ 98%, actual = {100*format_valid/total:.1f}%")
 
     # Save detailed results

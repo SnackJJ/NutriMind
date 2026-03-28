@@ -2,7 +2,7 @@ import json
 import re
 from pathlib import Path
 
-VALID_TOOLS = {"get_food_nutrition", "log_meal", "get_today_summary", "get_history", "retrieve_knowledge"}
+VALID_TOOLS = {"get_food_nutrition", "log_meal", "get_today_summary", "get_history", "set_goal", "retrieve_knowledge"}
 
 def check_chinese_chars(text: str) -> float:
     if not text:

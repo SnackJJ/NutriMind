@@ -30,6 +30,7 @@ from src.tools.get_food_nutrition import get_food_nutrition
 from src.tools.log_meal import log_meal
 from src.tools.get_today_summary import get_today_summary
 from src.tools.get_history import get_history
+from src.tools.set_goal import set_goal
 from src.tools.retrieve_knowledge import retrieve_knowledge
 from src.tools.mock_user_state import generate_mock_state, mock_today_summary, mock_history
 from src.config import settings
@@ -175,6 +176,33 @@ TOOLS = [
                     }
                 },
                 "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_goal",
+            "description": "Set or update a specific nutrition target for the user. Use when the user wants to define or change their daily calorie/macro goals, or specify weight management direction (lose/maintain/gain). Do NOT use for querying goal progress — use get_history(compare_to_goal=true) instead.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "metric": {
+                        "type": "string",
+                        "enum": ["calories", "protein", "fat", "carbs"],
+                        "description": "Which nutrition metric to set a target for"
+                    },
+                    "target_value": {
+                        "type": "number",
+                        "description": "Daily target value (kcal for calories, grams for macros). Calories: 1000-5000 kcal; macros: > 0g"
+                    },
+                    "goal_type": {
+                        "type": "string",
+                        "enum": ["lose", "maintain", "gain"],
+                        "description": "Overall weight management direction. Persisted to user profile when provided."
+                    }
+                },
+                "required": ["metric", "target_value"]
             }
         }
     }
@@ -356,18 +384,26 @@ RAG search over nutrition knowledge base (dietary guidelines, supplements, medic
   - Check `top_relevance_score` AND examine the passage `source`/`section` to judge relevance.
   - If score > 0.7 AND passage content clearly addresses your query: use the result.
   - If score < 0.4 OR passage topic is off-topic (e.g., you asked about VLCD risks but got a passage about calcium): reformulate your query OR switch mode (try "keyword" for precise terms, "semantic" for conceptual queries).
-  - After three attempts with poor results: stop searching. Answer from your own knowledge and state: "My nutrition knowledge base does not currently cover this topic in detail. Here is general information based on my training.\""""
+  - After three attempts with poor results: stop searching. Answer from your own knowledge and state: "My nutrition knowledge base does not currently cover this topic in detail. Here is general information based on my training."
+
+### set_goal
+Set or update a nutrition target (calories, protein, fat, carbs).
+- Use when the user wants to define or change their daily calorie/macro goals.
+- Optionally accepts `goal_type` ("lose", "maintain", "gain") to indicate weight management direction.
+- After setting a goal, consider calling `get_today_summary` to show current progress against the new target.
+- Do NOT use for querying goal progress — use `get_history(compare_to_goal=true)` instead.\""""
 
 TOOL_DISPATCH = {
     "get_food_nutrition": get_food_nutrition,
     "log_meal": log_meal,
     "get_today_summary": get_today_summary,
     "get_history": get_history,
+    "set_goal": set_goal,
     "retrieve_knowledge": retrieve_knowledge,
 }
 
 # Tools that need mock during collection (no real user data / avoid DB writes)
-MOCK_TOOLS = frozenset({"get_today_summary", "get_history", "log_meal"})
+MOCK_TOOLS = frozenset({"get_today_summary", "get_history", "log_meal", "set_goal"})
 
 
 def execute_tool(name: str, arguments: dict) -> dict:
@@ -433,6 +469,39 @@ def execute_tool_with_mock(name: str, arguments: dict, query: str) -> dict:
             "status": "success",
             "meal_id": "mock_" + str(hash(query) % 100000),
             "total_calories": total_calories,
+        }
+    elif name == "set_goal":
+        # Mock set_goal: validate inputs but skip DB write
+        metric = arguments.get("metric")
+        target_value = arguments.get("target_value")
+        goal_type = arguments.get("goal_type")
+
+        valid_metrics = ["calories", "protein", "fat", "carbs"]
+        if metric not in valid_metrics:
+            return {"status": "error", "error_type": "invalid_metric", "message": f"Invalid metric '{metric}'"}
+
+        if metric == "calories" and (target_value < 1000 or target_value > 5000):
+            return {"status": "error", "error_type": "value_out_of_range", "message": f"Calorie target must be 1000-5000 kcal"}
+
+        if metric in ["protein", "fat", "carbs"] and target_value <= 0:
+            return {"status": "error", "error_type": "value_out_of_range", "message": f"{metric} target must be > 0"}
+
+        # Use targets from mock state as previous values to ensure consistency
+        previous_values = {
+            "calories": float(state.get("calorie_budget", 2000.0)),
+            "protein": float(state.get("protein_target", 90.0)),
+            "fat": float(state.get("fat_target", 65.0)),
+            "carbs": float(state.get("carbs_target", 250.0))
+        }
+        
+        return {
+            "status": "success",
+            "data": {
+                "metric": metric,
+                "previous_value": previous_values.get(metric),
+                "new_value": target_value,
+                "goal_type": goal_type or "maintain",
+            },
         }
 
     # Fallback (shouldn't reach here)
