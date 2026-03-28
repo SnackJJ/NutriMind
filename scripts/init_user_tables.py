@@ -1,8 +1,7 @@
 """Create user-state tables in the existing usda.db.
 
 Idempotent — safe to run multiple times (CREATE TABLE IF NOT EXISTS).
-Run once before using log_meal / get_today_summary / get_history /
-set_goal / get_goal_adherence tools.
+Run once before using log_meal / get_today_summary / get_history / set_goal tools.
 """
 
 import sqlite3
