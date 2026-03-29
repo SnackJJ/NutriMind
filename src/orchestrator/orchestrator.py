@@ -196,18 +196,19 @@ def orchestrate(user_input: str) -> str:
             try:
                 result = execute_tool(tool_name, tool_args)
                 messages.append({"role": "assistant", "content": response})
-                messages.append({"role": "user", "content": format_tool_response(result)})
+                messages.append({"role": "tool", "content": format_tool_response(result)})
             except ToolExecutionError as e:
                 logger.warning(f"Orchestrator ERROR ToolExecutionError: {e.message}")
                 messages.append({"role": "assistant", "content": response})
-                messages.append({"role": "user", "content": format_error_response(e.type, e.message)})
+                messages.append({"role": "tool", "content": format_error_response(e.type, e.message)})
 
             tool_round += 1
 
         elif parsed.type == "parse_error":
             logger.warning(f"Orchestrator ERROR Parse: {parsed.error_message}")
             messages.append({"role": "assistant", "content": response})
-            messages.append({"role": "user", "content": "Your previous response had invalid format. Please try again with valid JSON in <tool_call> tags."})
+            # Even parse errors from the system should realistically be 'tool' context to match format
+            messages.append({"role": "tool", "content": "Your previous response had invalid format. Please try again with valid JSON in <tool_call> tags."})
             tool_round += 1
 
     logger.warning("Orchestrator CHECK_LIMIT Exceeded max tool rounds")
