@@ -1,6 +1,6 @@
-backend: "local_transformers"
+backend: "vllm"
 server_url: "http://localhost:8000/v1"
-model_name: "/root/autodl-tmp/NutriMind/models/nutrimind-4b-sft/final"
+model_name: "/root/autodl-tmp/NutriMind/models/nutrimind-4b-sft-merged"
 timeout_ms: 60000
 max_tokens: 1024
 temperature: 0.1
