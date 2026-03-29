@@ -19,7 +19,7 @@ class VLLMBackend(InferenceBackend):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
-        self.client = httpx.Client()
+        self.client = httpx.Client(timeout=120.0)
         
     def generate(self, messages: List[Dict[str, Any]]) -> str:
         payload = {
