@@ -63,16 +63,16 @@ def verify_labels(trainer, tokenizer, num_samples: int = 3):
     Verify that loss masking is correctly applied.
     Prints token-by-token label info for inspection.
     """
-    logger.info("=" * 60)
-    logger.info("VERIFYING LOSS MASK LABELS")
-    logger.info("=" * 60)
+    print("=" * 60)
+    print("VERIFYING LOSS MASK LABELS")
+    print("=" * 60)
 
     for i in range(min(num_samples, len(trainer.train_dataset))):
         sample = trainer.train_dataset[i]
         input_ids = sample["input_ids"]
         labels = sample["labels"]
 
-        logger.info(f"\n--- Sample {i} ---")
+        print(f"\n--- Sample {i} ---")
 
         # Decode and check label distribution
         assistant_tokens = 0
@@ -88,12 +88,12 @@ def verify_labels(trainer, tokenizer, num_samples: int = 3):
             if j < 20 or j > len(input_ids) - 20:
                 tok_str = tokenizer.decode([tok])
                 label_str = "MASKED" if lbl == -100 else f"label={lbl}"
-                logger.info(f"  {j:4d}: {tok_str!r:20s} -> {label_str}")
+                print(f"  {j:4d}: {tok_str!r:20s} -> {label_str}")
             elif j == 20:
-                logger.info("  ... (middle tokens omitted) ...")
+                print("  ... (middle tokens omitted) ...")
 
         total = len(input_ids)
-        logger.info(
+        print(
             f"\nTotal: {total} tokens | "
             f"Masked: {masked_tokens} ({100*masked_tokens/total:.1f}%) | "
             f"Training: {assistant_tokens} ({100*assistant_tokens/total:.1f}%)"
@@ -109,9 +109,9 @@ def verify_labels(trainer, tokenizer, num_samples: int = 3):
                 f"Only {100*assistant_tokens/total:.1f}% tokens for training - seems low"
             )
 
-    logger.info("\n" + "=" * 60)
-    logger.info("LOSS MASK VERIFICATION COMPLETE")
-    logger.info("=" * 60)
+    print("\n" + "=" * 60)
+    print("LOSS MASK VERIFICATION COMPLETE")
+    print("=" * 60)
 
 
 def main():
