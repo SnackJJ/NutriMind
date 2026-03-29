@@ -48,6 +48,7 @@ test_minimal.jsonl
 Thumbs.db
 docs/discussion_rl_strategy_and_career.md
 CV.md
-sft_data.tar.gz
+
 .gitignore
-runtime_data.tar.gz
+
+*.tar.gz
