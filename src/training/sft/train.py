@@ -18,7 +18,7 @@ import unsloth  # noqa: F401
 import torch
 from datasets import Dataset
 from transformers import TrainingArguments
-from trl import SFTTrainer
+from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
 from unsloth import FastLanguageModel, is_bfloat16_supported, train_on_responses_only
 
 logging.basicConfig(
@@ -266,6 +266,15 @@ def main():
         seed=3407,
     )
 
+    # Create data collator for loss masking on assistant turns
+    logger.info("Setting up DataCollatorForCompletionOnlyLM for loss masking")
+    collator = DataCollatorForCompletionOnlyLM(
+        instruction_template=[151644, 872], 
+        response_template=[151644, 77091], 
+        tokenizer=tokenizer,
+        mlm=False
+    )
+
     # Create trainer
     trainer = SFTTrainer(
         model=model,
@@ -276,15 +285,8 @@ def main():
         max_seq_length=args.max_seq_length,
         dataset_num_proc=2,
         packing=False,  # Disabled to avoid chunking tool JSON logic
+        data_collator=collator,
         args=training_args,
-    )
-
-    # Apply loss masking: only train on assistant turns
-    logger.info("Applying loss masking with train_on_responses_only")
-    trainer = train_on_responses_only(
-        trainer,
-        instruction_part="<|im_start|>user\n",
-        response_part="<|im_start|>assistant\n",
     )
 
     # Verify labels if requested
