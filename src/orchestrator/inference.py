@@ -96,6 +96,9 @@ class LocalTransformersBackend(InferenceBackend):
                 do_sample=True if self.temperature > 0 else False,
                 pad_token_id=self.tokenizer.pad_token_id or self.tokenizer.eos_token_id,
             )
-            
-        return self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+        raw_text = self.tokenizer.decode(generated_ids, skip_special_tokens=False)
+        # Safely extract response by manually slicing off the Qwen3 end token
+        # This absolutely guarantees <think> and <tool_call> are preserved even if forced to special tokens
+        return raw_text.split("<|im_end|>")[0].strip()
 
