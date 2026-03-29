@@ -7,6 +7,9 @@ data/
 logs/
 knowledge_db/
 
+# Doc files
+docs/
+
 # Lock files
 uv.lock
 

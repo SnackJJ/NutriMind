@@ -192,8 +192,9 @@ def main():
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model_name,
         max_seq_length=args.max_seq_length,
-        dtype=None,  # Auto-detect (bf16 recommended)
-        load_in_4bit=True,  # Critical for consumer GPUs
+        dtype="bfloat16",  # Full precision LoRA (no quantization)
+        load_in_4bit=False,
+        local_files_only=True,  # Mandatory for restricted network (AutoDL)
     )
 
     # Add LoRA adapters

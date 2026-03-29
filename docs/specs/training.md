@@ -18,7 +18,7 @@ Qwen3-4B
 > - Native single-token `<think>`, `</think>`, `<tool_call>`, `</tool_call>`, `<tool_response>`, `</tool_response>` (all in vocabulary)
 > - Qwen3-4B ≈ Qwen2.5-7B performance level, with only ~33% more parameters than 3B
 > - Pre-trained with agentic capabilities (Hermes-style tool calling, hybrid thinking mode)
-> - 4bit LoRA on single 4090 (24GB) feasible: estimated ~15 GB VRAM
+> - bf16 LoRA on single 4090 (24GB) feasible: estimated ~18-20 GB VRAM
 
 ### Data Mixture (Tier-Based)
 
@@ -275,8 +275,8 @@ from transformers import TrainingArguments
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name="Qwen/Qwen3-4B",
     max_seq_length=8192,
-    dtype=None,          # Auto-detect (bf16 recommended)
-    load_in_4bit=True,   # Critical for consumer GPUs while maintaining quality
+    dtype="bfloat16",    # Full precision LoRA (no quantization)
+    load_in_4bit=False,
 )
 
 # 2. Add LoRA Adapters

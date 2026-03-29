@@ -28,11 +28,12 @@ VALID_TOOLS = frozenset([
     "get_today_summary",
     "get_history",
     "retrieve_knowledge",
+    "set_goal",
 ])
 
-# Regex pattern for extracting tool calls
+# Regex pattern for extracting tool calls (end tag optional for truncated outputs)
 TOOL_CALL_PATTERN = re.compile(
-    r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
+    r"<tool_call>\s*(\{.*\})\s*(?:</tool_call>)?",
     re.DOTALL
 )
 
@@ -151,16 +152,15 @@ class ToolParser:
                 error_message=f"Invalid JSON in <tool_call>: {e}"
             )
 
-        # Validate required field: name
-        if "name" not in payload:
+        # Validate required field: name (support both "name" and "function" keys)
+        name = payload.get("name") or payload.get("function")
+        if not name:
             return ParseResult(
                 type="parse_error",
                 think=think_content,
                 raw=text,
-                error_message="Missing 'name' field in tool call"
+                error_message="Missing 'name' or 'function' field in tool call"
             )
-
-        name = payload["name"]
 
         # Validate tool name if enabled
         if self.validate_tool_name and name not in VALID_TOOLS:
@@ -171,8 +171,8 @@ class ToolParser:
                 error_message=f"Unknown tool: {name}"
             )
 
-        # Normalize arguments: ensure dict
-        arguments = payload.get("arguments", {})
+        # Normalize arguments: ensure dict (support both "arguments" and "parameters" keys)
+        arguments = payload.get("arguments") or payload.get("parameters") or {}
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)

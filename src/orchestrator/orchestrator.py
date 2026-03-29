@@ -10,7 +10,7 @@ from src.tools.get_today_summary import get_today_summary
 from src.tools.get_history import get_history
 from src.tools.retrieve_knowledge import retrieve_knowledge
 from src.tools.set_goal import set_goal
-from src.orchestrator.inference import MockBackend, VLLMBackend
+from src.orchestrator.inference import MockBackend, VLLMBackend, LocalTransformersBackend
 from src.orchestrator.tool_parser import (
     ToolParser,
     ParseResult,
@@ -31,7 +31,7 @@ class ToolExecutionError(Exception):
         super().__init__(message)
 
 CONFIG_DIR = Path(__file__).parent.parent.parent / "configs"
-MAX_INPUT_LENGTH = 4096
+MAX_INPUT_LENGTH = 8192
 
 TOOL_REGISTRY: Dict[str, Callable] = {
     "get_food_nutrition": get_food_nutrition,
@@ -41,6 +41,55 @@ TOOL_REGISTRY: Dict[str, Callable] = {
     "retrieve_knowledge": retrieve_knowledge,
     "set_goal": set_goal,
 }
+
+# Unified System Prompt matching SFT-v2 Trajectories (Production Version)
+SYSTEM_PROMPT = """You are NutriMind, a specialized AI nutrition assistant.
+
+## CORE PRINCIPLES
+1. **Tool-driven accuracy**: When nutritional data (calories, history, progress) can be obtained via tools, ALWAYS use the appropriate tool.
+2. **Step-by-step reasoning**: Always use <think> tags to analyze the user's request and calculate any required values (e.g., body weight x target protein ratio) before taking action.
+3. **Format consistency**: You MUST use the following XML tags for reasoning and tool calls:
+   <think> Your internal analysis and calculations </think>
+   <tool_call> {"name": "tool_name", "arguments": {"arg": "val"}} </tool_call>
+
+## LANGUAGE RULES
+- All responses must be in English.
+- If the user uses Chinese, acknowledge it but provide the final answer in English.
+
+## BEHAVIOR GUIDELINES
+- **Analyze before acting**: Determine if tools are needed. Respond directly for casual conversation.
+- **Synthesize results**: When using tools, summarize the data in your own words. Do not copy-paste raw tool output.
+- **Safety**: If the user mentions chronic diseases (cancer, organ transplant, etc.), respond: "Your situation involves complex medical nutrition management that exceeds my safe service boundary. Please consult your physician or a registered dietitian."
+
+## TOOL USAGE NOTES
+
+### get_food_nutrition
+Look up nutrition data for one or more foods from the USDA database.
+Arguments: `foods` (list of objects with `food_name` and `amount_grams`)
+Example: `{"foods": [{"food_name": "chicken breast", "amount_grams": 100}]}`
+
+### log_meal
+Record a food entry to the user's history. Only use when explicitly asked.
+Arguments: `foods` (list of objects with `food_name` and `amount_grams`)
+
+### get_today_summary
+Check today's totals and progress against current goals. No arguments needed.
+
+### get_history
+Analyze multi-day trends and goal adherence.
+Arguments: `days` (int), `compare_to_goal` (bool, use true for progress reports)
+
+### retrieve_knowledge
+Search nutrition knowledge base for dietary guidelines and principles.
+Arguments: `query` (str), `mode` (str: "hybrid"/"keyword"/"semantic"), `top_k` (int)
+Do NOT use for specific food calories — use `get_food_nutrition` instead.
+
+### set_goal
+Set or update a daily target (calories, protein, carbs, fat).
+Arguments: `nutrient` (str), `value` (float), `goal_type` (str: "lose"/"maintain"/"gain")
+When user provides weight and ratio (e.g., 80kg, 2g/kg), calculate in <think> FIRST."""
+
+
 
 NO_ARGS_TOOLS = frozenset(["get_today_summary"])
 
@@ -62,17 +111,29 @@ def get_backend():
     try:
         with open(config_path, "r") as f:
             cfg = yaml.safe_load(f)
-        if cfg.get("backend") == "vllm":
+        
+        backend_type = cfg.get("backend")
+        model_name = cfg.get("model_name", "Qwen/Qwen3-4B")
+        max_tokens = cfg.get("max_tokens", 1024)
+        temperature = cfg.get("temperature", 0.1)
+
+        if backend_type == "vllm":
             return VLLMBackend(
                 cfg.get("server_url", "http://localhost:8000/v1"),
-                cfg.get("model_name", "Qwen/Qwen3-4B"),
-                cfg.get("max_tokens", 1024),
-                cfg.get("temperature", 0.1)
+                model_name,
+                max_tokens,
+                temperature
+            )
+        elif backend_type == "local_transformers":
+            return LocalTransformersBackend(
+                model_name,
+                max_tokens,
+                temperature
             )
     except FileNotFoundError:
         logger.debug(f"Model config not found at {config_path}, using MockBackend")
     except Exception as e:
-        logger.warning(f"Failed to load model config: {e}, using MockBackend")
+        logger.error(f"Failed to load model backend: {e}, using MockBackend")
     return MockBackend()
 
 def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -98,10 +159,6 @@ def execute_tool(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
 
 # Shared parser instance (see ADR-001: Pure Text Tool Calling)
 _parser = ToolParser(validate_tool_name=True)
-
-SYSTEM_PROMPT = """You are NutriMind, a nutrition assistant. You have access to specific tools to retrieve data.
-When you need to use a tool, use XML tags: <think>thought process</think><tool_call>{"name": "...", "arguments": {...}}</tool_call>
-If you answer directly, do not use tool tags. Only use JSON in tool calls. Do not use parallel tool calls."""
 
 def orchestrate(user_input: str) -> str:
     """Main orchestration loop using pure text tool calling.

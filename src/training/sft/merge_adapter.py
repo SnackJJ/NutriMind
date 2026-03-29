@@ -143,11 +143,12 @@ def main():
     logger.info(f"Loading base model: {args.base_model}")
     logger.info(f"Loading adapter from: {adapter_path}")
 
+    load_4bit = args.save_4bit  # If saving 4bit, load in 4bit. Otherwise load bf16.
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=str(adapter_path),
         max_seq_length=args.max_seq_length,
-        dtype=None,
-        load_in_4bit=True,
+        dtype="bfloat16",
+        load_in_4bit=load_4bit,
     )
 
     # Verify before merge if requested
@@ -179,8 +180,8 @@ def main():
         merged_model, merged_tokenizer = FastLanguageModel.from_pretrained(
             model_name=args.output_dir,
             max_seq_length=args.max_seq_length,
-            dtype=None,
-            load_in_4bit=True,
+            dtype="bfloat16",
+            load_in_4bit=False,
         )
         FastLanguageModel.for_inference(merged_model)
         success = verify_merged_model(merged_model, merged_tokenizer)

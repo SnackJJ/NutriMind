@@ -1,6 +1,6 @@
-backend: "mock"
+backend: "vllm"
 server_url: "http://localhost:8000/v1"
-model_name: "Qwen/Qwen3-4B"
-timeout_ms: 30000
+model_name: "models/nutrimind-4b-sft-merged"
+timeout_ms: 60000
 max_tokens: 1024
 temperature: 0.1
