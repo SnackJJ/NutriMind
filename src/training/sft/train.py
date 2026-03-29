@@ -18,8 +18,8 @@ import unsloth  # noqa: F401
 import torch
 from datasets import Dataset
 from transformers import TrainingArguments
-from trl import SFTTrainer, DataCollatorForCompletionOnlyLM
-from unsloth import FastLanguageModel, is_bfloat16_supported, train_on_responses_only
+from trl import SFTTrainer
+from unsloth import FastLanguageModel, is_bfloat16_supported
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -228,6 +228,49 @@ def main():
     format_fn = formatting_func(tokenizer)
     full_dataset = full_dataset.map(format_fn, remove_columns=["messages", "tier"])
 
+    def custom_loss_masking(batch):
+        # We manually mask everything to -100 except assistant turns
+        # This completely replaces train_on_responses_only and DataCollator
+        input_ids_list = tokenizer(
+            batch["text"],
+            truncation=True,
+            max_length=args.max_seq_length,
+            padding=False,
+            add_special_tokens=False
+        )["input_ids"]
+        
+        labels_list = []
+        for input_ids in input_ids_list:
+            labels = [-100] * len(input_ids)
+            # Find instances of <|im_start|>assistant (151644, 77091)
+            # and <|im_start|>user (151644, 872)
+            instr_pos = []
+            resp_pos = []
+            for i in range(len(input_ids) - 1):
+                if input_ids[i] == 151644:
+                    if input_ids[i+1] == 872:
+                        instr_pos.append(i)
+                    elif input_ids[i+1] == 77091:
+                        resp_pos.append(i + 2) # add 2 to skip the "<|im_start|>assistant" tokens themselves
+            
+            # For each assistant start, find the next user start
+            for ast_start in resp_pos:
+                next_usr = len(input_ids)
+                for usr_start in instr_pos:
+                    if usr_start > ast_start:
+                        next_usr = usr_start
+                        break
+                # Unmask tokens from assistant content up to next user
+                for i in range(ast_start, next_usr):
+                    labels[i] = input_ids[i]
+            
+            labels_list.append(labels)
+            
+        return {"labels": labels_list}
+
+    logger.info("Applying custom loss masking...")
+    full_dataset = full_dataset.map(custom_loss_masking, batched=True, num_proc=4)
+
     # Train/eval split (90/10)
     split = full_dataset.train_test_split(test_size=0.1, seed=3407)
     train_dataset = split["train"]
@@ -266,15 +309,6 @@ def main():
         seed=3407,
     )
 
-    # Create data collator for loss masking on assistant turns
-    logger.info("Setting up DataCollatorForCompletionOnlyLM for loss masking")
-    collator = DataCollatorForCompletionOnlyLM(
-        instruction_template=[151644, 872], 
-        response_template=[151644, 77091], 
-        tokenizer=tokenizer,
-        mlm=False
-    )
-
     # Create trainer
     trainer = SFTTrainer(
         model=model,
@@ -285,7 +319,6 @@ def main():
         max_seq_length=args.max_seq_length,
         dataset_num_proc=2,
         packing=False,  # Disabled to avoid chunking tool JSON logic
-        data_collator=collator,
         args=training_args,
     )
 
