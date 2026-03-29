@@ -231,13 +231,15 @@ def main():
     def custom_loss_masking(batch):
         # We manually mask everything to -100 except assistant turns
         # This completely replaces train_on_responses_only and DataCollator
-        input_ids_list = tokenizer(
+        tokens = tokenizer(
             batch["text"],
             truncation=True,
             max_length=args.max_seq_length,
             padding=False,
             add_special_tokens=False
-        )["input_ids"]
+        )
+        input_ids_list = tokens["input_ids"]
+        attention_mask_list = tokens["attention_mask"]
         
         labels_list = []
         for input_ids in input_ids_list:
@@ -266,10 +268,19 @@ def main():
             
             labels_list.append(labels)
             
-        return {"labels": labels_list}
+        return {
+            "input_ids": input_ids_list,
+            "attention_mask": attention_mask_list,
+            "labels": labels_list
+        }
 
     logger.info("Applying custom loss masking...")
-    full_dataset = full_dataset.map(custom_loss_masking, batched=True, num_proc=4)
+    full_dataset = full_dataset.map(
+        custom_loss_masking, 
+        batched=True, 
+        num_proc=4, 
+        remove_columns=["text"]
+    )
 
     # Train/eval split (90/10)
     split = full_dataset.train_test_split(test_size=0.1, seed=3407)
@@ -315,10 +326,10 @@ def main():
         tokenizer=tokenizer,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        dataset_text_field="text",
         max_seq_length=args.max_seq_length,
         dataset_num_proc=2,
         packing=False,  # Disabled to avoid chunking tool JSON logic
+        dataset_kwargs={"skip_prepare_dataset": True},
         args=training_args,
     )
 
