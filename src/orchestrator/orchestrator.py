@@ -70,7 +70,7 @@ Example: `{"foods": [{"food_name": "chicken breast", "amount_grams": 100}]}`
 
 ### log_meal
 Record a food entry to the user's history. Only use when explicitly asked.
-Arguments: `foods` (list of objects with `food_name` and `amount_grams`)
+Arguments: `meal_type` (str: "breakfast"/"lunch"/"dinner"/"snack"), `foods` (list of objects with `food_name` and `amount_grams`)
 
 ### get_today_summary
 Check today's totals and progress against current goals. No arguments needed.
@@ -85,7 +85,7 @@ Arguments: `query` (str), `mode` (str: "hybrid"/"keyword"/"semantic"), `top_k` (
 Do NOT use for specific food calories — use `get_food_nutrition` instead.
 
 ### set_goal
-Set or update a daily target (calories, protein, carbs, fat).
+Set or update a daily target (calories, protein, carbs, fat, fiber).
 Arguments: `nutrient` (str), `value` (float), `goal_type` (str: "lose"/"maintain"/"gain")
 When user provides weight and ratio (e.g., 80kg, 2g/kg), calculate in <think> FIRST."""
 

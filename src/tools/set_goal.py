@@ -19,7 +19,7 @@ def set_goal(metric: str, target_value: float, goal_type: str = None) -> dict:
     Returns:
         {status, data: {metric, previous_value, new_value, goal_type}}
     """
-    valid_metrics = ["calories", "protein", "fat", "carbs"]
+    valid_metrics = ["calories", "protein", "fat", "carbs", "fiber"]
     if metric not in valid_metrics:
         return {
             "status": "error",
@@ -34,7 +34,7 @@ def set_goal(metric: str, target_value: float, goal_type: str = None) -> dict:
             "message": f"Calorie target must be between 1000-5000 kcal. Got {target_value}.",
         }
 
-    if metric in ["protein", "fat", "carbs"] and target_value <= 0:
+    if metric in ["protein", "fat", "carbs", "fiber"] and target_value <= 0:
         return {
             "status": "error",
             "error_type": "value_out_of_range",

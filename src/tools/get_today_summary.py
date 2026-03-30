@@ -75,6 +75,7 @@ def get_today_summary() -> dict:
                       ROUND(SUM(mli.protein_g), 1)     AS protein_g,
                       ROUND(SUM(mli.fat_g), 1)         AS fat_g,
                       ROUND(SUM(mli.carbs_g), 1)       AS carbs_g,
+                      ROUND(SUM(mli.fiber_g), 1)       AS fiber_g,
                       GROUP_CONCAT(mli.food_name, ', ') AS food_names
                FROM meal_logs ml
                JOIN meal_log_items mli ON ml.log_id = mli.log_id
@@ -94,6 +95,7 @@ def get_today_summary() -> dict:
                 "protein_g":     float(m["protein_g"] or 0),
                 "fat_g":         float(m["fat_g"] or 0),
                 "carbs_g":       float(m["carbs_g"] or 0),
+                "fiber_g":       float(m["fiber_g"] or 0),
             }
             for m in meal_rows
         ]

@@ -25,5 +25,11 @@ dependencies = [
     "lxml",
     "nltk",
     "tenacity",
+    # veRL GRPO dependencies
+    "verl>=0.5.0",
+    "sglang[all]>=0.3.0",
+    "pyarrow>=14.0.0",
+    "ray>=2.9.0",
+    "wandb>=0.16.0",
 ]
 requires-python = ">=3.10"
