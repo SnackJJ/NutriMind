@@ -103,11 +103,43 @@ def infer_tier(query: str) -> str:
     return "T1"
 
 
+def generate_env_state() -> Dict[str, Any]:
+    import uuid
+    import random
+    
+    # Generate varied user profiles
+    goals = [("maintain", 2000), ("lose", 1500), ("gain", 2800)]
+    idx = random.randint(0, 2)
+    goal, tdee = goals[idx]
+    
+    return {
+        "user_id": f"grpo_user_{uuid.uuid4().hex[:8]}",
+        "user_profile": {"tdee_kcal": tdee, "goal": goal},
+        "user_goals": {
+            "calories": tdee,
+            "protein": int(tdee * 0.3 / 4),
+            "fat": int(tdee * 0.25 / 9),
+            "carbs": int(tdee * 0.45 / 4),
+            "fiber": 25 # Default RDI
+        },
+        "meals_today": [], # Start empty, allow model to log or query
+        "meal_history": [
+            {
+                "date": "yesterday", 
+                "calories": tdee - random.randint(-200, 200),
+                "protein_g": int(tdee * 0.3 / 4),
+                "fat_g": int(tdee * 0.25 / 9),
+                "carbs_g": int(tdee * 0.45 / 4),
+                "fiber_g": 25
+            }
+        ]
+    }
+
 def process_query_v1(query: str, existing_metadata: Optional[Dict] = None) -> Dict[str, Any]:
     """
-    Process a single query for v1 (minimal metadata).
+    Process a single query for v1 (minimal metadata + env_state).
 
-    v1 only needs: query, tier, difficulty
+    v1 needs: query, tier, difficulty, env_state
     No expected_tools, ground_truth, or branch_condition.
     """
     # Use existing tier if provided, otherwise infer
@@ -126,6 +158,7 @@ def process_query_v1(query: str, existing_metadata: Optional[Dict] = None) -> Di
         "query": query,
         "tier": tier,
         "difficulty": difficulty,
+        "env_state": generate_env_state()
     }
 
 
