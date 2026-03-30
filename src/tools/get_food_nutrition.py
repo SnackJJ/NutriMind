@@ -135,7 +135,7 @@ def get_food_nutrition(foods: list) -> dict:
     if not foods:
         return {"status": "error", "error_type": "empty_food_list", "message": "No foods provided."}
 
-    total = {"calories_kcal": 0.0, "protein_g": 0.0, "fat_g": 0.0, "carbs_g": 0.0}
+    total = {"calories_kcal": 0.0, "protein_g": 0.0, "fat_g": 0.0, "carbs_g": 0.0, "fiber_g": 0.0}
     breakdown = []
     failed_items = []
 
@@ -149,6 +149,7 @@ def get_food_nutrition(foods: list) -> dict:
             total["protein_g"] += data.get("protein_g", 0)
             total["fat_g"] += data.get("fat_g", 0)
             total["carbs_g"] += data.get("carbs_g", 0)
+            total["fiber_g"] += data.get("fiber_g", 0)
             breakdown.append(data)
         else:
             logger.warning(f"Food not found in get_food_nutrition: {name}")

@@ -105,6 +105,7 @@ def get_history(days: int = 7, metric: str = "all", compare_to_goal: bool = Fals
             "protein_g":     round(sum(d["protein_g"]     for d in daily_breakdown) / n, 1),
             "fat_g":         round(sum(d["fat_g"]         for d in daily_breakdown) / n, 1),
             "carbs_g":       round(sum(d["carbs_g"]       for d in daily_breakdown) / n, 1),
+            "fiber_g":       round(sum(d["fiber_g"]       for d in daily_breakdown) / n, 1),
         }
 
         # Simple trend: compare first half vs second half of the requested metric
