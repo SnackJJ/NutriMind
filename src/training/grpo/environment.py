@@ -334,11 +334,109 @@ If you answer directly, do not use tool tags. Only use JSON in tool calls. Do no
         # Execute tool
         try:
             tool_fn = self.tool_registry[name]
-            # Handle no-arg tools
-            if name in ("get_today_summary",):
-                result = tool_fn()
+            
+            # --- INTERCEPT STATEFUL TOOLS --- 
+            if self.initial_snapshot is not None and name in ("get_today_summary", "log_meal", "set_goal", "get_history"):
+                if name == "get_today_summary":
+                    today_cals = sum(m.get("calories", 0) for m in self.initial_snapshot.get("meals_today", []))
+                    budget = self.initial_snapshot.get("user_goals", {}).get("calories", 2000)
+                    
+                    # Compute macros from snapshot
+                    protein_g = sum(m.get("protein_g", 0) for m in self.initial_snapshot.get("meals_today", []))
+                    fat_g = sum(m.get("fat_g", 0) for m in self.initial_snapshot.get("meals_today", []))
+                    carbs_g = sum(m.get("carbs_g", 0) for m in self.initial_snapshot.get("meals_today", []))
+                    fiber_g = sum(m.get("fiber_g", 0) for m in self.initial_snapshot.get("meals_today", []))
+                    meals_today = self.initial_snapshot.get("meals_today", [])
+                    
+                    meals_logged = []
+                    food_names_list = []
+                    for i, m in enumerate(meals_today):
+                        f_names = ", ".join([f.get("name", "") for f in m.get("foods", [])])
+                        food_names_list.append(f_names)
+                        meals_logged.append({
+                            "meal_id": str(i+1),
+                            "meal_type": m.get("meal_type", "snack"),
+                            "logged_at": "2026-03-29T12:00:00",
+                            "food_names": f_names,
+                            "calories_kcal": m.get("calories", 0),
+                            "protein_g": m.get("protein_g", 0),
+                            "fat_g": m.get("fat_g", 0),
+                            "carbs_g": m.get("carbs_g", 0)
+                        })
+                        
+                    result = {
+                        "status": "success", 
+                        "data": {
+                            "date": "2026-03-29",
+                            "total_calories": float(today_cals), 
+                            "calorie_budget": float(budget), 
+                            "remaining_calories": round(budget - today_cals, 1),
+                            "protein_g": float(protein_g),
+                            "fat_g": float(fat_g),
+                            "carbs_g": float(carbs_g),
+                            "fiber_g": float(fiber_g),
+                            "meal_count": len(meals_today),
+                            "food_summary": "; ".join(food_names_list),
+                            "meals_logged": meals_logged
+                        }
+                    }
+                elif name == "log_meal":
+                    # Mimic the output shape of src/tools/log_meal.py
+                    # Assume roughly 300 calories if we don't calculate it fully
+                    result = {
+                        "status": "success", 
+                        "meal_id": "mock_123",
+                        "total_calories": 300.0
+                    }
+                elif name == "set_goal":
+                    result = {"status": "success", "message": "Goal updated successfully."}
+                elif name == "get_history":
+                    history = self.initial_snapshot.get("meal_history", [])
+                    days_requested = args.get("days", 7)
+                    
+                    # Compute averages
+                    tot_cals = sum(d.get("calories", 0) for d in history)
+                    tot_pro = sum(d.get("protein_g", 0) for d in history)
+                    tot_fat = sum(d.get("fat_g", 0) for d in history)
+                    tot_carbs = sum(d.get("carbs_g", 0) for d in history)
+                    tot_fiber = sum(d.get("fiber_g", 0) for d in history)
+                    n = max(1, len(history))
+                    
+                    daily_breakdown = []
+                    for h in history:
+                        daily_breakdown.append({
+                            "date": h.get("date", "2026-03-28"),
+                            "calories_kcal": float(h.get("calories", 0)),
+                            "protein_g": float(h.get("protein_g", 0)),
+                            "fat_g": float(h.get("fat_g", 0)),
+                            "carbs_g": float(h.get("carbs_g", 0)),
+                            "fiber_g": float(h.get("fiber_g", 0)),
+                            "meal_count": 3,
+                            "food_summary": "Mocked historical food"
+                        })
+                        
+                    result = {
+                        "status": "success", 
+                        "data": {
+                            "period": f"Last {days_requested} days",
+                            "days_with_data": len(history),
+                            "daily_averages": {
+                                "calories_kcal": round(tot_cals / n, 1),
+                                "protein_g": round(tot_pro / n, 1),
+                                "fat_g": round(tot_fat / n, 1),
+                                "carbs_g": round(tot_carbs / n, 1),
+                                "fiber_g": round(tot_fiber / n, 1)
+                            },
+                            "trend": "stable",
+                            "daily_breakdown": daily_breakdown
+                        }
+                    }
             else:
-                result = tool_fn(**args)
+                # Handle real static stateless tools
+                if name in ("get_today_summary",):
+                    result = tool_fn()
+                else:
+                    result = tool_fn(**args)
 
             # Cache result
             if self.tool_cache is not None:
@@ -367,9 +465,9 @@ If you answer directly, do not use tool tags. Only use JSON in tool calls. Do no
 
     def _restore_user_state(self, snapshot: Dict[str, Any]) -> None:
         """Restore user state from snapshot (for deterministic rollouts)."""
-        # This will be implemented based on actual user state management
-        # For now, it's a placeholder for future integration
-        pass
+        # Stateful reads/writes are intercepted via self.initial_snapshot above.
+        # So we literally do not need to rewrite the global json files!
+        self.initial_snapshot = snapshot
 
 
 def compute_state_key(messages: List[Dict[str, str]]) -> str:

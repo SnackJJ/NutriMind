@@ -193,7 +193,7 @@ def _compute_t1_outcome_from_tool_results(
             if isinstance(result, dict) and result.get("success"):
                 data = result.get("data", {})
                 # Extract key nutrition values
-                for key in ["calories", "protein_g", "carbs_g", "fat_g"]:
+                for key in ["calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g"]:
                     if key in data:
                         nutrition_values.append(data[key])
 
