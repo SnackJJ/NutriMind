@@ -1,0 +1,214 @@
+# veRL GRPO Configuration for NutriMind
+#
+# Multi-turn environment-in-the-loop GRPO training with:
+# - sglang backend for efficient multi-turn generation
+# - TP=2 for dual-GPU tensor parallelism
+# - LoRA for memory-efficient fine-tuning
+# - Custom NutriMind interaction for tool execution
+#
+# Hardware target: 2x A100 80GB (or adapt for consumer GPUs)
+#
+# Usage:
+#   python -m verl.trainer.main_ppo \
+#       --config-path=configs \
+#       --config-name=verl_grpo \
+#       algorithm.adv_estimator=grpo
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  # Training and validation data (parquet format)
+  train_files: "data/grpo/verl_train.parquet"
+  val_files: "data/grpo/verl_val.parquet"
+
+  # Batch sizes
+  train_batch_size: 32          # Prompts per training step
+  val_batch_size: 16            # Prompts per validation step
+
+  # Sequence length limits
+  max_prompt_length: 512        # Max tokens for input prompt
+  max_response_length: 2048     # Max tokens for model response (multi-turn)
+
+  # Data processing
+  filter_overlong_prompts: true
+  truncation: "error"           # Error on truncation (should not happen)
+  shuffle: true
+  seed: 42
+
+  # CRITICAL: Must be true for multi-turn
+  return_raw_chat: true
+
+# =============================================================================
+# Model & Training Configuration
+# =============================================================================
+actor_rollout_ref:
+  # -------------------------------------------------------------------------
+  # Model Configuration
+  # -------------------------------------------------------------------------
+  model:
+    # Path to SFT checkpoint (merged LoRA or base model)
+    path: "models/nutrimind-4b-sft-merged"
+    # Alternative: use base model with LoRA
+    # path: "Qwen/Qwen3-4B"
+
+    # LoRA Configuration
+    enable_lora: true
+    lora_rank: 16
+    lora_alpha: 16
+    lora_dropout: 0.0
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+    # Memory optimization
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+
+  # -------------------------------------------------------------------------
+  # Actor (Policy) Configuration
+  # -------------------------------------------------------------------------
+  actor:
+    # Optimizer
+    optim:
+      lr: 5e-7                  # Conservative for RL (40x lower than SFT)
+      weight_decay: 0.01
+      betas: [0.9, 0.999]
+
+    # PPO/GRPO batch sizes
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 8
+
+    # KL divergence
+    use_kl_loss: true
+    kl_loss_coef: 0.05          # Moderate KL penalty
+    kl_loss_type: "low_var_kl"
+
+    # Entropy bonus (exploration)
+    entropy_coeff: 0.01
+
+    # FSDP configuration (for model sharding)
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+      grad_offload: false
+
+  # -------------------------------------------------------------------------
+  # Rollout Configuration (Generation)
+  # -------------------------------------------------------------------------
+  rollout:
+    # Backend: sglang recommended for multi-turn (better prefix caching)
+    name: "sglang"
+
+    # Tensor parallelism (TP=2 for dual GPU)
+    tensor_model_parallel_size: 2
+
+    # GPU memory allocation
+    gpu_memory_utilization: 0.7
+
+    # GRPO sampling
+    n: 8                        # G=8 rollouts per prompt
+
+    # Model loading
+    load_format: "safetensors"
+
+    # Log probability computation
+    log_prob_micro_batch_size_per_gpu: 8
+
+    # -------------------------------------------------------------------------
+    # Multi-Turn Configuration (CRITICAL)
+    # -------------------------------------------------------------------------
+    multi_turn:
+      enable: true
+      max_user_turns: 6         # Max tool response injections
+      max_assistant_turns: 6    # Max LLM generation steps
+      tokenization_sanity_check_mode: "ignore_strippable"
+      use_inference_chat_template: false
+
+    # Tool configuration
+    tool_kwargs:
+      tools_config_file: "configs/verl_tools.yaml"
+
+    # Interaction handler (NutriMind custom)
+    interaction_config_path: "configs/verl_interaction.yaml"
+
+    # Generation parameters
+    temperature: 0.7
+    top_p: 0.9
+    top_k: 50
+
+    # Stop tokens (Qwen3 uses <|im_end|>)
+    # veRL should auto-detect from tokenizer
+
+  # -------------------------------------------------------------------------
+  # Reference Model Configuration
+  # -------------------------------------------------------------------------
+  ref:
+    # Log probability computation
+    log_prob_micro_batch_size_per_gpu: 8
+
+    # CPU offload to save GPU memory
+    fsdp_config:
+      param_offload: true       # Offload ref model to CPU
+
+# =============================================================================
+# Algorithm Configuration
+# =============================================================================
+algorithm:
+  # Use GRPO advantage estimation
+  adv_estimator: "grpo"
+
+  # GRPO-specific settings
+  use_kl_in_reward: false       # KL handled separately via kl_loss
+
+  # PPO clipping
+  clip_range: 0.2
+  clip_range_value: 0.2
+
+  # Generalized Advantage Estimation (not used in GRPO)
+  gamma: 1.0
+  gae_lambda: 1.0
+
+# =============================================================================
+# Trainer Configuration
+# =============================================================================
+trainer:
+  # Project naming
+  project_name: "nutrimind-grpo"
+  experiment_name: "qwen3-4b-grpo-v2"
+
+  # Hardware
+  n_gpus_per_node: 2
+  nnodes: 1
+
+  # Training schedule
+  total_epochs: 3
+  save_freq: 100                # Save checkpoint every N steps
+  test_freq: 50                 # Evaluate every N steps
+
+  # Validation
+  val_before_train: false
+
+  # Critic (not used in GRPO)
+  critic_warmup: 0
+
+  # Logging
+  logger: '["console", "wandb"]'
+
+  # Checkpointing
+  resume_mode: "auto"           # Auto-resume from latest checkpoint
+  save_total_limit: 3           # Keep only last N checkpoints
+
+  # Output directory
+  default_local_dir: "models/verl_grpo"
+
+# =============================================================================
+# Reward Configuration (handled by NutriMindInteraction)
+# =============================================================================
+# Note: Reward computation is done in verl_interaction.py using
+# existing reward_v1/v2/v3 functions from src/training/grpo/reward.py

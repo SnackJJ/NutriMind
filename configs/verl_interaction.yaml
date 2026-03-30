@@ -1,0 +1,20 @@
+# veRL Interaction Configuration for NutriMind
+#
+# This file configures the custom interaction handler for multi-turn
+# tool calling during GRPO training.
+#
+# veRL loads this via actor_rollout_ref.rollout.interaction_config_path
+
+interaction:
+  - name: "nutrimind"
+    class_name: "src.training.grpo.verl_interaction.NutriMindInteraction"
+    config:
+      # Reward function version (v1, v2, or v3)
+      # v1: Pure rule-based (format + tool_selection + outcome)
+      # v2: v1 + efficiency + conditional branching
+      # v3: v2 + LLM-Judge (not fully supported in veRL context)
+      reward_version: "v2"
+
+      # Maximum tool call rounds before forced termination
+      # Matches orchestrator config (6 rounds)
+      max_tool_rounds: 6

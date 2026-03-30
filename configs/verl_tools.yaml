@@ -1,0 +1,119 @@
+# veRL Tool Configuration for NutriMind
+# This file defines the JSON schema for tools used in multi-turn rollouts.
+#
+# veRL uses this to:
+# 1. Inject tool schemas into the system prompt (if enabled)
+# 2. Validate tool calls from the model
+# 3. Route tool execution to the appropriate handler
+
+tools:
+  - name: "get_food_nutrition"
+    description: "Look up nutrition data for one or more foods from the USDA database. Returns calories, protein, fat, carbs, and other nutrients."
+    parameters:
+      type: "object"
+      properties:
+        foods:
+          type: "array"
+          description: "List of foods to look up"
+          items:
+            type: "object"
+            properties:
+              food_name:
+                type: "string"
+                description: "Name of the food (e.g., 'chicken breast', 'brown rice')"
+              amount_grams:
+                type: "number"
+                description: "Amount in grams"
+            required: ["food_name", "amount_grams"]
+      required: ["foods"]
+
+  - name: "log_meal"
+    description: "Record a food entry to the user's meal history. Only use when the user explicitly asks to log a meal."
+    parameters:
+      type: "object"
+      properties:
+        meal_type:
+          type: "string"
+          enum: ["breakfast", "lunch", "dinner", "snack"]
+          description: "Type of meal"
+        foods:
+          type: "array"
+          description: "Foods in this meal"
+          items:
+            type: "object"
+            properties:
+              food_name:
+                type: "string"
+              amount_grams:
+                type: "number"
+            required: ["food_name", "amount_grams"]
+        timestamp:
+          type: "string"
+          description: "ISO timestamp (optional, defaults to now)"
+      required: ["meal_type", "foods"]
+
+  - name: "get_today_summary"
+    description: "Check today's nutrition totals and progress against current goals. Returns calories consumed, remaining budget, and macro breakdown."
+    parameters:
+      type: "object"
+      properties: {}
+
+  - name: "get_history"
+    description: "Analyze multi-day nutrition trends and goal adherence. Use for weekly summaries or progress tracking."
+    parameters:
+      type: "object"
+      properties:
+        days:
+          type: "integer"
+          description: "Number of days to look back"
+        metric:
+          type: "string"
+          enum: ["calories", "protein", "fat", "carbs", "all"]
+          description: "Specific metric to analyze (optional, defaults to 'all')"
+        compare_to_goal:
+          type: "boolean"
+          description: "Whether to compare against user goals"
+      required: ["days"]
+
+  - name: "retrieve_knowledge"
+    description: "Search the nutrition knowledge base for dietary guidelines, recommendations, and scientific information. Do NOT use for specific food calories."
+    parameters:
+      type: "object"
+      properties:
+        query:
+          type: "string"
+          description: "Natural language search query"
+        mode:
+          type: "string"
+          enum: ["hybrid", "keyword", "semantic"]
+          description: "Search mode (optional, defaults to 'hybrid')"
+        top_k:
+          type: "integer"
+          description: "Number of results to return (optional, defaults to 3)"
+      required: ["query"]
+
+  - name: "set_goal"
+    description: "Set or update a daily nutrition target. When the user provides weight and ratio (e.g., 80kg, 2g/kg protein), calculate the value first."
+    parameters:
+      type: "object"
+      properties:
+        metric:
+          type: "string"
+          enum: ["calories", "protein", "fat", "carbs"]
+          description: "Which nutrient to set goal for"
+        target_value:
+          type: "number"
+          description: "Target value (calories or grams)"
+        goal_type:
+          type: "string"
+          enum: ["lose", "maintain", "gain"]
+          description: "Type of goal (optional)"
+      required: ["metric", "target_value"]
+
+# Tool calling format configuration
+format:
+  # NutriMind uses XML-style tool calls
+  style: "xml"
+  call_tag: "tool_call"
+  response_tag: "tool_response"
+  # Example: <tool_call>{"name": "get_food_nutrition", "arguments": {...}}</tool_call>
