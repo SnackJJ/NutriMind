@@ -1,0 +1,197 @@
+# veRL-agent GiGPO Configuration for NutriMind
+#
+# GiGPO (Group-in-Group Policy Optimization) adds step-level credit assignment
+# on top of GRPO, using anchor state detection to identify where rollouts diverge.
+#
+# This config uses verl-agent (https://github.com/langfengQ/verl-agent),
+# the official GiGPO implementation from the paper authors.
+#
+# Hardware target: 2x A100 80GB
+#
+# Usage:
+#   python -m src.training.grpo.train_verl \
+#       --algorithm gigpo \
+#       --config configs/verl_agent_gigpo.yaml \
+#       --reward_version v2
+#
+# Or directly:
+#   python -m verl_agent.trainer.main_ppo \
+#       --config-path=configs \
+#       --config-name=verl_agent_gigpo \
+#       algorithm.adv_estimator=gigpo
+
+# =============================================================================
+# Algorithm Configuration (GiGPO-specific)
+# =============================================================================
+algorithm:
+  # Use GiGPO advantage estimation (step-level credit assignment)
+  adv_estimator: "gigpo"
+
+  # GiGPO-specific configuration
+  # Step reward weight: how much step-level advantages contribute
+  step_reward_weight: 1.0
+  # Episode reward weight: how much trajectory-level advantages contribute
+  episode_reward_weight: 1.0
+  # Discount factor for step rewards
+  step_reward_gamma: 0.95
+
+  # Grouping strategy for anchor state detection
+  grouping: "traj_group_id"
+
+  # PPO clipping (same as GRPO)
+  clip_range: 0.2
+  clip_range_value: 0.2
+
+  # KL divergence in reward (handled separately via kl_loss)
+  use_kl_in_reward: false
+
+  # GAE (not used in GiGPO)
+  gamma: 1.0
+  gae_lambda: 1.0
+
+# =============================================================================
+# Environment Manager (NutriMind adapter)
+# =============================================================================
+env_manager:
+  # Custom NutriMind environment manager for step-independent rollout
+  class_name: "src.training.grpo.verl_agent_env.NutriMindStepEnvManager"
+
+  # Rollout group configuration
+  group_size: 8               # G=8 rollouts per prompt
+  num_env_groups: 32          # Number of parallel environment groups
+
+  # Environment-specific config
+  max_tool_rounds: 6
+  reward_version: "v2"
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  # Training and validation data (parquet format)
+  train_files: "data/grpo/verl_train.parquet"
+  val_files: "data/grpo/verl_val.parquet"
+
+  # Batch sizes
+  train_batch_size: 32
+  val_batch_size: 16
+
+  # Sequence length limits
+  max_prompt_length: 512
+  max_response_length: 2048
+
+  # Data processing
+  filter_overlong_prompts: true
+  truncation: "error"
+  shuffle: true
+  seed: 42
+
+  # CRITICAL: Must be true for multi-turn
+  return_raw_chat: true
+
+# =============================================================================
+# Model & Training Configuration
+# =============================================================================
+actor_rollout_ref:
+  # Model Configuration
+  model:
+    path: "models/nutrimind-4b-sft-merged"
+
+    # LoRA Configuration
+    enable_lora: true
+    lora_rank: 16
+    lora_alpha: 16
+    lora_dropout: 0.0
+    target_modules:
+      - "q_proj"
+      - "k_proj"
+      - "v_proj"
+      - "o_proj"
+      - "gate_proj"
+      - "up_proj"
+      - "down_proj"
+
+    # Memory optimization
+    use_remove_padding: true
+    enable_gradient_checkpointing: true
+
+  # Actor (Policy) Configuration
+  actor:
+    optim:
+      lr: 5e-7
+      weight_decay: 0.01
+      betas: [0.9, 0.999]
+
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 8
+
+    use_kl_loss: true
+    kl_loss_coef: 0.05
+    kl_loss_type: "low_var_kl"
+
+    entropy_coeff: 0.01
+
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+      grad_offload: false
+
+  # Rollout Configuration
+  rollout:
+    name: "sglang"
+    tensor_model_parallel_size: 2
+    gpu_memory_utilization: 0.7
+    n: 8                        # G=8 rollouts per prompt
+    load_format: "safetensors"
+    log_prob_micro_batch_size_per_gpu: 8
+
+    # Multi-Turn Configuration
+    multi_turn:
+      enable: true
+      max_user_turns: 6
+      max_assistant_turns: 6
+      tokenization_sanity_check_mode: "ignore_strippable"
+      use_inference_chat_template: false
+
+    # Tool configuration
+    tool_kwargs:
+      tools_config_file: "configs/verl_tools.yaml"
+
+    # Interaction handler
+    interaction_config_path: "configs/verl_interaction.yaml"
+
+    # Generation parameters
+    temperature: 0.7
+    top_p: 0.9
+    top_k: 50
+
+  # Reference Model Configuration
+  ref:
+    log_prob_micro_batch_size_per_gpu: 8
+    fsdp_config:
+      param_offload: true
+
+# =============================================================================
+# Trainer Configuration
+# =============================================================================
+trainer:
+  project_name: "nutrimind-gigpo"
+  experiment_name: "qwen3-4b-gigpo-v2"
+
+  n_gpus_per_node: 2
+  nnodes: 1
+
+  # Training schedule
+  total_epochs: 2               # Same as GRPO
+  save_freq: 100
+  test_freq: 30                 # Frequent evaluation for monitoring
+
+  val_before_train: false
+  critic_warmup: 0
+
+  logger: '["console", "wandb"]'
+
+  resume_mode: "auto"
+  save_total_limit: 3
+
+  default_local_dir: "models/verl_gigpo"
