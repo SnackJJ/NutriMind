@@ -44,6 +44,7 @@ actor_rollout_ref:
   nccl_timeout: 600
 
   model:
+    _target_: verl.workers.config.HFModelConfig
     path: "models/nutrimind-4b-sft-merged"
     tokenizer_path: null
     use_shm: false
@@ -66,6 +67,7 @@ actor_rollout_ref:
     use_fused_kernels: false
 
   actor:
+    _target_: verl.workers.config.FSDPActorConfig
     strategy: "fsdp"
     ppo_mini_batch_size: 16
     ppo_micro_batch_size: null
@@ -86,6 +88,7 @@ actor_rollout_ref:
     ulysses_sequence_parallel_size: 1
     use_remove_padding: true
     optim:
+      _target_: verl.workers.config.FSDPOptimizerConfig
       lr: 5e-7
       lr_warmup_steps_ratio: 0.0
       total_training_steps: -1
@@ -94,6 +97,7 @@ actor_rollout_ref:
       betas: [0.9, 0.999]
       clip_grad: 1.0
     fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
       param_offload: false
       optimizer_offload: false
       grad_offload: false
@@ -105,9 +109,11 @@ actor_rollout_ref:
       strategy: "fsdp"
       dtype: "bfloat16"
     checkpoint:
+      _target_: verl.trainer.config.CheckpointConfig
       save_contents: ["model", "optimizer", "extra"]
 
   rollout:
+    _target_: verl.workers.config.RolloutConfig
     name: "sglang"
     mode: "async"
     nnodes: 0
@@ -140,6 +146,7 @@ actor_rollout_ref:
     over_sample_rate: 0
     skip_tokenizer_init: true
     multi_turn:
+      _target_: verl.workers.config.MultiTurnConfig
       enable: true
       max_assistant_turns: 6
       max_user_turns: 6
@@ -151,17 +158,20 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: "ignore_strippable"
       format: "hermes"
     val_kwargs:
+      _target_: verl.workers.config.SamplingConfig
       top_k: -1
       top_p: 1.0
       temperature: 0
       n: 1
       do_sample: false
     checkpoint_engine:
+      _target_: verl.workers.config.CheckpointEngineConfig
       backend: "naive"
       update_weights_bucket_megabytes: 2048
       engine_kwargs: {}
 
   ref:
+    _target_: verl.workers.config.FSDPActorConfig
     strategy: "fsdp"
     use_torch_compile: false
     log_prob_micro_batch_size: null
@@ -170,6 +180,7 @@ actor_rollout_ref:
     log_prob_max_token_len_per_gpu: 16384
     ulysses_sequence_parallel_size: 1
     fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
       param_offload: true
       optimizer_offload: false
       reshard_after_forward: true
@@ -185,6 +196,7 @@ actor_rollout_ref:
 # Critic Configuration (not used in GRPO but required)
 # =============================================================================
 critic:
+  _target_: verl.workers.config.FSDPCriticConfig
   strategy: "fsdp"
   enable: null
   ppo_mini_batch_size: 16
@@ -203,6 +215,7 @@ critic:
   ulysses_sequence_parallel_size: 1
   grad_clip: 1.0
   optim:
+    _target_: verl.workers.config.FSDPOptimizerConfig
     lr: 1e-5
     lr_warmup_steps_ratio: 0.0
     total_training_steps: -1
@@ -211,6 +224,7 @@ critic:
     betas: [0.9, 0.999]
     clip_grad: 1.0
   model:
+    _target_: verl.workers.config.FSDPCriticModelCfg
     use_shm: false
     enable_gradient_checkpointing: true
     enable_activation_offload: false
@@ -219,6 +233,7 @@ critic:
     lora_alpha: 16
     target_modules: "all-linear"
     fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
       param_offload: false
       optimizer_offload: false
       reshard_after_forward: true
@@ -230,12 +245,14 @@ critic:
       strategy: "fsdp"
       dtype: "bfloat16"
   checkpoint:
+    _target_: verl.trainer.config.CheckpointConfig
     save_contents: ["model", "optimizer", "extra"]
 
 # =============================================================================
 # Algorithm Configuration (GRPO)
 # =============================================================================
 algorithm:
+  _target_: verl.trainer.config.AlgoConfig
   gamma: 1.0
   lam: 1.0
   adv_estimator: "grpo"
@@ -243,6 +260,7 @@ algorithm:
   use_kl_in_reward: false
   kl_penalty: "kl"
   kl_ctrl:
+    _target_: verl.trainer.config.KLControlConfig
     type: "fixed"
     kl_coef: 0.001
     horizon: 10000
@@ -304,6 +322,7 @@ reward:
     path: null
     name: "compute_score"
   reward_manager:
+    _target_: verl.workers.config.reward_model.RewardManagerConfig
     source: "register"
     name: "naive"
   reward_model:
@@ -353,6 +372,7 @@ trainer:
 # Global Profiler Configuration
 # =============================================================================
 global_profiler:
+  _target_: verl.utils.profiler.ProfilerConfig
   tool: null
   steps: null
   profile_continuous_steps: false
