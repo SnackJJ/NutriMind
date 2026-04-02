@@ -1,12 +1,5 @@
 # veRL GRPO Configuration for NutriMind
-#
-# Multi-turn environment-in-the-loop GRPO training with:
-# - sglang backend for efficient multi-turn generation
-# - TP=2 for dual-GPU tensor parallelism
-# - LoRA for memory-efficient fine-tuning
-# - Custom NutriMind interaction for tool execution
-#
-# Hardware target: 2x A100 80GB (or adapt for consumer GPUs)
+# Based on veRL's _generated_ppo_trainer.yaml with NutriMind customizations
 #
 # Usage:
 #   python -m verl.trainer.main_ppo \
@@ -18,45 +11,49 @@
 # Data Configuration
 # =============================================================================
 data:
-  # Training and validation data (parquet format)
+  tokenizer: null
+  use_shm: false
   train_files: "data/grpo/verl_train.parquet"
   val_files: "data/grpo/verl_val.parquet"
-
-  # Batch sizes
-  train_batch_size: 32          # Prompts per training step
-  val_batch_size: 16            # Prompts per validation step
-
-  # Sequence length limits
-  max_prompt_length: 512        # Max tokens for input prompt
-  max_response_length: 2048     # Max tokens for model response (multi-turn)
-
-  # Data processing
-  filter_overlong_prompts: true
-  truncation: "error"           # Error on truncation (should not happen)
+  train_max_samples: -1
+  val_max_samples: -1
+  prompt_key: prompt
+  reward_fn_key: data_source
+  max_prompt_length: 512
+  max_response_length: 2048
+  train_batch_size: 32
+  val_batch_size: 16
+  return_raw_input_ids: false
+  return_raw_chat: true
+  return_full_prompt: false
   shuffle: true
   seed: 42
-
-  # CRITICAL: Must be true for multi-turn
-  return_raw_chat: true
+  dataloader_num_workers: 8
+  validation_shuffle: false
+  filter_overlong_prompts: true
+  filter_overlong_prompts_workers: 1
+  truncation: "error"
+  trust_remote_code: false
+  return_multi_modal_inputs: true
 
 # =============================================================================
-# Model & Training Configuration
+# Actor/Rollout/Ref Configuration
 # =============================================================================
 actor_rollout_ref:
-  # -------------------------------------------------------------------------
-  # Model Configuration
-  # -------------------------------------------------------------------------
-  model:
-    # Path to SFT checkpoint (merged LoRA or base model)
-    path: "models/nutrimind-4b-sft-merged"
-    # Alternative: use base model with LoRA
-    # path: "Qwen/Qwen3-4B"
+  hybrid_engine: true
+  nccl_timeout: 600
 
-    # LoRA Configuration
-    enable_lora: true
+  model:
+    path: "models/nutrimind-4b-sft-merged"
+    tokenizer_path: null
+    use_shm: false
+    trust_remote_code: false
+    override_config: {}
+    enable_gradient_checkpointing: true
+    enable_activation_offload: false
+    use_remove_padding: true
     lora_rank: 16
     lora_alpha: 16
-    lora_dropout: 0.0
     target_modules:
       - "q_proj"
       - "k_proj"
@@ -65,202 +62,196 @@ actor_rollout_ref:
       - "gate_proj"
       - "up_proj"
       - "down_proj"
+    use_liger: false
+    use_fused_kernels: false
 
-    # Memory optimization
-    use_remove_padding: true
-    enable_gradient_checkpointing: true
-
-  # -------------------------------------------------------------------------
-  # Actor (Policy) Configuration
-  # -------------------------------------------------------------------------
   actor:
-    # Training strategy: fsdp, fsdp2, or megatron
     strategy: "fsdp"
-
-    # Gradient clipping
-    grad_clip: 1.0
-
-    # Optimizer
-    optim:
-      lr: 5e-7                  # Conservative for RL (40x lower than SFT)
-      weight_decay: 0.01
-      betas: [0.9, 0.999]
-      lr_warmup_steps_ratio: 0.0
-      total_training_steps: -1
-      lr_warmup_steps: -1
-
-    # PPO/GRPO batch sizes
     ppo_mini_batch_size: 16
+    ppo_micro_batch_size: null
     ppo_micro_batch_size_per_gpu: 8
-    ppo_max_token_len_per_gpu: 16384
     use_dynamic_bsz: false
-
-    # PPO settings
+    ppo_max_token_len_per_gpu: 16384
     clip_ratio: 0.2
-    ppo_epochs: 1
-    shuffle: false
-
-    # KL divergence
-    use_kl_loss: true
-    kl_loss_coef: 0.05          # Moderate KL penalty
-    kl_loss_type: "low_var_kl"
-
-    # Entropy bonus (exploration)
     entropy_coeff: 0.01
     calculate_entropy: false
-
-    # Memory optimization
+    use_kl_loss: true
+    kl_loss_coef: 0.05
+    kl_loss_type: "low_var_kl"
+    ppo_epochs: 1
+    shuffle: false
+    data_loader_seed: 42
+    use_torch_compile: false
+    grad_clip: 1.0
     ulysses_sequence_parallel_size: 1
     use_remove_padding: true
-    use_torch_compile: false    # Disable for compatibility
-
-    # FSDP configuration (for model sharding)
+    optim:
+      lr: 5e-7
+      lr_warmup_steps_ratio: 0.0
+      total_training_steps: -1
+      weight_decay: 0.01
+      lr_warmup_steps: -1
+      betas: [0.9, 0.999]
+      clip_grad: 1.0
     fsdp_config:
       param_offload: false
       optimizer_offload: false
       grad_offload: false
+      reshard_after_forward: true
+      fsdp_size: -1
+      seed: 42
+      ulysses_sequence_parallel_size: 1
+      use_torch_compile: false
+      strategy: "fsdp"
+      dtype: "bfloat16"
+    checkpoint:
+      save_contents: ["model", "optimizer", "extra"]
 
-  # -------------------------------------------------------------------------
-  # Rollout Configuration (Generation)
-  # -------------------------------------------------------------------------
   rollout:
-    # Backend: sglang recommended for multi-turn (better prefix caching)
     name: "sglang"
-
-    # Tensor parallelism (TP=2 for dual GPU)
-    tensor_model_parallel_size: 2
-
-    # GPU memory allocation
+    mode: "async"
+    nnodes: 0
+    n_gpus_per_node: 2
+    temperature: 0.7
+    top_k: 50
+    top_p: 0.9
+    prompt_length: 512
+    response_length: 2048
+    dtype: "bfloat16"
     gpu_memory_utilization: 0.7
-
-    # GRPO sampling
-    n: 8                        # G=8 rollouts per prompt
-
-    # Model loading
+    ignore_eos: false
+    enforce_eager: false
+    free_cache_engine: true
+    tensor_model_parallel_size: 2
+    data_parallel_size: 1
+    expert_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    max_num_batched_tokens: 8192
+    max_model_len: null
+    max_num_seqs: 1024
+    enable_chunked_prefill: true
+    enable_prefix_caching: true
     load_format: "safetensors"
-
-    # Log probability computation
+    log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: 8
-
-    # -------------------------------------------------------------------------
-    # Multi-Turn Configuration (CRITICAL)
-    # -------------------------------------------------------------------------
+    disable_log_stats: true
+    do_sample: true
+    n: 8
+    over_sample_rate: 0
+    skip_tokenizer_init: true
     multi_turn:
       enable: true
-      max_user_turns: 6         # Max tool response injections
-      max_assistant_turns: 6    # Max LLM generation steps
-      tokenization_sanity_check_mode: "ignore_strippable"
+      max_assistant_turns: 6
+      max_user_turns: 6
+      max_parallel_calls: 1
+      max_tool_response_length: 256
+      tool_response_truncate_side: "middle"
+      interaction_config_path: "configs/verl_interaction.yaml"
       use_inference_chat_template: false
+      tokenization_sanity_check_mode: "ignore_strippable"
+      format: "hermes"
+    val_kwargs:
+      top_k: -1
+      top_p: 1.0
+      temperature: 0
+      n: 1
+      do_sample: false
+    checkpoint_engine:
+      backend: "naive"
+      update_weights_bucket_megabytes: 2048
+      engine_kwargs: {}
 
-    # Tool configuration
-    tool_kwargs:
-      tools_config_file: "configs/verl_tools.yaml"
-
-    # Interaction handler (NutriMind custom)
-    interaction_config_path: "configs/verl_interaction.yaml"
-
-    # Generation parameters
-    temperature: 0.7
-    top_p: 0.9
-    top_k: 50
-
-    # Stop tokens (Qwen3 uses <|im_end|>)
-    # veRL should auto-detect from tokenizer
-
-  # -------------------------------------------------------------------------
-  # Reference Model Configuration
-  # -------------------------------------------------------------------------
   ref:
-    # Log probability computation
+    strategy: "fsdp"
+    use_torch_compile: false
+    log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: 8
-
-    # CPU offload to save GPU memory
+    log_prob_use_dynamic_bsz: false
+    log_prob_max_token_len_per_gpu: 16384
+    ulysses_sequence_parallel_size: 1
     fsdp_config:
-      param_offload: true       # Offload ref model to CPU
+      param_offload: true
+      optimizer_offload: false
+      reshard_after_forward: true
+      fsdp_size: -1
+      seed: 42
+      ulysses_sequence_parallel_size: 1
+      use_torch_compile: false
+      forward_only: true
+      strategy: "fsdp"
+      dtype: "bfloat16"
 
 # =============================================================================
-# Critic Configuration (not used in GRPO, but required by veRL)
+# Critic Configuration (not used in GRPO but required)
 # =============================================================================
 critic:
   strategy: "fsdp"
+  enable: null
+  ppo_mini_batch_size: 16
+  ppo_micro_batch_size: null
+  ppo_micro_batch_size_per_gpu: 8
+  use_dynamic_bsz: false
+  ppo_max_token_len_per_gpu: 32768
+  forward_max_token_len_per_gpu: 32768
+  ppo_epochs: 1
+  shuffle: false
+  data_loader_seed: 42
+  cliprange_value: 0.5
+  loss_agg_mode: "token-mean"
+  forward_micro_batch_size: null
+  forward_micro_batch_size_per_gpu: 8
+  ulysses_sequence_parallel_size: 1
+  grad_clip: 1.0
   optim:
-    lr: 1e-6
-    weight_decay: 0.01
+    lr: 1e-5
     lr_warmup_steps_ratio: 0.0
     total_training_steps: -1
+    weight_decay: 0.01
     lr_warmup_steps: -1
-  ppo_micro_batch_size_per_gpu: 8
-  grad_clip: 1.0
-  ulysses_sequence_parallel_size: 1
+    betas: [0.9, 0.999]
+    clip_grad: 1.0
   model:
     use_shm: false
     enable_gradient_checkpointing: true
+    enable_activation_offload: false
     use_remove_padding: false
     lora_rank: 0
-  fsdp_config:
-    param_offload: false
-    optimizer_offload: false
-    grad_offload: false
+    lora_alpha: 16
+    target_modules: "all-linear"
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+      reshard_after_forward: true
+      fsdp_size: -1
+      seed: 42
+      ulysses_sequence_parallel_size: 1
+      use_torch_compile: false
+      forward_only: false
+      strategy: "fsdp"
+      dtype: "bfloat16"
+  checkpoint:
+    save_contents: ["model", "optimizer", "extra"]
 
 # =============================================================================
-# Algorithm Configuration
+# Algorithm Configuration (GRPO)
 # =============================================================================
 algorithm:
-  # Use GRPO advantage estimation
-  adv_estimator: "grpo"
-
-  # GRPO-specific settings
-  use_kl_in_reward: false       # KL handled separately via kl_loss
-
-  # PPO clipping
-  clip_range: 0.2
-  clip_range_value: 0.2
-
-  # Generalized Advantage Estimation (not used in GRPO)
   gamma: 1.0
-  gae_lambda: 1.0
+  lam: 1.0
+  adv_estimator: "grpo"
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+  kl_penalty: "kl"
+  kl_ctrl:
+    type: "fixed"
+    kl_coef: 0.001
+    horizon: 10000
+    target_kl: 0.1
+  use_pf_ppo: false
 
 # =============================================================================
-# Trainer Configuration
+# Reward Configuration
 # =============================================================================
-trainer:
-  # Project naming
-  project_name: "nutrimind-grpo"
-  experiment_name: "qwen3-4b-grpo-v2"
-
-  # Hardware
-  n_gpus_per_node: 2
-  nnodes: 1
-
-  # Training schedule
-  # Note: 2 epochs is sufficient for single-context training to avoid overfitting
-  total_epochs: 2
-  save_freq: 100                # Save checkpoint every N steps
-  test_freq: 30                 # Evaluate every N steps (more frequent for early stopping)
-
-  # Validation
-  val_before_train: false
-
-  # Critic (not used in GRPO)
-  critic_warmup: 0
-
-  # Logging
-  logger: '["console", "wandb"]'
-
-  # Checkpointing
-  resume_mode: "auto"           # Auto-resume from latest checkpoint
-  save_total_limit: 3           # Keep only last N checkpoints
-
-  # Output directory
-  default_local_dir: "models/verl_grpo"
-
-# =============================================================================
-# Reward Configuration (handled by NutriMindInteraction)
-# =============================================================================
-# Note: Reward computation is done in verl_interaction.py using
-# existing reward_v1/v2/v3 functions from src/training/grpo/reward.py
-#
-# veRL requires legacy_reward_impl fields even when using custom rewards
 custom_reward_function:
   path: null
   name: null
@@ -307,24 +298,85 @@ sandbox_fusion:
   max_concurrent: null
   memory_limit_mb: null
 
-# =============================================================================
-# Ray Configuration
-# =============================================================================
-ray_kwargs:
-  ray_init:
-    num_cpus: null
+reward:
+  num_workers: 8
+  custom_reward_function:
+    path: null
+    name: "compute_score"
+  reward_manager:
+    source: "register"
+    name: "naive"
+  reward_model:
+    enable: false
+    enable_resource_pool: false
+    n_gpus_per_node: 2
+    nnodes: 0
+    model_path: null
+  sandbox_fusion:
+    url: null
+    max_concurrent: 64
+    memory_limit_mb: 1024
 
 # =============================================================================
-# Profiler Configuration
+# Trainer Configuration
+# =============================================================================
+trainer:
+  balance_batch: true
+  total_epochs: 2
+  total_training_steps: null
+  project_name: "nutrimind-grpo"
+  experiment_name: "qwen3-4b-grpo-v2"
+  logger: ["console", "wandb"]
+  log_val_generations: 0
+  rollout_data_dir: null
+  validation_data_dir: null
+  nnodes: 1
+  n_gpus_per_node: 2
+  save_freq: 100
+  esi_redundant_time: 0
+  resume_mode: "auto"
+  resume_from_path: null
+  val_before_train: false
+  val_only: false
+  test_freq: 30
+  critic_warmup: 0
+  default_hdfs_dir: null
+  del_local_ckpt_after_load: false
+  default_local_dir: "models/verl_grpo"
+  max_actor_ckpt_to_keep: null
+  max_critic_ckpt_to_keep: null
+  ray_wait_register_center_timeout: 300
+  device: "cuda"
+  use_legacy_worker_impl: "disable"
+
+# =============================================================================
+# Global Profiler Configuration
 # =============================================================================
 global_profiler:
   tool: null
   steps: null
   profile_continuous_steps: false
   save_path: "outputs/profile"
+  global_tool_config:
+    nsys:
+      discrete: false
+    torch_memory:
+      trace_alloc_max_entries: 100000
+      stack_depth: 32
+      context: "all"
+      stacks: "all"
+      kw_args: {}
 
 # =============================================================================
 # Transfer Queue Configuration
 # =============================================================================
 transfer_queue:
   enable: false
+
+# =============================================================================
+# Ray Configuration
+# =============================================================================
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+  timeline_json_file: null
