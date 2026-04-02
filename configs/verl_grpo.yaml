@@ -179,6 +179,30 @@ actor_rollout_ref:
       param_offload: true       # Offload ref model to CPU
 
 # =============================================================================
+# Critic Configuration (not used in GRPO, but required by veRL)
+# =============================================================================
+critic:
+  strategy: "fsdp"
+  optim:
+    lr: 1e-6
+    weight_decay: 0.01
+    lr_warmup_steps_ratio: 0.0
+    total_training_steps: -1
+    lr_warmup_steps: -1
+  ppo_micro_batch_size_per_gpu: 8
+  grad_clip: 1.0
+  ulysses_sequence_parallel_size: 1
+  model:
+    use_shm: false
+    enable_gradient_checkpointing: true
+    use_remove_padding: false
+    lora_rank: 0
+  fsdp_config:
+    param_offload: false
+    optimizer_offload: false
+    grad_offload: false
+
+# =============================================================================
 # Algorithm Configuration
 # =============================================================================
 algorithm:
