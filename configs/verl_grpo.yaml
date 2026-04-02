@@ -69,6 +69,7 @@ actor_rollout_ref:
   actor:
     _target_: verl.workers.config.FSDPActorConfig
     strategy: "fsdp"
+    rollout_n: ${actor_rollout_ref.rollout.n}
     ppo_mini_batch_size: 16
     ppo_micro_batch_size: null
     ppo_micro_batch_size_per_gpu: 8
@@ -173,6 +174,7 @@ actor_rollout_ref:
   ref:
     _target_: verl.workers.config.FSDPActorConfig
     strategy: "fsdp"
+    rollout_n: ${actor_rollout_ref.rollout.n}
     use_torch_compile: false
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: 8
