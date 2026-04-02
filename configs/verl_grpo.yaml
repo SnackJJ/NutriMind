@@ -213,3 +213,8 @@ trainer:
 # =============================================================================
 # Note: Reward computation is done in verl_interaction.py using
 # existing reward_v1/v2/v3 functions from src/training/grpo/reward.py
+#
+# veRL requires reward_model section even when using custom rewards
+reward_model:
+  enable: false                 # Disable separate reward model (using custom reward)
+  num_workers: null             # Not using reward model workers
