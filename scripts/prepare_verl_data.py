@@ -189,7 +189,9 @@ def save_parquet(data: List[Dict[str, Any]], path: Path) -> None:
     for entry in data:
         rows.append({
             "data_source": entry["data_source"],
-            "prompt": json.dumps(entry["prompt"], ensure_ascii=False),
+            # New version of veRL expects prompt as a list of dicts in the parquet
+            # instead of a JSON serialized string to work with jinja2 chat templates.
+            "prompt": entry["prompt"],
             "ability": entry["ability"],
             "reward_model": json.dumps(entry["reward_model"], ensure_ascii=False),
             "extra_info": json.dumps(entry["extra_info"], ensure_ascii=False),
