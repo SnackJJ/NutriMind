@@ -104,35 +104,107 @@ def infer_tier(query: str) -> str:
 
 
 def generate_env_state() -> Dict[str, Any]:
+    """
+    Generate diverse user environment states for GRPO training.
+
+    Diversity dimensions:
+    1. User profiles: varied age, gender, weight, goals, TDEE
+    2. meals_today: 40% empty, 30% breakfast only, 30% breakfast+lunch
+    3. meal_history: 3-7 days of history
+    """
     import uuid
     import random
-    
-    # Generate varied user profiles
-    goals = [("maintain", 2000), ("lose", 1500), ("gain", 2800)]
-    idx = random.randint(0, 2)
-    goal, tdee = goals[idx]
-    
+
+    # Diverse user profiles (not just 3 combinations)
+    profiles = [
+        {"age": 25, "gender": "M", "weight_kg": 75, "goal": "gain", "tdee": 2800},
+        {"age": 35, "gender": "F", "weight_kg": 60, "goal": "lose", "tdee": 1500},
+        {"age": 50, "gender": "M", "weight_kg": 90, "goal": "maintain", "tdee": 2200},
+        {"age": 22, "gender": "F", "weight_kg": 55, "goal": "maintain", "tdee": 1800},
+        {"age": 30, "gender": "M", "weight_kg": 80, "goal": "lose", "tdee": 1800},
+        {"age": 28, "gender": "F", "weight_kg": 65, "goal": "gain", "tdee": 2400},
+        {"age": 45, "gender": "M", "weight_kg": 85, "goal": "maintain", "tdee": 2000},
+        {"age": 40, "gender": "F", "weight_kg": 70, "goal": "lose", "tdee": 1600},
+        {"age": 32, "gender": "M", "weight_kg": 70, "goal": "maintain", "tdee": 2100},
+        {"age": 26, "gender": "F", "weight_kg": 58, "goal": "gain", "tdee": 2200},
+    ]
+    profile = random.choice(profiles)
+    tdee = profile["tdee"]
+    goal = profile["goal"]
+
+    # Meals today: not always empty
+    # 40% empty (morning query), 30% breakfast only, 30% breakfast+lunch
+    meals_today = []
+    scenario = random.random()
+    if scenario < 0.4:
+        # Empty (40%): morning query
+        meals_today = []
+    elif scenario < 0.7:
+        # Breakfast only (30%): late morning/early afternoon
+        meals_today = [{
+            "meal_type": "breakfast",
+            "calories": random.randint(300, 500),
+            "protein_g": random.randint(15, 30),
+            "fat_g": random.randint(10, 20),
+            "carbs_g": random.randint(30, 60),
+            "fiber_g": random.randint(3, 8),
+            "foods": [{"name": random.choice(["eggs", "oatmeal", "toast", "yogurt"])}]
+        }]
+    else:
+        # Breakfast + lunch (30%): afternoon/evening
+        meals_today = [
+            {
+                "meal_type": "breakfast",
+                "calories": random.randint(300, 500),
+                "protein_g": random.randint(15, 30),
+                "fat_g": random.randint(10, 20),
+                "carbs_g": random.randint(30, 60),
+                "fiber_g": random.randint(3, 8),
+                "foods": [{"name": random.choice(["eggs", "oatmeal", "toast", "yogurt"])}]
+            },
+            {
+                "meal_type": "lunch",
+                "calories": random.randint(500, 800),
+                "protein_g": random.randint(25, 45),
+                "fat_g": random.randint(15, 30),
+                "carbs_g": random.randint(40, 80),
+                "fiber_g": random.randint(5, 12),
+                "foods": [{"name": random.choice(["chicken salad", "sandwich", "rice bowl", "pasta"])}]
+            }
+        ]
+
+    # Meal history: 3-7 days (not just 1 day)
+    history_days = random.randint(3, 7)
+    meal_history = []
+    for day_offset in range(1, history_days + 1):
+        day_variation = random.uniform(0.85, 1.15)  # ±15% variation
+        meal_history.append({
+            "date": f"{day_offset} days ago",
+            "calories": int(tdee * day_variation),
+            "protein_g": int(tdee * 0.3 / 4 * day_variation),
+            "fat_g": int(tdee * 0.25 / 9 * day_variation),
+            "carbs_g": int(tdee * 0.45 / 4 * day_variation),
+            "fiber_g": random.randint(20, 35)
+        })
+
     return {
         "user_id": f"grpo_user_{uuid.uuid4().hex[:8]}",
-        "user_profile": {"tdee_kcal": tdee, "goal": goal},
+        "user_profile": {
+            "age": profile["age"],
+            "gender": profile["gender"],
+            "weight_kg": profile["weight_kg"],
+            "tdee_kcal": tdee,
+            "goal": goal
+        },
         "user_goals": {
             "calories": tdee,
             "protein": int(tdee * 0.3 / 4),
             "fat": int(tdee * 0.25 / 9),
             "carbs": int(tdee * 0.45 / 4),
-            "fiber": 25 # Default RDI
+            "fiber": 25
         },
-        "meals_today": [], # Start empty, allow model to log or query
-        "meal_history": [
-            {
-                "date": "yesterday", 
-                "calories": tdee - random.randint(-200, 200),
-                "protein_g": int(tdee * 0.3 / 4),
-                "fat_g": int(tdee * 0.25 / 9),
-                "carbs_g": int(tdee * 0.45 / 4),
-                "fiber_g": 25
-            }
-        ]
+        "meals_today": meals_today,
+        "meal_history": meal_history
     }
 
 def process_query_v1(query: str, existing_metadata: Optional[Dict] = None) -> Dict[str, Any]:

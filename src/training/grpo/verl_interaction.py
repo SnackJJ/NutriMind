@@ -328,10 +328,14 @@ class NutriMindInteraction:
         elif self._reward_version == "v2":
             breakdown = reward_v2(trajectory, task_meta)
         elif self._reward_version == "v3":
-            # v3 needs LLM judge which we don't have in veRL context
-            # Fall back to v2 for now
+            # v3 needs LLM judge which we don't have in veRL context.
+            # Using the training model as judge would introduce bias (model judging itself).
+            # Fall back to v2 for deterministic rule-based reward.
+            logger.warning(
+                "reward v3 (LLM-Judge) not supported in veRL training. "
+                "Falling back to v2. To use v3, run with train.py + external judge."
+            )
             breakdown = reward_v2(trajectory, task_meta)
-            logger.warning("v3 reward requested but LLM judge unavailable, using v2")
         else:
             breakdown = reward_v2(trajectory, task_meta)
 
