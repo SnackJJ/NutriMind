@@ -190,7 +190,7 @@ def _compute_t1_outcome_from_tool_results(
     for step in trajectory.steps:
         if step.tool_execution and step.tool_execution.tool_name == "get_food_nutrition":
             result = step.tool_execution.result
-            if isinstance(result, dict) and result.get("success"):
+            if isinstance(result, dict) and result.get("status") == "success":
                 data = result.get("data", {})
                 # Extract key nutrition values
                 for key in ["calories_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g"]:

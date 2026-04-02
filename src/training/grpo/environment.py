@@ -335,8 +335,11 @@ If you answer directly, do not use tool tags. Only use JSON in tool calls. Do no
         try:
             tool_fn = self.tool_registry[name]
             
-            # --- INTERCEPT STATEFUL TOOLS --- 
-            if self.initial_snapshot is not None and name in ("get_today_summary", "log_meal", "set_goal", "get_history"):
+            # --- INTERCEPT STATEFUL TOOLS ---
+            # Define stateful tools that need snapshot-based mocking
+            STATEFUL_TOOLS = ("get_today_summary", "log_meal", "set_goal", "get_history")
+
+            if self.initial_snapshot is not None and name in STATEFUL_TOOLS:
                 if name == "get_today_summary":
                     today_cals = sum(m.get("calories", 0) for m in self.initial_snapshot.get("meals_today", []))
                     budget = self.initial_snapshot.get("user_goals", {}).get("calories", 2000)
@@ -382,11 +385,22 @@ If you answer directly, do not use tool tags. Only use JSON in tool calls. Do no
                     }
                 elif name == "log_meal":
                     # Mimic the output shape of src/tools/log_meal.py
-                    # Assume roughly 300 calories if we don't calculate it fully
+                    # Generate dynamic values based on input parameters
+                    foods = args.get("foods", [])
+                    # Rough estimate: ~1.8 cal/g on average for typical foods
+                    estimated_cals = sum(
+                        f.get("amount_grams", 100) * 1.8
+                        for f in foods
+                    )
+                    # Generate deterministic meal_id from args
+                    args_hash = hashlib.md5(
+                        json.dumps(args, sort_keys=True).encode()
+                    ).hexdigest()[:8]
                     result = {
-                        "status": "success", 
-                        "meal_id": "mock_123",
-                        "total_calories": 300.0
+                        "status": "success",
+                        "meal_id": f"mock_{args_hash}",
+                        "total_calories": round(estimated_cals, 1),
+                        "logged_foods": [f.get("food_name", "unknown") for f in foods],
                     }
                 elif name == "set_goal":
                     result = {"status": "success", "message": "Goal updated successfully."}
@@ -432,8 +446,9 @@ If you answer directly, do not use tool tags. Only use JSON in tool calls. Do no
                         }
                     }
             else:
-                # Handle real static stateless tools
-                if name in ("get_today_summary",):
+                # Stateless tools (get_food_nutrition, retrieve_knowledge) or no snapshot
+                # Always call real tool function
+                if name == "get_today_summary":
                     result = tool_fn()
                 else:
                     result = tool_fn(**args)
