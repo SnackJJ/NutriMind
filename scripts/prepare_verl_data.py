@@ -208,7 +208,7 @@ def main():
     parser.add_argument(
         "--input",
         type=str,
-        default="data/grpo/prompts_with_gemini_env.jsonl",
+        default="data/grpo/grpo_prompts.jsonl",
         help="Input JSONL file",
     )
     parser.add_argument(
