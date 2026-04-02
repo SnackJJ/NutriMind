@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
 """
-veRL-based GRPO Training Entry Point for NutriMind.
+veRL-based GRPO/GiGPO Training Entry Point for NutriMind.
 
-This script provides a convenient entry point for launching veRL GRPO training
+This script provides a convenient entry point for launching veRL training
 with NutriMind-specific configurations.
 
+Supported algorithms:
+- GRPO: Uses veRL's main_ppo with grpo advantage estimator
+- GiGPO: Uses veRL-agent for step-level credit assignment (requires verl-agent package)
+
 Usage:
-    # Standard training (2x A100)
+    # GRPO training (2x A100)
     python -m src.training.grpo.train_verl \
+        --algorithm grpo \
         --config configs/verl_grpo.yaml \
+        --reward_version v2
+
+    # GiGPO training (requires verl-agent)
+    python -m src.training.grpo.train_verl \
+        --algorithm gigpo \
+        --config configs/verl_agent_gigpo.yaml \
         --reward_version v2
 
     # Consumer GPU training
@@ -160,12 +171,15 @@ def validate_config(config_path: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="veRL GRPO Training for NutriMind",
+        description="veRL GRPO/GiGPO Training for NutriMind",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Basic training
-    python -m src.training.grpo.train_verl --config configs/verl_grpo.yaml
+    # GRPO training
+    python -m src.training.grpo.train_verl --algorithm grpo --config configs/verl_grpo.yaml
+
+    # GiGPO training (requires verl-agent package)
+    python -m src.training.grpo.train_verl --algorithm gigpo --config configs/verl_agent_gigpo.yaml
 
     # With reward version override
     python -m src.training.grpo.train_verl --config configs/verl_grpo.yaml --reward_version v1
@@ -178,6 +192,13 @@ Examples:
         trainer.experiment_name=my_experiment \
         data.train_batch_size=16
         """,
+    )
+    parser.add_argument(
+        "--algorithm",
+        type=str,
+        default="grpo",
+        choices=["grpo", "gigpo"],
+        help="RL algorithm (grpo uses veRL, gigpo uses veRL-agent)",
     )
     parser.add_argument(
         "--config",
@@ -215,6 +236,7 @@ Examples:
         return 1
 
     logger.info(f"Using config: {config_path}")
+    logger.info(f"Algorithm: {args.algorithm}")
     logger.info(f"Reward version: {args.reward_version}")
 
     # Validate configuration
@@ -233,16 +255,39 @@ Examples:
     # Update reward version in interaction config
     update_reward_version(str(config_path), args.reward_version)
 
-    # Build veRL command
+    # Build veRL command based on algorithm
     config_dir = config_path.parent
     config_name = config_path.stem
 
-    cmd = [
-        sys.executable, "-m", "verl.trainer.main_ppo",
-        f"--config-path={config_dir}",
-        f"--config-name={config_name}",
-        "algorithm.adv_estimator=grpo",
-    ]
+    if args.algorithm == "gigpo":
+        # GiGPO uses verl-agent entry point
+        try:
+            import verl_agent  # noqa: F401
+        except ImportError:
+            logger.error(
+                "GiGPO requires verl-agent package. Install with:\n"
+                "  pip install verl-agent\n"
+                "Or:\n"
+                "  pip install git+https://github.com/langfengQ/verl-agent.git"
+            )
+            return 1
+
+        cmd = [
+            sys.executable, "-m", "verl_agent.trainer.main_ppo",
+            f"--config-path={config_dir}",
+            f"--config-name={config_name}",
+            "algorithm.adv_estimator=gigpo",
+        ]
+        logger.info("Using veRL-agent for GiGPO training")
+    else:
+        # GRPO uses standard veRL entry point
+        cmd = [
+            sys.executable, "-m", "verl.trainer.main_ppo",
+            f"--config-path={config_dir}",
+            f"--config-name={config_name}",
+            "algorithm.adv_estimator=grpo",
+        ]
+        logger.info("Using veRL for GRPO training")
 
     # Add any additional overrides from command line
     cmd.extend(unknown_args)

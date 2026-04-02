@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-GRPO/GiGPO Training Script for NutriMind.
+GRPO/GiGPO Rollout Debugging & Reward Analysis Tool.
 
-Implements environment-in-the-loop GRPO training with:
-- Multi-turn rollouts using NutriMindEnv
-- Iterative reward functions (v1/v2/v3)
-- Optional GiGPO step-level credit assignment
-- Training monitoring and reward hacking detection
+NOTE: This script is for DEBUGGING and ANALYSIS only.
+For actual GRPO/GiGPO training, use train_verl.py or scripts/run_verl_grpo.sh.
+
+This script provides:
+- Multi-turn rollout generation using NutriMindEnv
+- Reward function testing (v1/v2/v3)
+- Trajectory visualization and analysis
+- Reward hacking detection testing
 
 Usage:
-    # GRPO v1 training
-    python train.py --reward_version v1 --prompt_pool data/grpo/prompts.jsonl
+    # Dry run for testing rollout pipeline
+    python train.py --dry_run --reward_version v1
 
-    # GRPO v2 training (from v1 checkpoint)
-    python train.py --reward_version v2 --base_model models/grpo-v1/final
+    # Rollout debugging with real prompts (no actual training)
+    python train.py --reward_version v2 --prompt_pool data/grpo/prompts.jsonl
 
-    # GiGPO training
-    python train.py --algorithm gigpo --reward_version v2 --base_model models/sft/final
+For REAL training, use:
+    python train_verl.py --algorithm grpo --reward_version v2
+    # Or:
+    ./scripts/run_verl_grpo.sh v2
 
 See phase4_grpo.md for experiment matrix and training parameters.
 """
@@ -329,27 +334,25 @@ class GRPOTrainer:
         advantages: Dict[str, Any],
     ) -> Dict[str, float]:
         """
-        Perform one training step (Real PyTorch GRPO Loss).
-        Assumes self.model is a PeftModel configured on GPU 0.
+        NOTE: This is a debugging stub. Real training uses veRL via train_verl.py.
+
+        This method only logs rollout statistics for offline analysis.
+        It does NOT perform actual gradient updates.
+
+        For real GRPO/GiGPO training, use:
+            python train_verl.py --algorithm grpo --reward_version v2
+        Or:
+            ./scripts/run_verl_grpo.sh v2
         """
-        # Note: In a full pipeline, you would tokenize the trajectories,
-        # pass them through the Policy Model to get logprobs,
-        # compute the GRPO objective: - [ Advantage * exp(logprob - old_logprob) - beta * KL ]
-        # compute loss.backward() and optimizer.step()
-        
-        # Here we sketch the flow that ties into the dual-card architecture:
-        loss = 0.0
-        kl = 0.0
-        
-        # 1. Dummy backward for architecture placement
-        # loss_tensor = torch.tensor(1.0, requires_grad=True).cuda()
-        # loss_tensor.backward()
-        # optimizer.step()
-        # optimizer.zero_grad()
-        
+        logger.warning(
+            "train_step is a stub — use train_verl.py for actual training. "
+            "This script is for rollout debugging and reward analysis only."
+        )
+
+        # Return statistics without actual training
         return {
-            "loss": random.uniform(0.1, 0.5), # Placeholder
-            "kl_divergence": random.uniform(0.01, 0.1),
+            "loss": 0.0,  # Not computed in stub mode
+            "kl_divergence": 0.0,  # Not computed in stub mode
             "avg_reward": np.mean(rewards),
             "avg_advantage": np.mean(advantages["group_advantages"]),
         }
@@ -690,6 +693,15 @@ def main():
             logger.error(f"Prompt pool not found: {config.prompt_pool_path}")
             logger.info("Use --dry_run for testing without data")
             return
+
+        # IMPORTANT: This script is for rollout debugging only
+        logger.warning("=" * 60)
+        logger.warning("NOTE: train.py is for rollout debugging only.")
+        logger.warning("For real GRPO/GiGPO training, use:")
+        logger.warning("  python train_verl.py --algorithm grpo --reward_version v2")
+        logger.warning("Or:")
+        logger.warning("  ./scripts/run_verl_grpo.sh v2")
+        logger.warning("=" * 60)
 
         prompts = load_prompt_pool(config.prompt_pool_path)
         eval_prompts = load_prompt_pool(config.eval_set_path) if Path(config.eval_set_path).exists() else prompts[:100]

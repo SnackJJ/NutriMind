@@ -1,4 +1,19 @@
 """
+GiGPO Algorithm Prototype (DEPRECATED for training).
+
+This was an independent implementation for algorithm understanding.
+For actual GiGPO training, use verl-agent:
+    ./scripts/run_verl_agent_gigpo.sh
+
+Known issues in this prototype:
+1. get_action_at_step only uses tool_name without args (step advantage diluted)
+2. get_token_level_advantages doesn't account for injected_response offset
+3. Not connected to any training loop
+
+Kept for reference and interview discussion.
+
+---
+
 GiGPO (Group-in-Group Policy Optimization) Implementation.
 
 Adds step-level credit assignment on top of GRPO by finding anchor states
