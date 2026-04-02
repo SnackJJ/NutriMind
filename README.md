@@ -80,10 +80,16 @@ python scripts/build_indexes.py
 - [x] Phase 1: Infrastructure (USDA DB, RAG system)
 - [x] Phase 2: Tools implementation
 - [x] Phase 2.5: SFT data pipeline
-- [ ] Phase 3: SFT training
-- [ ] Phase 4: GRPO alignment
+- [x] Phase 3: SFT training (Qwen3-4B, LoRA, dual-GPU)
+- [x] Phase 4: GRPO alignment
+  - [x] Environment (NutriMindEnv, DeterministicToolCache)
+  - [x] Reward v1/v2/v3
+  - [x] GiGPO algorithm prototype
+  - [x] veRL integration (GRPO path)
+  - [ ] veRL-agent integration (GiGPO path) ← In progress
+  - [ ] Training experiments
 - [ ] Phase 5: Ablation studies
-- [ ] Phase 6: Evaluation
+- [ ] Phase 6: Evaluation (teacher gap analysis)
 - [ ] Phase 7: Deployment
 
 ## License
