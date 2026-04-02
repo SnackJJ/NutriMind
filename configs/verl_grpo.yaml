@@ -218,3 +218,4 @@ trainer:
 reward_model:
   enable: false                 # Disable separate reward model (using custom reward)
   num_workers: null             # Not using reward model workers
+  reward_manager: null          # Not using reward manager
