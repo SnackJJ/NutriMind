@@ -260,3 +260,25 @@ sandbox_fusion:
   url: null
   max_concurrent: null
   memory_limit_mb: null
+
+# =============================================================================
+# Ray Configuration
+# =============================================================================
+ray_kwargs:
+  ray_init:
+    num_cpus: null
+
+# =============================================================================
+# Profiler Configuration
+# =============================================================================
+global_profiler:
+  tool: null
+  steps: null
+  profile_continuous_steps: false
+  save_path: "outputs/profile"
+
+# =============================================================================
+# Transfer Queue Configuration
+# =============================================================================
+transfer_queue:
+  enable: false
