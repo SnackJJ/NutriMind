@@ -145,9 +145,51 @@ class NutriMindEnv:
     """
 
     # System prompt for rollout generation
-    SYSTEM_PROMPT = """You are NutriMind, a nutrition assistant. You have access to specific tools to retrieve data.
-When you need to use a tool, use XML tags: <think>thought process</think><tool_call>{"name": "...", "arguments": {...}}</tool_call>
-If you answer directly, do not use tool tags. Only use JSON in tool calls. Do not use parallel tool calls."""
+    SYSTEM_PROMPT = """You are NutriMind, a specialized AI nutrition assistant.
+
+## CORE PRINCIPLES
+1. **Tool-driven accuracy**: When nutritional data (calories, history, progress) can be obtained via tools, ALWAYS use the appropriate tool.
+2. **Step-by-step reasoning**: Always use <think> tags to analyze the user's request and calculate any required values (e.g., body weight x target protein ratio) before taking action.
+3. **Format consistency**: You MUST use the following XML tags for reasoning and tool calls:
+   <think> Your internal analysis and calculations </think>
+   <tool_call> {"name": "tool_name", "arguments": {"arg": "val"}} </tool_call>
+
+## LANGUAGE RULES
+- All responses must be in English.
+- If the user uses Chinese, acknowledge it but provide the final answer in English.
+
+## BEHAVIOR GUIDELINES
+- **Analyze before acting**: Determine if tools are needed. Respond directly for casual conversation.
+- **Synthesize results**: When using tools, summarize the data in your own words. Do not copy-paste raw tool output.
+- **Safety**: If the user mentions chronic diseases (cancer, organ transplant, etc.), respond: "Your situation involves complex medical nutrition management that exceeds my safe service boundary. Please consult your physician or a registered dietitian."
+
+## TOOL USAGE NOTES
+
+### get_food_nutrition
+Look up nutrition data for one or more foods from the USDA database.
+Arguments: `foods` (list of objects with `food_name` and `amount_grams`)
+Example: `{"foods": [{"food_name": "chicken breast", "amount_grams": 100}]}`
+
+### log_meal
+Record a food entry to the user's history. Only use when explicitly asked.
+Arguments: `meal_type` (str: "breakfast"/"lunch"/"dinner"/"snack"), `foods` (list of objects with `food_name` and `amount_grams`)
+
+### get_today_summary
+Check today's totals and progress against current goals. No arguments needed.
+
+### get_history
+Analyze multi-day trends and goal adherence.
+Arguments: `days` (int), `compare_to_goal` (bool, use true for progress reports)
+
+### retrieve_knowledge
+Search nutrition knowledge base for dietary guidelines and principles.
+Arguments: `query` (str), `mode` (str: "hybrid"/"keyword"/"semantic"), `top_k` (int)
+Do NOT use for specific food calories — use `get_food_nutrition` instead.
+
+### set_goal
+Set or update a daily target (calories, protein, carbs, fat).
+Arguments: `nutrient` (str), `value` (float), `goal_type` (str: "lose"/"maintain"/"gain")
+When user provides weight and ratio (e.g., 80kg, 2g/kg), calculate in <think> FIRST."""
 
     def __init__(
         self,
@@ -333,125 +375,7 @@ If you answer directly, do not use tool tags. Only use JSON in tool calls. Do no
 
         # Execute tool
         try:
-            tool_fn = self.tool_registry[name]
-            
-            # --- INTERCEPT STATEFUL TOOLS ---
-            # Define stateful tools that need snapshot-based mocking
-            STATEFUL_TOOLS = ("get_today_summary", "log_meal", "set_goal", "get_history")
-
-            if self.initial_snapshot is not None and name in STATEFUL_TOOLS:
-                if name == "get_today_summary":
-                    today_cals = sum(m.get("calories", 0) for m in self.initial_snapshot.get("meals_today", []))
-                    budget = self.initial_snapshot.get("user_goals", {}).get("calories", 2000)
-                    
-                    # Compute macros from snapshot
-                    protein_g = sum(m.get("protein_g", 0) for m in self.initial_snapshot.get("meals_today", []))
-                    fat_g = sum(m.get("fat_g", 0) for m in self.initial_snapshot.get("meals_today", []))
-                    carbs_g = sum(m.get("carbs_g", 0) for m in self.initial_snapshot.get("meals_today", []))
-                    fiber_g = sum(m.get("fiber_g", 0) for m in self.initial_snapshot.get("meals_today", []))
-                    meals_today = self.initial_snapshot.get("meals_today", [])
-                    
-                    meals_logged = []
-                    food_names_list = []
-                    for i, m in enumerate(meals_today):
-                        f_names = ", ".join([f.get("name", "") for f in m.get("foods", [])])
-                        food_names_list.append(f_names)
-                        meals_logged.append({
-                            "meal_id": str(i+1),
-                            "meal_type": m.get("meal_type", "snack"),
-                            "logged_at": "2026-03-29T12:00:00",
-                            "food_names": f_names,
-                            "calories_kcal": m.get("calories", 0),
-                            "protein_g": m.get("protein_g", 0),
-                            "fat_g": m.get("fat_g", 0),
-                            "carbs_g": m.get("carbs_g", 0)
-                        })
-                        
-                    result = {
-                        "status": "success", 
-                        "data": {
-                            "date": "2026-03-29",
-                            "total_calories": float(today_cals), 
-                            "calorie_budget": float(budget), 
-                            "remaining_calories": round(budget - today_cals, 1),
-                            "protein_g": float(protein_g),
-                            "fat_g": float(fat_g),
-                            "carbs_g": float(carbs_g),
-                            "fiber_g": float(fiber_g),
-                            "meal_count": len(meals_today),
-                            "food_summary": "; ".join(food_names_list),
-                            "meals_logged": meals_logged
-                        }
-                    }
-                elif name == "log_meal":
-                    # Mimic the output shape of src/tools/log_meal.py
-                    # Generate dynamic values based on input parameters
-                    foods = args.get("foods", [])
-                    # Rough estimate: ~1.8 cal/g on average for typical foods
-                    estimated_cals = sum(
-                        f.get("amount_grams", 100) * 1.8
-                        for f in foods
-                    )
-                    # Generate deterministic meal_id from args
-                    args_hash = hashlib.md5(
-                        json.dumps(args, sort_keys=True).encode()
-                    ).hexdigest()[:8]
-                    result = {
-                        "status": "success",
-                        "meal_id": f"mock_{args_hash}",
-                        "total_calories": round(estimated_cals, 1),
-                        "logged_foods": [f.get("food_name", "unknown") for f in foods],
-                    }
-                elif name == "set_goal":
-                    result = {"status": "success", "message": "Goal updated successfully."}
-                elif name == "get_history":
-                    history = self.initial_snapshot.get("meal_history", [])
-                    days_requested = args.get("days", 7)
-                    
-                    # Compute averages
-                    tot_cals = sum(d.get("calories", 0) for d in history)
-                    tot_pro = sum(d.get("protein_g", 0) for d in history)
-                    tot_fat = sum(d.get("fat_g", 0) for d in history)
-                    tot_carbs = sum(d.get("carbs_g", 0) for d in history)
-                    tot_fiber = sum(d.get("fiber_g", 0) for d in history)
-                    n = max(1, len(history))
-                    
-                    daily_breakdown = []
-                    for h in history:
-                        daily_breakdown.append({
-                            "date": h.get("date", "2026-03-28"),
-                            "calories_kcal": float(h.get("calories", 0)),
-                            "protein_g": float(h.get("protein_g", 0)),
-                            "fat_g": float(h.get("fat_g", 0)),
-                            "carbs_g": float(h.get("carbs_g", 0)),
-                            "fiber_g": float(h.get("fiber_g", 0)),
-                            "meal_count": 3,
-                            "food_summary": "Mocked historical food"
-                        })
-                        
-                    result = {
-                        "status": "success", 
-                        "data": {
-                            "period": f"Last {days_requested} days",
-                            "days_with_data": len(history),
-                            "daily_averages": {
-                                "calories_kcal": round(tot_cals / n, 1),
-                                "protein_g": round(tot_pro / n, 1),
-                                "fat_g": round(tot_fat / n, 1),
-                                "carbs_g": round(tot_carbs / n, 1),
-                                "fiber_g": round(tot_fiber / n, 1)
-                            },
-                            "trend": "stable",
-                            "daily_breakdown": daily_breakdown
-                        }
-                    }
-            else:
-                # Stateless tools (get_food_nutrition, retrieve_knowledge) or no snapshot
-                # Always call real tool function
-                if name == "get_today_summary":
-                    result = tool_fn()
-                else:
-                    result = tool_fn(**args)
+            result = self._dispatch_tool(name, args)
 
             # Cache result
             if self.tool_cache is not None:
@@ -477,6 +401,128 @@ If you answer directly, do not use tool tags. Only use JSON in tool calls. Do no
                 success=False,
                 error_message=str(e),
             )
+
+    def _dispatch_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Dispatch tool execution — mock stateful tools when snapshot is present,
+        otherwise call real tool functions.
+        """
+        STATEFUL_TOOLS = {"get_today_summary", "log_meal", "set_goal", "get_history"}
+
+        # If we have a snapshot and this is a stateful tool, use mock
+        if self.initial_snapshot is not None and name in STATEFUL_TOOLS:
+            return self._mock_stateful_tool(name, args)
+
+        # Otherwise call the real tool function
+        tool_fn = self.tool_registry[name]
+        if name == "get_today_summary":
+            return tool_fn()
+        else:
+            return tool_fn(**args)
+
+    def _mock_stateful_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a stateful tool using snapshot data instead of real DB."""
+        if name == "get_today_summary":
+            meals_today = self.initial_snapshot.get("meals_today", [])
+            today_cals = sum(m.get("calories", 0) for m in meals_today)
+            budget = self.initial_snapshot.get("user_goals", {}).get("calories", 2000)
+            protein_g = sum(m.get("protein_g", 0) for m in meals_today)
+            fat_g = sum(m.get("fat_g", 0) for m in meals_today)
+            carbs_g = sum(m.get("carbs_g", 0) for m in meals_today)
+            fiber_g = sum(m.get("fiber_g", 0) for m in meals_today)
+
+            meals_logged = []
+            food_names_list = []
+            for i, m in enumerate(meals_today):
+                f_names = ", ".join([f.get("name", "") for f in m.get("foods", [])])
+                food_names_list.append(f_names)
+                meals_logged.append({
+                    "meal_id": str(i + 1),
+                    "meal_type": m.get("meal_type", "snack"),
+                    "logged_at": "2026-03-29T12:00:00",
+                    "food_names": f_names,
+                    "calories_kcal": m.get("calories", 0),
+                    "protein_g": m.get("protein_g", 0),
+                    "fat_g": m.get("fat_g", 0),
+                    "carbs_g": m.get("carbs_g", 0),
+                })
+
+            return {
+                "status": "success",
+                "data": {
+                    "date": "2026-03-29",
+                    "total_calories": float(today_cals),
+                    "calorie_budget": float(budget),
+                    "remaining_calories": round(budget - today_cals, 1),
+                    "protein_g": float(protein_g),
+                    "fat_g": float(fat_g),
+                    "carbs_g": float(carbs_g),
+                    "fiber_g": float(fiber_g),
+                    "meal_count": len(meals_today),
+                    "food_summary": "; ".join(food_names_list),
+                    "meals_logged": meals_logged,
+                },
+            }
+
+        elif name == "log_meal":
+            foods = args.get("foods", [])
+            estimated_cals = sum(f.get("amount_grams", 100) * 1.8 for f in foods)
+            args_hash = hashlib.md5(
+                json.dumps(args, sort_keys=True).encode()
+            ).hexdigest()[:8]
+            return {
+                "status": "success",
+                "meal_id": f"mock_{args_hash}",
+                "total_calories": round(estimated_cals, 1),
+                "logged_foods": [f.get("food_name", "unknown") for f in foods],
+            }
+
+        elif name == "set_goal":
+            return {"status": "success", "message": "Goal updated successfully."}
+
+        elif name == "get_history":
+            history = self.initial_snapshot.get("meal_history", [])
+            days_requested = args.get("days", 7)
+            tot_cals = sum(d.get("calories", 0) for d in history)
+            tot_pro = sum(d.get("protein_g", 0) for d in history)
+            tot_fat = sum(d.get("fat_g", 0) for d in history)
+            tot_carbs = sum(d.get("carbs_g", 0) for d in history)
+            tot_fiber = sum(d.get("fiber_g", 0) for d in history)
+            n = max(1, len(history))
+
+            daily_breakdown = []
+            for h in history:
+                daily_breakdown.append({
+                    "date": h.get("date", "2026-03-28"),
+                    "calories_kcal": float(h.get("calories", 0)),
+                    "protein_g": float(h.get("protein_g", 0)),
+                    "fat_g": float(h.get("fat_g", 0)),
+                    "carbs_g": float(h.get("carbs_g", 0)),
+                    "fiber_g": float(h.get("fiber_g", 0)),
+                    "meal_count": 3,
+                    "food_summary": "Mocked historical food",
+                })
+
+            return {
+                "status": "success",
+                "data": {
+                    "period": f"Last {days_requested} days",
+                    "days_with_data": len(history),
+                    "daily_averages": {
+                        "calories_kcal": round(tot_cals / n, 1),
+                        "protein_g": round(tot_pro / n, 1),
+                        "fat_g": round(tot_fat / n, 1),
+                        "carbs_g": round(tot_carbs / n, 1),
+                        "fiber_g": round(tot_fiber / n, 1),
+                    },
+                    "trend": "stable",
+                    "daily_breakdown": daily_breakdown,
+                },
+            }
+
+        else:
+            # Should not reach here since we check STATEFUL_TOOLS before calling
+            raise ValueError(f"Unknown stateful tool: {name}")
 
     def _restore_user_state(self, snapshot: Dict[str, Any]) -> None:
         """Restore user state from snapshot (for deterministic rollouts)."""
