@@ -41,12 +41,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.training.grpo.environment import (
+    NutriMindEnv as _NutriMindEnv,
     RolloutTrajectory,
     RolloutStep,
     TaskMetadata,
     compute_state_key,
 )
 from src.training.grpo.reward import RewardBreakdown
+
+_SYSTEM_PROMPT = _NutriMindEnv.SYSTEM_PROMPT
 
 
 @dataclass
@@ -157,9 +160,7 @@ class GiGPOComputer:
     4. Combined advantage = group_advantage × step_advantage
     """
 
-    SYSTEM_PROMPT = """You are NutriMind, a nutrition assistant. You have access to specific tools to retrieve data.
-When you need to use a tool, use XML tags: <think>thought process</think><tool_call>{"name": "...", "arguments": {...}}</tool_call>
-If you answer directly, do not use tool tags. Only use JSON in tool calls. Do not use parallel tool calls."""
+    SYSTEM_PROMPT = _SYSTEM_PROMPT
 
     def __init__(
         self,
