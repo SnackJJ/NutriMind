@@ -12,10 +12,10 @@ This enables diagnosing what worked and what didn't.
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from src.training.grpo.environment import RolloutTrajectory, TaskMetadata
+from src.training.grpo.environment import RolloutTrajectory, TaskMetadata, RolloutStep, ToolExecutionResult
 
 
 @dataclass
@@ -29,11 +29,7 @@ class RewardBreakdown:
     r_efficiency: float = 0.0
     r_conditional: float = 0.0
     r_llm_judge: float = 0.0
-    details: Dict[str, Any] = None
-
-    def __post_init__(self):
-        if self.details is None:
-            self.details = {}
+    details: Dict[str, Any] = field(default_factory=dict)
 
 
 # ============================================================================
@@ -521,6 +517,144 @@ def reward_v3(
             "llm_judge_applied": False,
         },
     )
+
+
+# ============================================================================
+# veRL Entry Point
+# ============================================================================
+
+
+def compute_score(
+    data_source: str,
+    solution_str: str,
+    ground_truth: Any = None,
+    extra_info: Any = None,
+) -> float:
+    """
+    veRL-compatible reward function entry point.
+
+    Called by veRL's reward manager for each completed rollout.
+    Bridges veRL's flat (data_source, solution_str, ground_truth, extra_info)
+    interface to our structured reward_v1/v2 functions.
+
+    Args:
+        data_source: Dataset identifier (must be "nutrimind")
+        solution_str: The model's complete output string for the rollout
+        ground_truth: JSON string or dict with tier, difficulty, optimal_steps
+        extra_info: JSON string or dict with interaction_kwargs
+
+    Returns:
+        Reward score in [0.0, 1.0]
+    """
+    if data_source != "nutrimind":
+        return 0.0
+
+    if not solution_str or not solution_str.strip():
+        return 0.0
+
+    # Parse ground_truth
+    if isinstance(ground_truth, str):
+        try:
+            ground_truth = json.loads(ground_truth)
+        except (json.JSONDecodeError, TypeError):
+            ground_truth = {}
+    if not isinstance(ground_truth, dict):
+        ground_truth = {}
+
+    # Parse extra_info
+    if isinstance(extra_info, str):
+        try:
+            extra_info = json.loads(extra_info)
+        except (json.JSONDecodeError, TypeError):
+            extra_info = {}
+    if not isinstance(extra_info, dict):
+        extra_info = {}
+
+    # Extract metadata
+    tier = ground_truth.get("tier") or extra_info.get("interaction_kwargs", {}).get("tier", "T1")
+    difficulty = ground_truth.get("difficulty", "medium")
+    optimal_steps = ground_truth.get("optimal_steps", 1)
+
+    # Build TaskMetadata
+    task_meta = TaskMetadata(
+        query="",  # Not available in reward-only context
+        tier=tier,
+        difficulty=difficulty,
+        optimal_steps=optimal_steps,
+    )
+
+    # Build a minimal RolloutTrajectory by parsing the solution string
+    trajectory = _build_trajectory_from_solution(solution_str, task_meta)
+
+    # Use reward_v2 (default for veRL training)
+    breakdown = reward_v2(trajectory, task_meta)
+    return breakdown.total
+
+
+def _build_trajectory_from_solution(
+    solution_str: str, task_meta: TaskMetadata
+) -> RolloutTrajectory:
+    """
+    Reconstruct a RolloutTrajectory from model output string.
+
+    In veRL multi-turn mode, solution_str contains the full conversation
+    including assistant turns and tool responses. We parse it to extract
+    tool calls and the final answer.
+    """
+    from src.orchestrator.tool_parser import ToolParser, TOOL_CALL_PATTERN, THINK_PATTERN
+
+    trajectory = RolloutTrajectory(prompt=task_meta.query)
+    parser = ToolParser(validate_tool_name=False)
+
+    # Parse the solution string as a single assistant turn
+    # In multi-turn veRL, each assistant segment is separated by tool responses
+    # For simplicity, we parse the full string for tool calls and final answer
+
+    # Split on <tool_response> boundaries to find individual turns
+    import re
+    segments = re.split(r'<tool_response>.*?</tool_response>', solution_str, flags=re.DOTALL)
+
+    step_idx = 0
+    for segment in segments:
+        segment = segment.strip()
+        if not segment:
+            continue
+
+        parsed = parser.parse(segment)
+
+        step = RolloutStep(
+            step_idx=step_idx,
+            model_output=segment,
+            think_content=parsed.think,
+            action_type=parsed.type,
+        )
+
+        if parsed.type == "tool_call" and parsed.tool_call:
+            step.tool_execution = ToolExecutionResult(
+                tool_name=parsed.tool_call.name,
+                tool_args=parsed.tool_call.arguments,
+                result={"status": "success"},  # Assume success for reward scoring
+                success=True,
+            )
+            trajectory.total_tool_calls += 1
+
+        elif parsed.type == "final_answer":
+            trajectory.final_answer = parsed.content
+            trajectory.terminated = True
+            trajectory.termination_reason = "final_answer"
+
+        trajectory.steps.append(step)
+        step_idx += 1
+
+    # If no explicit final answer found but there is text, treat last segment as answer
+    if not trajectory.terminated and segments:
+        last_segment = segments[-1].strip()
+        if last_segment:
+            trajectory.final_answer = last_segment
+            trajectory.terminated = True
+            trajectory.termination_reason = "final_answer"
+
+    return trajectory
 
 
 # ============================================================================
