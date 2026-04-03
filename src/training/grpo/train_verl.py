@@ -106,7 +106,7 @@ def update_reward_version(config_path: str, reward_version: str) -> None:
 
     interaction_path = config.get("actor_rollout_ref", {}).get(
         "rollout", {}
-    ).get("interaction_config_path")
+    ).get("multi_turn", {}).get("interaction_config_path")
 
     if not interaction_path:
         logger.warning("No interaction_config_path found in config")
