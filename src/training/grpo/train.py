@@ -576,6 +576,39 @@ def vllm_generate_fn(
         return ""
 
 
+def mock_generate_fn(
+    messages: List[Dict[str, str]],
+    max_tokens: int = 1024,
+    temperature: float = 0.7,
+    top_p: float = 0.9,
+) -> str:
+    """
+    Mock generation function for dry-run testing.
+
+    Returns a simple tool call or final answer depending on message count
+    to exercise the rollout pipeline without a real model.
+    """
+    # Count assistant messages to determine which step we're on
+    assistant_count = sum(1 for m in messages if m["role"] == "assistant")
+
+    if assistant_count == 0:
+        # First turn: call get_food_nutrition
+        return (
+            '<think>The user is asking about food nutrition. '
+            'I should look this up.</think>'
+            '<tool_call>{"name": "get_food_nutrition", '
+            '"arguments": {"foods": [{"food_name": "chicken breast", '
+            '"amount_grams": 100}]}}</tool_call>'
+        )
+    else:
+        # Subsequent turns: give final answer
+        return (
+            "<think>I have the nutrition data, let me summarize.</think>"
+            "Chicken breast (100g) contains approximately 165 calories, "
+            "31g protein, 3.6g fat, and 0g carbs."
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description="GRPO/GiGPO training for NutriMind")
     parser.add_argument(
