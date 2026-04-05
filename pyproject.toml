@@ -30,17 +30,16 @@ retrieval = [
     "docling",
 ]
 inference = [
-    "torch==2.9.1",
-    "vllm>=0.8.5,<=0.12.0",
+    "torch==2.9.0",
+    "vllm==0.12.0",
 ]
 training = [
-    "torch==2.9.1",
+    "torch==2.9.0",
     "trl<=0.9.6",
     "peft",
     "datasets",
     "verl>=0.5.0",
-    "vllm>=0.8.5,<=0.12.0",
-    "sglang==0.5.8",
+    "vllm==0.12.0",
     "pyarrow>=19.0.0",
     "ray>=2.41.0",
     "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
