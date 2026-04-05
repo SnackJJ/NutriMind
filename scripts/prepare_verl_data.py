@@ -157,7 +157,7 @@ def save_parquet(data: List[Dict[str, Any]], path: Path) -> None:
             "prompt": entry["prompt"],
             "ability": entry["ability"],
             "reward_model": json.dumps(entry["reward_model"], ensure_ascii=False),
-            "extra_info": json.dumps(entry["extra_info"], ensure_ascii=False),
+            "extra_info": entry["extra_info"],
         })
 
     # Create PyArrow table
