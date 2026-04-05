@@ -21,7 +21,7 @@ data:
   reward_fn_key: data_source
   max_prompt_length: 1024
   max_response_length: 2048
-  train_batch_size: 32
+  train_batch_size: 16
   val_batch_size: 16
   return_raw_input_ids: false
   return_raw_chat: true
@@ -125,10 +125,10 @@ actor_rollout_ref:
     top_k: 50
     top_p: 0.9
     repetition_penalty: 1.0
-    prompt_length: 768
+    prompt_length: 1024
     response_length: 2048
     dtype: "bfloat16"
-    gpu_memory_utilization: 0.85
+    gpu_memory_utilization: 0.75
     ignore_eos: false
     enforce_eager: true
     cudagraph_capture_sizes: null
@@ -142,7 +142,7 @@ actor_rollout_ref:
     logprobs_mode: "processed_logprobs"
     scheduling_policy: "fcfs"
     max_model_len: 4096
-    max_num_seqs: 64
+    max_num_seqs: 32
     enable_chunked_prefill: true
     enable_prefix_caching: true
     load_format: "safetensors"
@@ -158,7 +158,7 @@ actor_rollout_ref:
     engine_kwargs: {}
     calculate_log_probs: false
     do_sample: true
-    n: 8
+    n: 4
     over_sample_rate: 0
     limit_images: null
     skip_tokenizer_init: true
@@ -341,52 +341,6 @@ algorithm:
 # =============================================================================
 # Reward Configuration
 # =============================================================================
-custom_reward_function:
-  path: "src/training/grpo/reward.py"
-  name: "compute_score"
-
-reward_model:
-  num_workers: null
-  reward_manager: null
-  enable: null
-  enable_resource_pool: null
-  n_gpus_per_node: null
-  nnodes: null
-  reward_loop_source: null
-  reward_loop_module_path: null
-  reward_loop_class_name: null
-  model:
-    path: null
-    external_lib: null
-    trust_remote_code: null
-  rollout:
-    name: null
-    dtype: null
-    gpu_memory_utilization: null
-    enforce_eager: null
-    cudagraph_capture_sizes: null
-    free_cache_engine: null
-    data_parallel_size: null
-    expert_parallel_size: null
-    tensor_model_parallel_size: null
-    max_num_batched_tokens: null
-    max_model_len: null
-    max_num_seqs: null
-    load_format: null
-    engine_kwargs: null
-    limit_images: null
-    enable_chunked_prefill: null
-    enable_prefix_caching: null
-    disable_log_stats: null
-    skip_tokenizer_init: null
-    prompt_length: null
-    response_length: null
-
-sandbox_fusion:
-  url: null
-  max_concurrent: null
-  memory_limit_mb: null
-
 reward:
   num_workers: 8
   custom_reward_function:
