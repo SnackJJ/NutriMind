@@ -4,32 +4,40 @@ version = "0.1.0"
 description = "NutriMind Agent"
 authors = [{ name = "NutriAgent Team" }]
 dependencies = [
-    "vllm",
     "transformers",
-    "torch",
-    "trl",
-    "peft",
-    "datasets",
-    "chromadb",
-    "sentence-transformers",
     "openai",
     "httpx",
     "pydantic",
     "loguru",
     "pyyaml",
     "python-dotenv",
-    "rank-bm25",
-    "docling",
     "dashscope",
+    "tenacity",
+]
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+retrieval = [
+    "chromadb",
+    "sentence-transformers",
+    "rank-bm25",
     "beautifulsoup4",
     "lxml",
     "nltk",
-    "tenacity",
-    # veRL GRPO dependencies
+    "docling",
+]
+inference = [
+    "torch",
+    "vllm",
+]
+training = [
+    "torch",
+    "trl",
+    "peft",
+    "datasets",
     "verl>=0.5.0",
     "sglang[all]>=0.3.0",
     "pyarrow>=14.0.0",
     "ray>=2.9.0",
     "wandb>=0.16.0",
 ]
-requires-python = ">=3.10"

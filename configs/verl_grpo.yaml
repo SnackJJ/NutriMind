@@ -54,7 +54,7 @@ actor_rollout_ref:
       attn_implementation: "sdpa"
     enable_gradient_checkpointing: true
     enable_activation_offload: false
-    use_remove_padding: true
+    use_remove_padding: false
     lora_rank: 16
     lora_alpha: 16
     target_modules:
@@ -89,7 +89,7 @@ actor_rollout_ref:
     use_torch_compile: false
     grad_clip: 1.0
     ulysses_sequence_parallel_size: 1
-    use_remove_padding: true
+    use_remove_padding: false
     optim:
       _target_: verl.workers.config.FSDPOptimizerConfig
       lr: 5e-7
@@ -101,9 +101,9 @@ actor_rollout_ref:
       clip_grad: 1.0
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
-      param_offload: true
-      optimizer_offload: true
-      grad_offload: true
+      param_offload: false
+      optimizer_offload: false
+      grad_offload: false
       reshard_after_forward: true
       fsdp_size: -1
       seed: 42
@@ -128,21 +128,21 @@ actor_rollout_ref:
     prompt_length: 768
     response_length: 2048
     dtype: "bfloat16"
-    gpu_memory_utilization: 0.25
+    gpu_memory_utilization: 0.85
     ignore_eos: false
     enforce_eager: true
     cudagraph_capture_sizes: null
     free_cache_engine: true
-    tensor_model_parallel_size: 2
-    data_parallel_size: 1
+    tensor_model_parallel_size: 1
+    data_parallel_size: 2
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1
     moe_tensor_parallel_size: 1
-    max_num_batched_tokens: 4096
+    max_num_batched_tokens: 8192
     logprobs_mode: "processed_logprobs"
     scheduling_policy: "fcfs"
     max_model_len: 4096
-    max_num_seqs: 128
+    max_num_seqs: 64
     enable_chunked_prefill: true
     enable_prefix_caching: true
     load_format: "safetensors"
@@ -150,7 +150,7 @@ actor_rollout_ref:
     layer_name_map: {}
     sglang_engine_mode: "local"
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 8
+    log_prob_micro_batch_size_per_gpu: 4
     log_prob_max_token_len_per_gpu: 16384
     log_prob_use_dynamic_bsz: false
     disable_log_stats: true
@@ -246,13 +246,13 @@ actor_rollout_ref:
     rollout_n: ${actor_rollout_ref.rollout.n}
     use_torch_compile: false
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: 8
+    log_prob_micro_batch_size_per_gpu: 4
     log_prob_use_dynamic_bsz: false
     log_prob_max_token_len_per_gpu: 16384
     ulysses_sequence_parallel_size: 1
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
-      param_offload: true
+      param_offload: false
       optimizer_offload: false
       reshard_after_forward: true
       fsdp_size: -1
