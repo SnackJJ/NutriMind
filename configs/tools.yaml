@@ -1,7 +1,7 @@
 database_path: "data/usda.db"
 rag:
   # Embedding
-  embedding_model: "BAAI/bge-small-en-v1.5"
+  embedding_model: "models/bge-small-en-v1.5"
   embedding_dim: 384
   # Reranker
   reranker_model: "BAAI/bge-reranker-base"
