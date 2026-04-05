@@ -339,34 +339,17 @@ algorithm:
   use_pf_ppo: false
 
 # =============================================================================
-# Reward Configuration
+# Custom Reward Function (top-level, required by veRL 0.5+)
 # =============================================================================
-reward:
-  num_workers: 8
-  custom_reward_function:
-    path: "src/training/grpo/reward.py"
-    name: "compute_score"
-  reward_manager:
-    _target_: verl.workers.config.reward_model.RewardManagerConfig
-    source: "register"
-    name: "naive"
-  reward_model:
-    enable: false
-    enable_resource_pool: false
-    n_gpus_per_node: 2
-    nnodes: 0
-    model_path: null
-  sandbox_fusion:
-    url: null
-    max_concurrent: 64
-    memory_limit_mb: 1024
+custom_reward_function:
+  path: "src/training/grpo/reward.py"
+  name: "compute_score"
 
 # =============================================================================
-# Reward Model Configuration (top-level, required by veRL migration check)
+# Reward Model Configuration (top-level, required by veRL 0.5+)
 # =============================================================================
 reward_model:
   enable: false
-  num_workers: null
 
 # =============================================================================
 # Trainer Configuration
@@ -429,7 +412,6 @@ transfer_queue:
 # =============================================================================
 # Ray Configuration
 # =============================================================================
-ray_kwargs:
-  ray_init:
-    num_cpus: null
+ray_init:
+  num_cpus: null
   timeline_json_file: null
