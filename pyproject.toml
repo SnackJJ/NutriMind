@@ -16,6 +16,9 @@ dependencies = [
 ]
 requires-python = ">=3.10"
 
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cu121"]
+
 [project.optional-dependencies]
 retrieval = [
     "chromadb",
