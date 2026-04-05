@@ -41,7 +41,7 @@ actor_rollout_ref:
       reshard_after_forward: true
       fsdp_size: -1
       forward_prefetch: false
-      model_dtype: fp32
+      model_dtype: bfloat16
       use_orig_params: false
       seed: 42
       full_determinism: false
@@ -68,7 +68,7 @@ actor_rollout_ref:
     strategy: fsdp
     ppo_mini_batch_size: 16
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: 8
+    ppo_micro_batch_size_per_gpu: 4
     use_dynamic_bsz: false
     ppo_max_token_len_per_gpu: 16384
     clip_ratio: 0.2
@@ -204,7 +204,7 @@ actor_rollout_ref:
       reshard_after_forward: true
       fsdp_size: -1
       forward_prefetch: false
-      model_dtype: fp32
+      model_dtype: bfloat16
       use_orig_params: false
       seed: 42
       full_determinism: false
@@ -478,7 +478,7 @@ critic:
       reshard_after_forward: true
       fsdp_size: -1
       forward_prefetch: false
-      model_dtype: fp32
+      model_dtype: bfloat16
       use_orig_params: false
       seed: 42
       full_determinism: false
