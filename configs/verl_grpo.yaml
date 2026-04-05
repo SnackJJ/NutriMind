@@ -19,7 +19,7 @@ data:
   val_max_samples: -1
   prompt_key: prompt
   reward_fn_key: data_source
-  max_prompt_length: 512
+  max_prompt_length: 1024
   max_response_length: 2048
   train_batch_size: 32
   val_batch_size: 16
@@ -35,6 +35,7 @@ data:
   truncation: "error"
   trust_remote_code: false
   return_multi_modal_inputs: false
+  sampler: null
 
 # =============================================================================
 # Actor/Rollout/Ref Configuration
@@ -49,7 +50,8 @@ actor_rollout_ref:
     tokenizer_path: null
     use_shm: false
     trust_remote_code: false
-    override_config: {}
+    override_config:
+      attn_implementation: "sdpa"
     enable_gradient_checkpointing: true
     enable_activation_offload: false
     use_remove_padding: true
@@ -99,9 +101,9 @@ actor_rollout_ref:
       clip_grad: 1.0
     fsdp_config:
       _target_: verl.workers.config.FSDPEngineConfig
-      param_offload: false
-      optimizer_offload: false
-      grad_offload: false
+      param_offload: true
+      optimizer_offload: true
+      grad_offload: true
       reshard_after_forward: true
       fsdp_size: -1
       seed: 42
@@ -115,41 +117,74 @@ actor_rollout_ref:
 
   rollout:
     _target_: verl.workers.config.RolloutConfig
-    name: "sglang"
+    name: "vllm"
     mode: "async"
     nnodes: 0
     n_gpus_per_node: 2
     temperature: 0.7
     top_k: 50
     top_p: 0.9
-    prompt_length: 512
+    repetition_penalty: 1.0
+    prompt_length: 768
     response_length: 2048
     dtype: "bfloat16"
-    gpu_memory_utilization: 0.7
+    gpu_memory_utilization: 0.25
     ignore_eos: false
-    enforce_eager: false
+    enforce_eager: true
+    cudagraph_capture_sizes: null
     free_cache_engine: true
     tensor_model_parallel_size: 2
     data_parallel_size: 1
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1
-    max_num_batched_tokens: 8192
-    max_model_len: null
-    max_num_seqs: 1024
+    moe_tensor_parallel_size: 1
+    max_num_batched_tokens: 4096
+    logprobs_mode: "processed_logprobs"
+    scheduling_policy: "fcfs"
+    max_model_len: 4096
+    max_num_seqs: 128
     enable_chunked_prefill: true
     enable_prefix_caching: true
     load_format: "safetensors"
+    layered_summon: false
+    layer_name_map: {}
+    sglang_engine_mode: "local"
     log_prob_micro_batch_size: null
     log_prob_micro_batch_size_per_gpu: 8
+    log_prob_max_token_len_per_gpu: 16384
+    log_prob_use_dynamic_bsz: false
     disable_log_stats: true
+    multi_stage_wake_up: false
+    engine_kwargs: {}
+    calculate_log_probs: false
     do_sample: true
     n: 8
     over_sample_rate: 0
+    limit_images: null
     skip_tokenizer_init: true
+    quantization: null
+    quantization_config_file: null
+    enable_rollout_routing_replay: false
+    enable_sleep_mode: true
+    mtp:
+      _target_: verl.workers.config.MtpConfig
+      enable: false
+      enable_train: false
+      enable_rollout: false
+      detach_encoder: false
+      mtp_loss_scaling_factor: 0.1
+      speculative_algorithm: "EAGLE"
+      speculative_num_steps: 3
+      speculative_eagle_topk: 1
+      speculative_num_draft_tokens: 4
+      method: "mtp"
+      num_speculative_tokens: 1
+    qat: null
     multi_turn:
       _target_: verl.workers.config.MultiTurnConfig
       enable: true
       max_assistant_turns: 6
+      tool_config_path: null
       max_user_turns: 6
       max_parallel_calls: 1
       max_tool_response_length: 2048
@@ -168,8 +203,42 @@ actor_rollout_ref:
     checkpoint_engine:
       _target_: verl.workers.config.CheckpointEngineConfig
       backend: "naive"
-      update_weights_bucket_megabytes: 2048
+      update_weights_bucket_megabytes: 512
       engine_kwargs: {}
+    prometheus:
+      _target_: verl.workers.config.PrometheusConfig
+      enable: false
+      port: 9090
+      file: "/tmp/ray/session_latest/metrics/prometheus/prometheus.yml"
+      served_model_name: null
+    agent:
+      _target_: verl.workers.config.AgentLoopConfig
+      num_workers: 8
+      default_agent_loop: "single_turn_agent"
+      agent_loop_config_path: null
+      custom_async_server:
+        _target_: verl.workers.config.CustomAsyncServerConfig
+        path: null
+        name: null
+      agent_loop_manager_class: null
+    trace:
+      _target_: verl.workers.config.TraceConfig
+      project_name: null
+      experiment_name: null
+      backend: null
+      token2text: false
+      max_samples_per_step_per_worker: null
+    server:
+      _target_: verl.workers.config.ServerConfig
+      timeout: 60.0
+      max_attempts: 3
+      retry_delay: 2.0
+      max_connections: 1000
+      max_start_wait_time: 300.0
+    custom: null
+    skip_rollout: false
+    skip_dump_dir: "~/.verl/rollout_dump"
+    profiler: null
 
   ref:
     _target_: verl.workers.config.FSDPActorConfig
@@ -376,6 +445,7 @@ trainer:
 global_profiler:
   _target_: verl.utils.profiler.ProfilerConfig
   tool: null
+  enable: false
   steps: null
   profile_continuous_steps: false
   save_path: "outputs/profile"

@@ -156,7 +156,8 @@ def save_parquet(data: List[Dict[str, Any]], path: Path) -> None:
             # instead of a JSON serialized string to work with jinja2 chat templates.
             "prompt": entry["prompt"],
             "ability": entry["ability"],
-            "reward_model": json.dumps(entry["reward_model"], ensure_ascii=False),
+            # Reward loop expects reward_model as a nested struct (dict), not a JSON string.
+            "reward_model": entry["reward_model"],
             "extra_info": entry["extra_info"],
         })
 
