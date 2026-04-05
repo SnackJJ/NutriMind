@@ -248,7 +248,7 @@ actor_rollout_ref:
     enforce_eager: true
     cudagraph_capture_sizes: null
     free_cache_engine: true
-    tensor_model_parallel_size: 1
+    tensor_model_parallel_size: 2
     data_parallel_size: 1
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1
