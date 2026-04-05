@@ -52,3 +52,9 @@ CV.md
 .gitignore
 
 *.tar.gz
+
+# Training/runtime artifacts
+models/
+outputs/
+wandb/
+unsloth_compiled_cache/
