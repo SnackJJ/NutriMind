@@ -181,10 +181,12 @@ def _compute_t1_outcome_from_tool_results(
 
     This provides "runtime ground truth" without pre-annotation.
     """
-    # Find get_food_nutrition results in trajectory
+    # Find get_food_nutrition results in trajectory.
     nutrition_values = []
+    nutrition_tool_called = False
     for step in trajectory.steps:
         if step.tool_execution and step.tool_execution.tool_name == "get_food_nutrition":
+            nutrition_tool_called = True
             result = step.tool_execution.result
             if isinstance(result, dict) and result.get("status") == "success":
                 data = result.get("data", {})
@@ -193,9 +195,12 @@ def _compute_t1_outcome_from_tool_results(
                     if key in data:
                         nutrition_values.append(data[key])
 
+    if not nutrition_tool_called:
+        return 0.0
+
     if not nutrition_values:
-        # No nutrition tool called or no values found
-        return 0.5
+        # Called nutrition tool but got no structured values to ground the answer.
+        return 0.2
 
     # Check how many values appear in the answer
     matches = 0
@@ -206,7 +211,16 @@ def _compute_t1_outcome_from_tool_results(
             if value_str in final_answer or str(int(value)) in final_answer:
                 matches += 1
 
-    return min(1.0, matches / max(len(nutrition_values), 1) + 0.2)
+    coverage = matches / max(len(nutrition_values), 1)
+
+    # Hard downgrade: called tool but ignored key numeric values.
+    if coverage == 0.0:
+        return 0.1
+    if coverage < 0.35:
+        return 0.35
+    if coverage < 0.7:
+        return 0.65
+    return 1.0
 
 
 def compute_efficiency_score(
@@ -243,7 +257,8 @@ def compute_conditional_score(
     """
     branch_condition = task_metadata.branch_condition
     if not branch_condition:
-        return 1.0  # Not a conditional task
+        # Neutral baseline for non-conditional tasks.
+        return 0.5
 
     # Extract relevant info from trajectory
     check_tool = branch_condition.get("check_tool")
@@ -422,37 +437,50 @@ def reward_v2(
     trajectory: RolloutTrajectory, task_metadata: TaskMetadata
 ) -> RewardBreakdown:
     """
-    GRPO v2: v1 + efficiency + conditional.
+    GRPO v2: v1 + conditional monitoring + strict hard gate.
 
     Policy: GRPO-v1 checkpoint
     Reference: GRPO-v1 checkpoint (frozen)
 
     Components:
-    - v1 base (70%)
-    - R_efficiency (15%): Penalize excess tool calls
-    - R_conditional (15%): T3 branching correctness
+    - v1 base (100%)
+    - R_conditional is tracked for diagnostics only (not added to total)
+
+    Hard gate:
+    - For T1/T2/T3 tasks, if successful_tool_calls == 0, total reward = 0.0.
     """
     # Get v1 base
     v1 = reward_v1(trajectory, task_metadata)
 
-    # R_efficiency
-    r_efficiency = compute_efficiency_score(trajectory, task_metadata)
-
     # R_conditional
     r_conditional = compute_conditional_score(trajectory, task_metadata)
 
-    # Weighted sum
-    total = 0.70 * v1.total + 0.15 * r_efficiency + 0.15 * r_conditional
+    total = v1.total
+
+    tier = task_metadata.tier or ""
+    successful_tool_calls = sum(
+        1
+        for step in trajectory.steps
+        if step.tool_execution is not None and step.tool_execution.success
+    )
+    hard_gate_applied = (
+        (tier.startswith("T1") or tier.startswith("T2") or tier.startswith("T3"))
+        and successful_tool_calls == 0
+    )
+    if hard_gate_applied:
+        total = 0.0
 
     return RewardBreakdown(
         total=total,
         r_format=v1.r_format,
         r_tool_selection=v1.r_tool_selection,
         r_outcome=v1.r_outcome,
-        r_efficiency=r_efficiency,
+        r_efficiency=0.0,
         r_conditional=r_conditional,
         details={
             **v1.details,
+            "successful_tool_calls": successful_tool_calls,
+            "hard_gate_applied": hard_gate_applied,
             "actual_steps": trajectory.total_tool_calls,
             "optimal_steps": task_metadata.optimal_steps,
             "tier": task_metadata.tier,
@@ -595,64 +623,115 @@ def _build_trajectory_from_solution(
     solution_str: str, task_meta: TaskMetadata
 ) -> RolloutTrajectory:
     """
-    Reconstruct a RolloutTrajectory from model output string.
+    Reconstruct a RolloutTrajectory from decoded rollout text.
 
-    In veRL multi-turn mode, solution_str contains the full conversation
-    including assistant turns and tool responses. We parse it to extract
-    tool calls and the final answer.
+    In veRL multi-turn mode, solution_str usually contains plain role labels
+    ("user" / "assistant") plus <tool_call>/<tool_response> blocks.
+    We parse the blocks in-order and bind each tool_response payload to the
+    preceding tool_call so runtime outcome checks can use real tool values.
     """
-    from src.orchestrator.tool_parser import ToolParser, TOOL_CALL_PATTERN, THINK_PATTERN
+    from src.orchestrator.tool_parser import ToolParser
 
     trajectory = RolloutTrajectory(prompt=task_meta.query)
     parser = ToolParser(validate_tool_name=False)
 
-    # Parse the solution string as a single assistant turn
-    # In multi-turn veRL, each assistant segment is separated by tool responses
-    # For simplicity, we parse the full string for tool calls and final answer
-
-    # Split on <tool_response> boundaries to find individual turns
     import re
-    segments = re.split(r'<tool_response>.*?</tool_response>', solution_str, flags=re.DOTALL)
 
+    block_pattern = re.compile(
+        r"<(tool_call|tool_response)>\s*(.*?)\s*</\1>",
+        flags=re.DOTALL,
+    )
+
+    pending_step: Optional[RolloutStep] = None
     step_idx = 0
-    for segment in segments:
-        segment = segment.strip()
-        if not segment:
-            continue
+    last_end = 0
 
-        parsed = parser.parse(segment)
+    for match in block_pattern.finditer(solution_str):
+        tag_type = match.group(1)
+        block_content = match.group(2).strip()
+        raw_block = match.group(0)
+        last_end = match.end()
 
-        step = RolloutStep(
-            step_idx=step_idx,
-            model_output=segment,
-            think_content=parsed.think,
-            action_type=parsed.type,
-        )
+        if tag_type == "tool_call":
+            try:
+                payload = json.loads(block_content)
+            except json.JSONDecodeError:
+                parse_error_step = RolloutStep(
+                    step_idx=step_idx,
+                    model_output=raw_block,
+                    think_content=None,
+                    action_type="parse_error",
+                    injected_response="Invalid tool_call JSON in solution_str",
+                )
+                trajectory.steps.append(parse_error_step)
+                step_idx += 1
+                pending_step = None
+                continue
 
-        if parsed.type == "tool_call" and parsed.tool_call:
-            step.tool_execution = ToolExecutionResult(
-                tool_name=parsed.tool_call.name,
-                tool_args=parsed.tool_call.arguments,
-                result={"status": "success"},  # Assume success for reward scoring
-                success=True,
+            tool_name = payload.get("name") or payload.get("function") or "unknown_tool"
+            tool_args = payload.get("arguments") or payload.get("parameters") or {}
+            if isinstance(tool_args, str):
+                try:
+                    tool_args = json.loads(tool_args)
+                except json.JSONDecodeError:
+                    tool_args = {}
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+
+            pending_step = RolloutStep(
+                step_idx=step_idx,
+                model_output=raw_block,
+                think_content=None,
+                action_type="tool_call",
+                tool_execution=ToolExecutionResult(
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    result={"status": "error", "message": "missing tool_response"},
+                    success=False,
+                ),
             )
+            trajectory.steps.append(pending_step)
             trajectory.total_tool_calls += 1
+            step_idx += 1
 
-        elif parsed.type == "final_answer":
-            trajectory.final_answer = parsed.content
-            trajectory.terminated = True
-            trajectory.termination_reason = "final_answer"
+        else:  # tool_response
+            if pending_step is None or pending_step.tool_execution is None:
+                continue
 
-        trajectory.steps.append(step)
-        step_idx += 1
+            try:
+                response_payload = json.loads(block_content)
+            except json.JSONDecodeError:
+                response_payload = {
+                    "status": "error",
+                    "error_type": "invalid_tool_response_json",
+                    "message": "Failed to parse tool_response JSON",
+                    "raw": block_content,
+                }
 
-    # If no explicit final answer found but there is text, treat last segment as answer
-    if not trajectory.terminated and segments:
-        last_segment = segments[-1].strip()
-        if last_segment:
-            trajectory.final_answer = last_segment
-            trajectory.terminated = True
-            trajectory.termination_reason = "final_answer"
+            status = response_payload.get("status")
+            success = status == "success"
+            if status is None:
+                success = "error" not in response_payload
+
+            pending_step.tool_execution.result = response_payload
+            pending_step.tool_execution.success = success
+            pending_step.injected_response = raw_block
+            pending_step = None
+
+    trailing = solution_str[last_end:].strip()
+    if trailing:
+        trailing = re.sub(r"(^|\n)\s*(assistant|user)\s*(?=\n|$)", "\\1", trailing, flags=re.IGNORECASE)
+        trailing = trailing.strip()
+
+    if trailing:
+        parsed_final = parser.parse(trailing)
+        trajectory.final_answer = parsed_final.content if parsed_final.type == "final_answer" else trailing
+        trajectory.terminated = True
+        trajectory.termination_reason = "final_answer"
+    elif trajectory.steps:
+        trajectory.final_answer = ""
+        trajectory.terminated = True
+        trajectory.termination_reason = "final_answer"
 
     return trajectory
 

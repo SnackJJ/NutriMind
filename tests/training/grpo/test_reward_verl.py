@@ -1,7 +1,6 @@
 """Tests for veRL-compatible compute_score entry point."""
 
 import json
-import pytest
 
 from src.training.grpo.reward import compute_score
 
@@ -16,6 +15,8 @@ class TestComputeScore:
             '<tool_call>{"name": "get_food_nutrition", '
             '"arguments": {"foods": [{"food_name": "chicken breast", "amount_grams": 100}]}}'
             '</tool_call>'
+            '<tool_response>{"status":"success","data":{"calories_kcal":165,"protein_g":31}}</tool_response>'
+            'assistant\nChicken breast has 165 calories and 31g protein per 100g.'
         )
         ground_truth = json.dumps({
             "tier": "T1",
@@ -33,7 +34,54 @@ class TestComputeScore:
             extra_info=extra_info,
         )
         assert isinstance(score, float)
-        assert 0.0 <= score <= 1.0
+        assert score > 0.0
+
+    def test_t1_no_successful_tool_call_hard_gates_to_zero(self):
+        """T1/T2/T3 with no successful tool calls should receive zero total reward."""
+        solution_str = (
+            '<think>Let me check chicken breast nutrition.</think>'
+            '<tool_call>{"name":"get_food_nutrition","arguments":{"foods":[{"food_name":"chicken breast","amount_grams":100}]}}</tool_call>'
+        )
+        ground_truth = json.dumps({"tier": "T1", "difficulty": "easy", "optimal_steps": 1})
+        extra_info = json.dumps({"interaction_kwargs": {"tier": "T1"}})
+
+        score = compute_score(
+            data_source="nutrimind",
+            solution_str=solution_str,
+            ground_truth=ground_truth,
+            extra_info=extra_info,
+        )
+        assert score == 0.0
+
+    def test_t1_outcome_downgrades_when_answer_ignores_tool_numbers(self):
+        """Calling nutrition tool but omitting key values should be downgraded."""
+        with_values = (
+            '<tool_call>{"name":"get_food_nutrition","arguments":{"foods":[{"food_name":"chicken breast","amount_grams":100}]}}</tool_call>'
+            '<tool_response>{"status":"success","data":{"calories_kcal":165,"protein_g":31}}</tool_response>'
+            'assistant\n100g chicken breast has 165 calories and 31g protein.'
+        )
+        without_values = (
+            '<tool_call>{"name":"get_food_nutrition","arguments":{"foods":[{"food_name":"chicken breast","amount_grams":100}]}}</tool_call>'
+            '<tool_response>{"status":"success","data":{"calories_kcal":165,"protein_g":31}}</tool_response>'
+            'assistant\nChicken breast is generally a healthy lean protein source.'
+        )
+        ground_truth = json.dumps({"tier": "T1", "difficulty": "easy", "optimal_steps": 1})
+        extra_info = json.dumps({"interaction_kwargs": {"tier": "T1"}})
+
+        score_with_values = compute_score(
+            data_source="nutrimind",
+            solution_str=with_values,
+            ground_truth=ground_truth,
+            extra_info=extra_info,
+        )
+        score_without_values = compute_score(
+            data_source="nutrimind",
+            solution_str=without_values,
+            ground_truth=ground_truth,
+            extra_info=extra_info,
+        )
+
+        assert score_with_values > score_without_values
 
     def test_empty_solution_scores_zero(self):
         """Empty model output should score 0."""
