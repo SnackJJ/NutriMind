@@ -243,7 +243,7 @@ actor_rollout_ref:
     prompt_length: ${oc.select:data.max_prompt_length,1024}
     response_length: ${oc.select:data.max_response_length,2048}
     dtype: bfloat16
-    gpu_memory_utilization: 0.65
+    gpu_memory_utilization: 0.75
     ignore_eos: false
     enforce_eager: true
     cudagraph_capture_sizes: null
@@ -722,7 +722,7 @@ trainer:
   validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 2
-  save_freq: 100
+  save_freq: 30
   esi_redundant_time: 0
   resume_mode: auto
   resume_from_path: null
