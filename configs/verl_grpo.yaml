@@ -422,7 +422,7 @@ data:
   return_raw_chat: true
   return_full_prompt: false
   shuffle: true
-  seed: null
+    max_response_length: 2048
   dataloader_num_workers: 8
   image_patch_size: 14
   validation_shuffle: false
@@ -696,7 +696,7 @@ algorithm:
   kl_penalty: kl
   kl_ctrl:
     _target_: verl.trainer.config.KLControlConfig
-    type: fixed
+          max_tool_response_length: 512
     kl_coef: 0.001
     horizon: 10000
     target_kl: 0.1

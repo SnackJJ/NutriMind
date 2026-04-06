@@ -168,6 +168,21 @@ def validate_config(config_path: str) -> bool:
             logger.error("data.return_raw_chat must be true for multi-turn")
             return False
 
+        # Guard against response budget exhaustion in tool_agent loop.
+        data_cfg = config.get("data", {})
+        max_response_len = int(data_cfg.get("max_response_length", 0) or 0)
+        max_tool_response_len = int(multi_turn.get("max_tool_response_length", 0) or 0)
+        if max_response_len < 1:
+            logger.error("data.max_response_length must be >= 1")
+            return False
+        if multi_turn.get("enable", False) and max_tool_response_len >= max_response_len:
+            logger.error(
+                "Invalid token budget: rollout.multi_turn.max_tool_response_length "
+                f"({max_tool_response_len}) must be smaller than data.max_response_length ({max_response_len}). "
+                "Otherwise vLLM may receive max_tokens=0 in later turns."
+            )
+            return False
+
         logger.info("Configuration validation passed")
         return True
 
