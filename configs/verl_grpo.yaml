@@ -253,7 +253,7 @@ actor_rollout_ref:
     expert_parallel_size: 1
     pipeline_model_parallel_size: 1
     max_num_batched_tokens: 8192
-    max_model_len: 8192
+    max_model_len: 5632
     max_num_seqs: 32
     enable_chunked_prefill: true
     enable_prefix_caching: true
@@ -413,8 +413,8 @@ data:
   val_max_samples: -1
   prompt_key: prompt
   reward_fn_key: data_source
-  max_prompt_length: 2048
-  max_response_length: 6144
+  max_prompt_length: 1536
+  max_response_length: 4096
   train_batch_size: 8
   val_batch_size: null
   tool_config_path: ${oc.select:actor_rollout_ref.rollout.multi_turn.tool_config_path, null}
