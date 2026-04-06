@@ -149,12 +149,19 @@ def validate_config(config_path: str) -> bool:
                 return False
 
         # Check multi-turn is enabled
-        multi_turn = config.get("actor_rollout_ref", {}).get(
-            "rollout", {}
-        ).get("multi_turn", {})
+        rollout_cfg = config.get("actor_rollout_ref", {}).get("rollout", {})
+        multi_turn = rollout_cfg.get("multi_turn", {})
 
         if not multi_turn.get("enable", False):
             logger.warning("Multi-turn is not enabled in config")
+
+        # Warn about loop mismatch that causes num_turns to stay constant (typically 2)
+        agent_loop = rollout_cfg.get("agent", {}).get("default_agent_loop")
+        if multi_turn.get("enable", False) and agent_loop == "single_turn_agent":
+            logger.warning(
+                "multi_turn.enable=true but agent.default_agent_loop=single_turn_agent. "
+                "This keeps num_turns metrics near a fixed value; use tool_agent for true multi-turn stats."
+            )
 
         # Check return_raw_chat
         if not config.get("data", {}).get("return_raw_chat", False):
@@ -238,6 +245,9 @@ Examples:
     logger.info(f"Using config: {config_path}")
     logger.info(f"Algorithm: {args.algorithm}")
     logger.info(f"Reward version: {args.reward_version}")
+
+    # Make reward version visible to custom reward function running inside veRL workers.
+    os.environ["NUTRIMIND_REWARD_VERSION"] = args.reward_version
 
     # Validate configuration
     if not validate_config(str(config_path)):

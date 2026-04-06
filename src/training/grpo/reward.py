@@ -11,6 +11,7 @@ This enables diagnosing what worked and what didn't.
 """
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -563,7 +564,7 @@ def compute_score(
 
     Called by veRL's reward manager for each completed rollout.
     Bridges veRL's flat (data_source, solution_str, ground_truth, extra_info)
-    interface to our structured reward_v1/v2 functions.
+    interface to our structured reward_v1/v2/v3 functions.
 
     Args:
         data_source: Dataset identifier (must be "nutrimind")
@@ -603,6 +604,21 @@ def compute_score(
     difficulty = ground_truth.get("difficulty", "medium")
     optimal_steps = ground_truth.get("optimal_steps", 1)
 
+    # Resolve reward version with explicit priority:
+    # 1) extra_info.interaction_kwargs.reward_version
+    # 2) ground_truth.reward_version
+    # 3) env var set by launcher (NUTRIMIND_REWARD_VERSION)
+    # 4) default "v2"
+    interaction_kwargs = extra_info.get("interaction_kwargs", {})
+    reward_version = (
+        interaction_kwargs.get("reward_version")
+        or ground_truth.get("reward_version")
+        or os.getenv("NUTRIMIND_REWARD_VERSION")
+        or "v2"
+    )
+    if reward_version not in {"v1", "v2", "v3"}:
+        reward_version = "v2"
+
     # Build TaskMetadata
     task_meta = TaskMetadata(
         query="",  # Not available in reward-only context
@@ -614,8 +630,15 @@ def compute_score(
     # Build a minimal RolloutTrajectory by parsing the solution string
     trajectory = _build_trajectory_from_solution(solution_str, task_meta)
 
-    # Use reward_v2 (default for veRL training)
-    breakdown = reward_v2(trajectory, task_meta)
+    if reward_version == "v1":
+        breakdown = reward_v1(trajectory, task_meta)
+    elif reward_version == "v3":
+        # In veRL reward-manager context we do not have an external LLM judge,
+        # so reward_v3 will gracefully fall back to v2 behavior where needed.
+        breakdown = reward_v3(trajectory, task_meta, llm_judge=None)
+    else:
+        breakdown = reward_v2(trajectory, task_meta)
+
     return breakdown.total
 
 
