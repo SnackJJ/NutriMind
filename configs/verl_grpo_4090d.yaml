@@ -243,7 +243,7 @@ actor_rollout_ref:
     prompt_length: ${oc.select:data.max_prompt_length,1024}
     response_length: ${oc.select:data.max_response_length,3072}
     dtype: bfloat16
-    gpu_memory_utilization: 0.85
+    gpu_memory_utilization: 0.78
     ignore_eos: false
     enforce_eager: true
     cudagraph_capture_sizes: null
