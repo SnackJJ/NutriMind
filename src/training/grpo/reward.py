@@ -438,7 +438,7 @@ def reward_v2(
     trajectory: RolloutTrajectory, task_metadata: TaskMetadata
 ) -> RewardBreakdown:
     """
-    GRPO v2: v1 + conditional monitoring + strict hard gate + truncation penalty.
+    GRPO v2: v1 + conditional monitoring + strict hard gate.
 
     Policy: GRPO-v1 checkpoint
     Reference: GRPO-v1 checkpoint (frozen)
@@ -449,11 +449,6 @@ def reward_v2(
 
     Hard gate:
     - For T1/T2/T3 tasks, if successful_tool_calls == 0, total reward = 0.0.
-
-    Truncation penalty:
-    - If trajectory was truncated by max_tokens exhaustion, total *= 0.5.
-    - Rationale: truncated rollouts have unreliable reward signals;
-      halving their weight prevents them from misleading the policy gradient.
     """
     # Get v1 base
     v1 = reward_v1(trajectory, task_metadata)
@@ -476,12 +471,6 @@ def reward_v2(
     if hard_gate_applied:
         total = 0.0
 
-    # Penalize truncated rollouts — their reward signal is unreliable
-    truncation_penalized = False
-    if trajectory.termination_reason == "max_tokens":
-        total *= 0.5
-        truncation_penalized = True
-
     return RewardBreakdown(
         total=total,
         r_format=v1.r_format,
@@ -493,7 +482,6 @@ def reward_v2(
             **v1.details,
             "successful_tool_calls": successful_tool_calls,
             "hard_gate_applied": hard_gate_applied,
-            "truncation_penalized": truncation_penalized,
             "actual_steps": trajectory.total_tool_calls,
             "optimal_steps": task_metadata.optimal_steps,
             "tier": task_metadata.tier,
