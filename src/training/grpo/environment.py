@@ -27,6 +27,35 @@ from src.orchestrator.tool_parser import (
     VALID_TOOLS,
 )
 
+import gc
+import logging
+
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
+
+logger = logging.getLogger(__name__)
+
+
+def clear_gpu_memory(log: bool = False) -> None:
+    """
+    Clear CUDA memory fragmentation between rollout batches.
+
+    Even with dual-GPU isolation, long training runs can accumulate
+    fragmentation. Call this between batches as a preventive measure.
+    """
+    gc.collect()
+    if torch is not None and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if log:
+            for i in range(torch.cuda.device_count()):
+                alloc = torch.cuda.memory_allocated(i) / 1024**3
+                reserved = torch.cuda.memory_reserved(i) / 1024**3
+                logger.info(
+                    f"[GPU {i}] allocated={alloc:.1f}GB, reserved={reserved:.1f}GB"
+                )
+
 
 @dataclass
 class ToolExecutionResult:
@@ -530,6 +559,53 @@ When user provides weight and ratio (e.g., 80kg, 2g/kg), calculate in <think> FI
         # So we literally do not need to rewrite the global json files!
         self.initial_snapshot = snapshot
 
+    def estimate_tokens_used(self) -> int:
+        """
+        Estimate total tokens consumed in the response so far.
+
+        Used for token budget monitoring — detects when remaining budget
+        is too low for meaningful generation.
+        """
+        total = 0
+        for step in (self._trajectory.steps if self._trajectory else []):
+            # Rough estimate: 1 token ≈ 4 chars for English text
+            total += len(step.model_output) // 4
+            if step.injected_response:
+                total += len(step.injected_response) // 4
+        return total
+
+    def check_token_budget(self, max_response_length: int) -> int:
+        """
+        Check remaining token budget and log warnings if low.
+
+        Args:
+            max_response_length: Total response token budget (e.g. 5120)
+
+        Returns:
+            Estimated remaining tokens. If <= 0, sets termination_reason
+            to "max_tokens" and marks trajectory as terminated.
+        """
+        used = self.estimate_tokens_used()
+        remaining = max_response_length - used
+
+        if remaining <= 0:
+            logger.warning(
+                f"Token budget exhausted: used~{used}, "
+                f"max={max_response_length}, remaining={remaining}"
+            )
+            if self._trajectory is not None:
+                self._trajectory.terminated = True
+                self._trajectory.termination_reason = "max_tokens"
+            return 0
+
+        if remaining < 200:
+            logger.warning(
+                f"Token budget nearly exhausted: used~{used}, "
+                f"remaining~{remaining}/{max_response_length}"
+            )
+
+        return remaining
+
 
 def compute_state_key(messages: List[Dict[str, str]]) -> str:
     """
@@ -627,6 +703,10 @@ class RolloutGroup:
                 if result[1]:  # done
                     self.trajectories[i] = env.get_trajectory()
                 results.append(result)
+
+        # Clear GPU memory fragmentation between batches
+        clear_gpu_memory()
+
         return results
 
     def get_all_trajectories(self) -> List[RolloutTrajectory]:
