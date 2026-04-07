@@ -202,7 +202,7 @@ actor_rollout_ref:
       optimizer_offload: false
       offload_policy: false
       reshard_after_forward: true
-      fsdp_size: -1
+      fsdp_size: 1
       forward_prefetch: false
       model_dtype: bfloat16
       use_orig_params: false
@@ -297,7 +297,8 @@ actor_rollout_ref:
       tokenization_sanity_check_mode: ignore_strippable
       format: hermes
       num_repeat_rollouts: null
-    calculate_log_probs: false
+    # Prefer rollout-side logprobs to avoid extra FSDP log-prob passes.
+    calculate_log_probs: true
     agent:
       _target_: verl.workers.config.AgentLoopConfig
       num_workers: 8
