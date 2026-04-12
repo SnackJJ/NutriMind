@@ -141,17 +141,30 @@ class TestStage1Infrastructure:
 
     def test_stage1_vllm_models(self, vllm_url):
         """vLLM server has a model loaded."""
+        # trl vllm-serve exposes /v1/models on newer versions; fall back to
+        # a lightweight /v1/completions probe when the endpoint is absent.
         r = requests.get(f"{vllm_url}/v1/models", timeout=5)
-        assert r.status_code == 200
-        models = r.json()
-        assert len(models.get("data", [])) > 0, "No models loaded in vLLM"
+        if r.status_code == 200:
+            models = r.json()
+            assert len(models.get("data", [])) > 0, "No models loaded in vLLM"
+        else:
+            # Fallback: send a tiny completions request to confirm a model is loaded
+            probe = requests.post(
+                f"{vllm_url}/v1/completions",
+                json={"prompt": "Hi", "max_tokens": 1},
+                timeout=30,
+            )
+            assert probe.status_code == 200, (
+                f"/v1/models returned {r.status_code} and "
+                f"/v1/completions probe returned {probe.status_code}"
+            )
 
     def test_stage1_gpu_available(self):
         """At least one GPU is visible."""
         import torch
 
         assert torch.cuda.is_available(), "No GPU available"
-        gpu_mem = torch.cuda.get_device_properties(0).total_mem / 1024**3
+        gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1024**3
         assert gpu_mem > 20, f"GPU 0 only has {gpu_mem:.0f}GB, need >20GB"
 
     def test_stage1_trl_importable(self):
