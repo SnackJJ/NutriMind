@@ -524,7 +524,7 @@ class TestStage5Training:
             max_completion_length=1024,
             temperature=0.7,
             learning_rate=5e-7,
-            per_device_train_batch_size=1,
+            per_device_train_batch_size=2,  # must be >= num_generations
             num_train_epochs=1,
             max_steps=1,  # JUST 1 STEP
             gradient_checkpointing=True,
