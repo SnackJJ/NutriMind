@@ -522,7 +522,6 @@ class TestStage5Training:
             output_dir=str(output_dir),
             num_generations=2,
             max_completion_length=1024,
-            max_prompt_length=1024,
             temperature=0.7,
             learning_rate=5e-7,
             per_device_train_batch_size=1,
