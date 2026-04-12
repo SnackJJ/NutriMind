@@ -400,8 +400,7 @@ actor_rollout_ref:
       speculative_num_draft_tokens: 4
       method: mtp
       num_speculative_tokens: 1
-  # Keep rollout and training workers separated so resource_pool_spec pinning is respected.
-  hybrid_engine: false
+  hybrid_engine: true
   nccl_timeout: 600
 
 # =============================================================================

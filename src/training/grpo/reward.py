@@ -561,7 +561,67 @@ def reward_v3(
 
 
 # ============================================================================
-# veRL Entry Point
+# TRL Entry Point
+# ============================================================================
+
+
+def trl_reward_wrapper(completions: List[str], **kwargs) -> List[float]:
+    """
+    TRL-compatible reward function for GRPOTrainer.
+
+    TRL calls this with a batch of completion strings and dataset metadata
+    passed as keyword arguments (each kwarg is a list aligned with completions).
+
+    Args:
+        completions: List of full conversation text strings from rollouts.
+        **kwargs: Dataset columns as lists, including:
+            - tier: List[str]
+            - difficulty: List[str]
+            - optimal_steps: List[int]
+            - query: List[str]
+            - branch_condition: List[str] (JSON or empty)
+
+    Returns:
+        List of reward scores in [0.0, 1.0].
+    """
+    tiers = kwargs.get("tier", ["T1"] * len(completions))
+    difficulties = kwargs.get("difficulty", ["medium"] * len(completions))
+    optimal_steps_list = kwargs.get("optimal_steps", [1] * len(completions))
+    queries = kwargs.get("query", [""] * len(completions))
+    branch_conditions = kwargs.get("branch_condition", [""] * len(completions))
+
+    scores = []
+    for i, completion in enumerate(completions):
+        if not completion or not completion.strip():
+            scores.append(0.0)
+            continue
+
+        # Parse branch_condition from JSON string
+        bc = None
+        bc_str = branch_conditions[i] if i < len(branch_conditions) else ""
+        if bc_str:
+            try:
+                bc = json.loads(bc_str)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        task_meta = TaskMetadata(
+            query=queries[i] if i < len(queries) else "",
+            tier=tiers[i] if i < len(tiers) else "T1",
+            difficulty=difficulties[i] if i < len(difficulties) else "medium",
+            optimal_steps=optimal_steps_list[i] if i < len(optimal_steps_list) else 1,
+            branch_condition=bc,
+        )
+
+        trajectory = _build_trajectory_from_solution(completion, task_meta)
+        breakdown = reward_v2(trajectory, task_meta)
+        scores.append(breakdown.total)
+
+    return scores
+
+
+# ============================================================================
+# veRL Entry Point (legacy, kept for backward compatibility)
 # ============================================================================
 
 
