@@ -130,6 +130,14 @@ class ToolParser:
 
         if tool_match:
             return self._parse_tool_call(text, tool_match, think_content)
+        elif "<tool_call>" in text:
+            # Tag present but content didn't match {…} pattern (malformed JSON)
+            return ParseResult(
+                type="parse_error",
+                think=think_content,
+                raw=text,
+                error_message="parse_error: malformed <tool_call> content is not valid JSON object",
+            )
         else:
             return self._parse_final_answer(text, think_content)
 

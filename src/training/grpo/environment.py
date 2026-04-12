@@ -242,7 +242,7 @@ When user provides weight and ratio (e.g., 80kg, 2g/kg), calculate in <think> FI
         self.initial_snapshot = user_state_snapshot
 
         # Internal state
-        self._parser = ToolParser(validate_tool_name=True)
+        self._parser = ToolParser(validate_tool_name=False)
         self._messages: List[Dict[str, str]] = []
         self._current_round = 0
         self._trajectory: Optional[RolloutTrajectory] = None
