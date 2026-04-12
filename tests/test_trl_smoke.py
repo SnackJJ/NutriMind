@@ -531,7 +531,7 @@ class TestStage5Training:
             bf16=True,
             use_vllm=True,
             vllm_mode="server",
-            vllm_server_url=vllm_url,
+            vllm_server_base_url=vllm_url,
             vllm_gpu_memory_utilization=0.85,
             beta=0.001,
             loss_type="grpo",

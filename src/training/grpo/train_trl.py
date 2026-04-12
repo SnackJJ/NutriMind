@@ -189,7 +189,7 @@ def main():
         # vLLM
         use_vllm=True,
         vllm_mode="server",
-        vllm_server_url=args.vllm_server_url,
+        vllm_server_base_url=args.vllm_server_url,
         vllm_gpu_memory_utilization=0.85,
         # GRPO
         beta=0.001,  # KL coefficient
