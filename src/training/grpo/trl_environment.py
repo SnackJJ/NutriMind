@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 def _vllm_generate(
     server_url: str,
     prompt_text: str,
+    tokenizer: Any,
     max_tokens: int = 2048,
     temperature: float = 0.7,
     top_p: float = 0.9,
@@ -48,49 +49,65 @@ def _vllm_generate(
     logprobs: bool = True,
 ) -> dict:
     """
-    Call vLLM server's /v1/completions endpoint.
+    Call TRL vLLM server's /generate/ endpoint.
 
-    Returns dict with keys: "text", "token_ids", "logprobs".
+    TRL's ``trl vllm-serve`` exposes ``/generate/`` (not OpenAI-compatible
+    ``/v1/completions``).  The request takes ``prompts`` (list[str]) and the
+    response returns ``completion_ids``, ``prompt_ids``, and ``logprobs``.
+
+    Returns dict with keys: "text", "completion_ids", "token_logprobs".
     """
     payload = {
-        "model": "default",  # vLLM serve uses this
-        "prompt": prompt_text,
+        "prompts": [prompt_text],
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": top_p,
-        "logprobs": 1 if logprobs else None,
-        "stop": stop or [],
+        "logprobs": 1 if logprobs else 0,
     }
-    resp = requests.post(f"{server_url}/v1/completions", json=payload, timeout=120)
+    resp = requests.post(f"{server_url}/generate/", json=payload, timeout=120)
     resp.raise_for_status()
     data = resp.json()
-    choice = data["choices"][0]
 
-    result = {
-        "text": choice["text"],
-        "finish_reason": choice.get("finish_reason"),
+    completion_ids: List[int] = data["completion_ids"][0]
+
+    # Decode completion token IDs back to text
+    text = tokenizer.decode(completion_ids, skip_special_tokens=False)
+
+    # Check if generation was cut short by stop token (</tool_call>)
+    # TRL server doesn't support stop sequences natively, so we handle
+    # it client-side: truncate at the first stop string if found.
+    finish_reason = "length"
+    if stop:
+        for stop_str in stop:
+            idx = text.find(stop_str)
+            if idx != -1:
+                # Truncate text *before* the stop string (same as OpenAI behavior)
+                text = text[:idx]
+                finish_reason = "stop"
+                # Re-encode to get the correct truncated token IDs
+                completion_ids = tokenizer.encode(text, add_special_tokens=False)
+                break
+
+    # Extract per-token logprobs (shape: [1][seq_len][num_logprobs])
+    token_logprobs: List[float] = []
+    if data.get("logprobs") and len(data["logprobs"]) > 0:
+        # Each position has a list of (logprob, token_id) pairs sorted desc;
+        # index [0] is the sampled token's logprob.
+        seq_logprobs = data["logprobs"][0]  # first prompt
+        for pos_logprobs in seq_logprobs:
+            if pos_logprobs:
+                token_logprobs.append(pos_logprobs[0])
+            else:
+                token_logprobs.append(0.0)
+        # Truncate to match completion_ids length (in case we truncated at stop)
+        token_logprobs = token_logprobs[:len(completion_ids)]
+
+    return {
+        "text": text,
+        "finish_reason": finish_reason,
+        "completion_ids": completion_ids,
+        "token_logprobs": token_logprobs,
     }
-
-    # Extract per-token logprobs if available
-    if choice.get("logprobs") and choice["logprobs"].get("token_logprobs"):
-        result["token_logprobs"] = choice["logprobs"]["token_logprobs"]
-        result["tokens"] = choice["logprobs"]["tokens"]
-    else:
-        result["token_logprobs"] = []
-        result["tokens"] = []
-
-    return result
-
-
-def _tokenize_via_vllm(server_url: str, text: str) -> List[int]:
-    """Tokenize text using vLLM server's tokenize endpoint."""
-    resp = requests.post(
-        f"{server_url}/tokenize",
-        json={"model": "default", "prompt": text},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()["tokens"]
 
 
 def _run_single_multiturn_rollout(
@@ -150,6 +167,7 @@ def _run_single_multiturn_rollout(
         gen_result = _vllm_generate(
             server_url=server_url,
             prompt_text=prompt_text + all_completion_text,
+            tokenizer=tokenizer,
             max_tokens=min(remaining_tokens, 2048),
             temperature=temperature,
             stop=["</tool_call>"],  # Stop at end of tool call for parsing
@@ -158,13 +176,10 @@ def _run_single_multiturn_rollout(
         model_text = gen_result["text"]
 
         # If stopped at </tool_call>, add back the stop token
-        if gen_result["finish_reason"] == "stop" and "</tool_call>" not in model_text:
-            # Clean stop, not a tool call
-            pass
-        elif gen_result["finish_reason"] == "stop":
+        if gen_result["finish_reason"] == "stop":
             model_text += "</tool_call>"
 
-        # Tokenize model output
+        # Use token IDs from generate when available, else re-encode
         model_ids = tokenizer.encode(model_text, add_special_tokens=False)
         model_logprobs = gen_result.get("token_logprobs", [0.0] * len(model_ids))
 

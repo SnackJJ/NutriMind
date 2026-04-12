@@ -140,24 +140,17 @@ class TestStage1Infrastructure:
         assert r.status_code == 200
 
     def test_stage1_vllm_models(self, vllm_url):
-        """vLLM server has a model loaded."""
-        # trl vllm-serve exposes /v1/models on newer versions; fall back to
-        # a lightweight /v1/completions probe when the endpoint is absent.
-        r = requests.get(f"{vllm_url}/v1/models", timeout=5)
-        if r.status_code == 200:
-            models = r.json()
-            assert len(models.get("data", [])) > 0, "No models loaded in vLLM"
-        else:
-            # Fallback: send a tiny completions request to confirm a model is loaded
-            probe = requests.post(
-                f"{vllm_url}/v1/completions",
-                json={"prompt": "Hi", "max_tokens": 1},
-                timeout=30,
-            )
-            assert probe.status_code == 200, (
-                f"/v1/models returned {r.status_code} and "
-                f"/v1/completions probe returned {probe.status_code}"
-            )
+        """vLLM server has a model loaded (via trl vllm-serve /generate/ endpoint)."""
+        probe = requests.post(
+            f"{vllm_url}/generate/",
+            json={"prompts": ["Hi"], "max_tokens": 1},
+            timeout=30,
+        )
+        assert probe.status_code == 200, (
+            f"/generate/ probe returned {probe.status_code}"
+        )
+        data = probe.json()
+        assert "completion_ids" in data, "Response missing completion_ids"
 
     def test_stage1_gpu_available(self):
         """At least one GPU is visible."""
@@ -194,13 +187,14 @@ class TestStage1Infrastructure:
 class TestStage2Generation:
     """Test that vLLM can generate text for our prompts."""
 
-    def test_stage2_simple_completion(self, vllm_url):
+    def test_stage2_simple_completion(self, vllm_url, tokenizer):
         """vLLM generates a non-empty completion."""
         from src.training.grpo.trl_environment import _vllm_generate
 
         result = _vllm_generate(
             server_url=vllm_url,
             prompt_text="What is protein?",
+            tokenizer=tokenizer,
             max_tokens=100,
             temperature=0.7,
         )
@@ -223,6 +217,7 @@ class TestStage2Generation:
         result = _vllm_generate(
             server_url=vllm_url,
             prompt_text=prompt_text,
+            tokenizer=tokenizer,
             max_tokens=512,
             temperature=0.7,
             stop=["</tool_call>"],
@@ -237,13 +232,14 @@ class TestStage2Generation:
             f"Model neither called a tool nor gave a substantive answer:\n{text[:200]}"
         )
 
-    def test_stage2_logprobs_returned(self, vllm_url):
+    def test_stage2_logprobs_returned(self, vllm_url, tokenizer):
         """vLLM returns per-token logprobs."""
         from src.training.grpo.trl_environment import _vllm_generate
 
         result = _vllm_generate(
             server_url=vllm_url,
             prompt_text="Hello",
+            tokenizer=tokenizer,
             max_tokens=20,
             temperature=0.7,
             logprobs=True,
@@ -252,7 +248,7 @@ class TestStage2Generation:
         assert all(isinstance(lp, (int, float)) for lp in result["token_logprobs"])
 
     def test_stage2_stop_at_tool_call(self, vllm_url, tokenizer):
-        """vLLM respects stop=["</tool_call>"] for multi-turn parsing."""
+        """Client-side stop at </tool_call> for multi-turn parsing."""
         from src.training.grpo.trl_environment import _vllm_generate
         from src.training.grpo.environment import NutriMindEnv
 
@@ -267,6 +263,7 @@ class TestStage2Generation:
         result = _vllm_generate(
             server_url=vllm_url,
             prompt_text=prompt_text,
+            tokenizer=tokenizer,
             max_tokens=1024,
             temperature=0.3,  # lower temp to encourage tool use
             stop=["</tool_call>"],

@@ -613,19 +613,20 @@ class TestRolloutFunction:
         assert callable(rollout_fn)
 
     def test_vllm_generate_mock(self):
-        """_vllm_generate correctly parses vLLM server response."""
+        """_vllm_generate correctly parses TRL vLLM server response."""
         from src.training.grpo.trl_environment import _vllm_generate
 
+        # TRL /generate/ response format
         mock_response = {
-            "choices": [{
-                "text": "Hello world",
-                "finish_reason": "stop",
-                "logprobs": {
-                    "token_logprobs": [-0.5, -0.3],
-                    "tokens": ["Hello", " world"],
-                },
-            }]
+            "prompt_ids": [[1, 2, 3]],
+            "completion_ids": [[101, 102]],
+            "logprobs": [[[-0.5], [-0.3]]],
+            "logprob_token_ids": [[[101], [102]]],
         }
+
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode.return_value = "Hello world"
+        mock_tokenizer.encode.return_value = [101, 102]
 
         with patch("src.training.grpo.trl_environment.requests.post") as mock_post:
             mock_resp = MagicMock()
@@ -633,9 +634,9 @@ class TestRolloutFunction:
             mock_resp.raise_for_status = MagicMock()
             mock_post.return_value = mock_resp
 
-            result = _vllm_generate("http://fake:8000", "test prompt")
+            result = _vllm_generate("http://fake:8000", "test prompt", tokenizer=mock_tokenizer)
             assert result["text"] == "Hello world"
-            assert result["finish_reason"] == "stop"
+            assert result["finish_reason"] == "length"
             assert result["token_logprobs"] == [-0.5, -0.3]
 
     def test_single_rollout_final_answer_only(self, mock_tool_registry):
@@ -654,9 +655,9 @@ class TestRolloutFunction:
         with patch("src.training.grpo.trl_environment._vllm_generate") as mock_gen:
             mock_gen.return_value = {
                 "text": "The glycemic index measures how food affects blood sugar.",
-                "finish_reason": "stop",
+                "finish_reason": "length",
+                "completion_ids": list(range(8)),
                 "token_logprobs": [-0.5] * 8,
-                "tokens": ["The", "glycemic", "index", "measures", "how", "food", "affects", "blood"],
             }
 
             result = _run_single_multiturn_rollout(
