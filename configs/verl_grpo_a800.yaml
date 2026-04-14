@@ -244,9 +244,9 @@ actor_rollout_ref:
     dtype: bfloat16
     gpu_memory_utilization: 0.45
     ignore_eos: false
-    enforce_eager: true
+    enforce_eager: false
     cudagraph_capture_sizes: null
-    free_cache_engine: true
+    free_cache_engine: false
     tensor_model_parallel_size: 1
     data_parallel_size: 1
     expert_parallel_size: 1
@@ -653,9 +653,9 @@ reward:
       name: ???
       dtype: bfloat16
       gpu_memory_utilization: 0.5
-      enforce_eager: true
+      enforce_eager: false
       cudagraph_capture_sizes: null
-      free_cache_engine: true
+      free_cache_engine: false
       data_parallel_size: 1
       expert_parallel_size: 1
       tensor_model_parallel_size: 1
