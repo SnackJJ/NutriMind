@@ -170,21 +170,13 @@ def main() -> int:
     log.info("Initializing GRPOTrainer...")
     from transformers import AutoTokenizer
     import trl.chat_template_utils
-    import trl.trainer.grpo_trainer
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
 
-    # Monkey-patch add_response_schema to bypass Unrecognized Chat Template error
-    original_add = trl.chat_template_utils.add_response_schema
-    def _bypass_add(tok):
-        try:
-            return original_add(tok)
-        except ValueError:
-            # Fallback to Qwen3 schema if customized template won't match exactly
-            tok.response_schema = trl.chat_template_utils.qwen3_schema
-            return tok
-    trl.chat_template_utils.add_response_schema = _bypass_add
-    trl.trainer.grpo_trainer.add_response_schema = _bypass_add
+    # TRL demands a "training-compatible" chat template with {% generation %} markers.
+    # It also strictly checks the template string for standard formats to extract schemas.
+    # Since our SFT model has a slightly modified string, we force TRL's standard Qwen2.5 training template.
+    tokenizer.chat_template = trl.chat_template_utils.qwen2_5_training_chat_template
 
     trainer = GRPOTrainer(
         model=str(model_path),
