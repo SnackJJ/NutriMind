@@ -173,10 +173,10 @@ def main() -> int:
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
 
-    # TRL demands a "training-compatible" chat template with {% generation %} markers.
-    # It also strictly checks the template string for standard formats to extract schemas.
-    # Since our SFT model has a slightly modified string, we force TRL's standard Qwen2.5 training template.
-    tokenizer.chat_template = trl.chat_template_utils.qwen2_5_training_chat_template
+    # TRL demands a standard "inference" chat template to attach the response schema,
+    # and then internally mapping it to the training counterpart template.
+    # We assign the standard Qwen3 template so it seamlessly passes all internal TRL checks.
+    tokenizer.chat_template = trl.chat_template_utils.qwen3_chat_template
 
     trainer = GRPOTrainer(
         model=str(model_path),
