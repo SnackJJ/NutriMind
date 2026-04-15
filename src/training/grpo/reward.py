@@ -124,6 +124,7 @@ def compute_tool_selection_score(
         "get_today_summary",
         "get_history",
         "retrieve_knowledge",
+        "set_goal",
     })
 
     if not tools_called:
@@ -829,6 +830,153 @@ def _build_trajectory_from_solution(
         trajectory.termination_reason = "final_answer"
 
     return trajectory
+
+
+# ============================================================================
+# TRL environment_factory Entry Point (ADR-007)
+# ============================================================================
+
+import logging as _logging
+
+_env_logger = _logging.getLogger(__name__)
+
+
+def reward_from_env(environments, completions, **kwargs) -> list[float]:
+    """TRL reward function for environment_factory mode.
+
+    When GRPOTrainer uses environment_factory, the reward function receives
+    an ``environments`` kwarg containing one env instance per completion.
+    We read the env's structured tool history instead of re-parsing text.
+
+    Note on r_format: In environment_factory mode, TRL handles tool call parsing
+    internally. Parse errors never reach the env, so env-based trajectories always
+    have r_format=1.0. This is acceptable because TRL's own parsing already
+    enforces format correctness — the model either produces valid <tool_call> JSON
+    (which TRL dispatches) or not (which TRL handles as continued generation).
+
+    Args:
+        environments: List of NutriMindToolEnv instances, one per completion.
+        completions: List of completion message dicts (conversational format).
+        **kwargs: Dataset columns as aligned lists (tier, query, difficulty, etc.).
+
+    Returns:
+        List of float reward scores in [0.0, 1.0].
+    """
+    if environments and completions:
+        assert len(environments) == len(completions), (
+            f"environments/completions length mismatch: {len(environments)} vs {len(completions)}"
+        )
+
+    scores: list[float] = []
+
+    tiers = kwargs.get("tier", ["T1"] * len(completions))
+    queries = kwargs.get("query", [""] * len(completions))
+    difficulties = kwargs.get("difficulty", ["medium"] * len(completions))
+    optimal_steps_list = kwargs.get("optimal_steps", [1] * len(completions))
+    branch_conditions = kwargs.get("branch_condition", [""] * len(completions))
+
+    for i, (env, completion) in enumerate(zip(environments, completions)):
+        try:
+            trajectory = _build_trajectory_from_env(env, completion)
+
+            bc = None
+            bc_str = branch_conditions[i] if i < len(branch_conditions) else ""
+            if bc_str:
+                try:
+                    bc = json.loads(bc_str) if isinstance(bc_str, str) else bc_str
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            task_meta = TaskMetadata(
+                query=queries[i] if i < len(queries) else "",
+                tier=tiers[i] if i < len(tiers) else "T1",
+                difficulty=difficulties[i] if i < len(difficulties) else "medium",
+                optimal_steps=int(optimal_steps_list[i]) if i < len(optimal_steps_list) else 1,
+                branch_condition=bc,
+            )
+
+            breakdown = reward_v2(trajectory, task_meta)
+            scores.append(breakdown.total)
+
+        except Exception as e:
+            _env_logger.warning("reward_from_env error for sample %d: %s", i, e)
+            scores.append(0.0)
+
+    return scores
+
+
+def _build_trajectory_from_env(env, completion) -> RolloutTrajectory:
+    """Build a RolloutTrajectory from the env's structured tool call history.
+
+    More reliable than _build_trajectory_from_solution (which re-parses text)
+    because it reads the actual tool execution records.
+    """
+    trajectory = RolloutTrajectory(prompt=getattr(env, "_query", ""))
+
+    for i, call in enumerate(getattr(env, "_tool_history", [])):
+        step = RolloutStep(
+            step_idx=i,
+            model_output="",
+            think_content=None,
+            action_type="tool_call",
+            tool_execution=ToolExecutionResult(
+                tool_name=call["tool_name"],
+                tool_args=call.get("args", {}),
+                result=call.get("result", {}),
+                success=call.get("success", False),
+            ),
+        )
+        trajectory.steps.append(step)
+        trajectory.total_tool_calls += 1
+
+    # Extract final answer from completion text
+    final_text = _extract_final_answer_from_completion(completion)
+    if final_text:
+        trajectory.final_answer = final_text
+        trajectory.terminated = True
+        trajectory.termination_reason = "final_answer"
+    elif trajectory.total_tool_calls > 0:
+        # Has tool calls but no final answer → likely truncated by max_tokens
+        trajectory.terminated = True
+        trajectory.termination_reason = "max_tokens"
+
+    return trajectory
+
+
+def _extract_final_answer_from_completion(completion) -> Optional[str]:
+    """Extract the final answer text from a TRL completion.
+
+    TRL completions in conversational format are a list of message dicts.
+    The final answer is the last assistant message that doesn't contain
+    a <tool_call> tag.
+    """
+    # Handle conversational format: list of {"role": ..., "content": ...}
+    if isinstance(completion, list):
+        for msg in reversed(completion):
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if "<tool_call>" not in content:
+                    return content.strip() or None
+        return None
+
+    # Handle string format (fallback)
+    if isinstance(completion, str):
+        text = completion
+        # Find text after the last </tool_response>
+        last_resp_idx = text.rfind("</tool_response>")
+        if last_resp_idx >= 0:
+            text = text[last_resp_idx + len("</tool_response>"):]
+        # Remove any remaining tool_call tags
+        if "<tool_call>" in text:
+            return None
+        text = text.strip()
+        # Clean role labels
+        for prefix in ("assistant", "Assistant"):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+        return text or None
+
+    return None
 
 
 # ============================================================================

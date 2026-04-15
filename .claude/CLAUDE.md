@@ -51,7 +51,18 @@ Cross-cutting plans (no single spec):
 - ADR status: proposed → accepted → [deprecated | superseded]
 
 **Active ADRs**:
-- [ADR-001: Pure Text Tool Calling](docs/decisions/001-pure-text-tool-calling.md) — Use `<tool_call>` text tags instead of function calling API; shared parser between collection and inference
+- ADR-001: Pure Text Tool Calling — **Never created as file**; format is Qwen3 native `<tool_call>` JSON, not a custom protocol
+- [ADR-002: veRL to TRL Migration](docs/decisions/002-verl-to-trl-migration.md) — **Partially superseded** by ADR-007; veRL→TRL decision valid, `rollout_func` choice superseded
+- [ADR-007: environment_factory Migration](docs/decisions/007-environment-factory-migration.md) — **Proposed**; migrate from `rollout_func` to TRL native `environment_factory` for single A800
+
+**Obsolete Files** (per ADR-007):
+- `src/training/grpo/trl_environment.py` — rollout_func, replaced by environment_factory
+- `src/training/grpo/train_trl.py` — dual-GPU entry point, replaced by single A800 setup
+- `src/training/grpo/train_verl.py` — veRL entry point (ADR-002)
+- `src/training/grpo/verl_interaction.py` — veRL interaction (ADR-002)
+- `src/training/grpo/verl_agent_env.py` — veRL env (ADR-002)
+- `scripts/run_trl_grpo_4090d.sh` — dual-GPU launch script
+- `scripts/run_verl_grpo_4090d.sh` — veRL launch script
 
 ### Historical Decisions (pre-ADR)
 
