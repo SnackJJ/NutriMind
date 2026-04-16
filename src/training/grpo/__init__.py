@@ -30,7 +30,8 @@ from src.training.grpo.reward import (
     reward_v1,
     reward_v2,
     reward_v3,
-    LLMJudge,
+    reward_v3_group,
+    GroupJudge,
     detect_reward_hacking,
     RewardHackingAlert,
 )
@@ -65,7 +66,8 @@ __all__ = [
     "reward_v1",
     "reward_v2",
     "reward_v3",
-    "LLMJudge",
+    "reward_v3_group",
+    "GroupJudge",
     "detect_reward_hacking",
     "RewardHackingAlert",
     # GiGPO

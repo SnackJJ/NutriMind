@@ -4,19 +4,28 @@ Iterative Reward Functions for GRPO Training.
 Implements the iterative reward strategy from phase4_grpo.md:
 - v1: Pure rule-based (format + tool_selection + outcome)
 - v2: v1 + efficiency + conditional
-- v3: v2 + LLM-Judge for recommendation questions
+- v3: v2 + RULER-style group-relative LLM judge
 
 Core principle: Each iteration changes ONE variable (the reward function).
 This enables diagnosing what worked and what didn't.
+
+v3 design (RULER-style):
+  For each GRPO group (G rollouts from same prompt), the LLM judge sees
+  ALL G trajectories side-by-side and ranks them relatively. This is much
+  easier than absolute scoring and naturally produces reward variance.
+  Final score = 0.5 * r_rule (v2) + 0.5 * r_judge (relative rank).
 """
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.training.grpo.environment import RolloutTrajectory, TaskMetadata, RolloutStep, ToolExecutionResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -316,76 +325,315 @@ def compute_conditional_score(
 
 
 # ============================================================================
-# LLM Judge (for v3)
+# RULER-style Group-Relative LLM Judge (v3)
 # ============================================================================
 
 
-class LLMJudge:
-    """
-    LLM-based answer quality judge for recommendation questions.
+_JUDGE_SYSTEM_PROMPT = """\
+You are an expert evaluator for a nutrition AI assistant called NutriMind.
+You will be given a user query and multiple candidate responses (trajectories).
+Your job is to score EACH candidate on 4 dimensions (each 1-10):
 
-    Safeguards:
-    - Call n=3 times, take mean (reduce noise)
-    - Weight <= 25% of total reward
-    - Only for recommendation-type questions
-    - Monitor answer length inflation
+1. **accuracy**: Does the answer use correct nutritional data from tool results? Are numbers cited accurately? For safety (T4) queries: does it appropriately escalate to a professional?
+2. **helpfulness**: Does the answer actually address what the user asked? Is it actionable, relevant, and complete?
+3. **tool_use**: Did the assistant use appropriate tools? Did it avoid unnecessary or redundant calls? Did it use tool results (not hallucinate)?
+4. **communication**: Is the answer well-organized, clear, and appropriately concise (not too verbose, not too terse)?
+
+IMPORTANT RULES:
+- Score each candidate RELATIVELY — compare them against each other.
+- Candidates that cite tool results accurately should score higher on accuracy than those that hallucinate.
+- Candidates that are truncated (no final answer) should get 1-2 on all dimensions.
+- You MUST output valid JSON in the exact format specified. No markdown, no explanation outside the JSON."""
+
+_JUDGE_USER_TEMPLATE = """\
+## User Query
+{query}
+
+## Task Context
+- Tier: {tier} (T1=single tool, T2=multi-step, T3=conditional, T4=safety boundary)
+- Difficulty: {difficulty}
+
+## Candidates
+{candidates_block}
+
+## Output Format
+Score each candidate on the 4 dimensions. Output ONLY a JSON object:
+{{"candidates": [{candidates_placeholder}]}}"""
+
+_CANDIDATE_TEMPLATE = """\
+### Candidate {idx}
+**Tools called**: {tools_called}
+**Final answer**: {final_answer}"""
+
+# Dimension weights for computing the composite score.
+# accuracy + helpfulness are the main signal; tool_use and communication
+# provide finer differentiation (and are easier for the judge to vary).
+JUDGE_DIMENSION_WEIGHTS = {
+    "accuracy": 0.35,
+    "helpfulness": 0.30,
+    "tool_use": 0.20,
+    "communication": 0.15,
+}
+_JUDGE_DIMENSIONS = list(JUDGE_DIMENSION_WEIGHTS.keys())
+
+
+class GroupJudge:
+    """RULER-style group-relative LLM judge for GRPO reward.
+
+    Scores all G trajectories in a single LLM call by presenting them
+    side-by-side and asking for relative scores. This naturally produces
+    reward variance even when all trajectories are decent.
+
+    Uses DashScope (qwen3.5-plus) via OpenAI-compatible API.
+
+    Attributes:
+        model: Model name for the judge (default: qwen3.5-plus).
+        temperature: Sampling temperature for scoring diversity.
+        max_retries: Number of retry attempts on API/parse failure.
+        _client: Lazy-initialized OpenAI client.
     """
 
     def __init__(
         self,
-        judge_fn: Optional[Callable[[str, str], float]] = None,
-        n_samples: int = 3,
+        model: str = "qwen3.5-plus",
+        temperature: float = 0.3,
+        max_retries: int = 2,
     ):
-        """
-        Initialize judge.
+        self.model = model
+        self.temperature = temperature
+        self.max_retries = max_retries
+        self._client = None
+
+    def _get_client(self):
+        """Lazy-initialize OpenAI client for DashScope."""
+        if self._client is None:
+            try:
+                from openai import OpenAI
+                from src.config import settings
+                api_key = settings.qwen_api_key
+                if not api_key:
+                    logger.warning("GroupJudge: No DASHSCOPE_API_KEY found, judge disabled")
+                    return None
+                self._client = OpenAI(
+                    api_key=api_key,
+                    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                )
+            except ImportError:
+                logger.warning("GroupJudge: openai package not installed")
+                return None
+        return self._client
+
+    def score_group(
+        self,
+        trajectories: list["RolloutTrajectory"],
+        task_metadata: "TaskMetadata",
+    ) -> tuple[list[float], list[dict]]:
+        """Score a group of trajectories relatively using the LLM judge.
+
+        Each candidate is scored on 4 dimensions (accuracy, helpfulness,
+        tool_use, communication), then a weighted composite is computed.
+        This multi-dimensional approach:
+        - Reduces noise (4 sub-scores averaged vs 1 holistic score)
+        - Enables per-dimension diagnostics in wandb
+        - Forces the judge to reason about each aspect separately
 
         Args:
-            judge_fn: Function (answer, query) -> score [0, 1]
-            n_samples: Number of judge calls to average
-        """
-        self.judge_fn = judge_fn
-        self.n_samples = n_samples
-
-    def judge(self, answer: str, query: str, task_metadata: TaskMetadata) -> float:
-        """
-        Judge answer quality.
+            trajectories: List of G trajectories from the same prompt group.
+            task_metadata: Shared metadata for the prompt.
 
         Returns:
-            Score in [0, 1], or -1 if judge not available
+            Tuple of (composite_scores, dimension_details):
+            - composite_scores: List of normalized [0.0, 1.0] floats.
+            - dimension_details: List of dicts with per-dimension raw scores
+              (1-10 scale) for logging. Empty dicts on failure.
         """
-        if self.judge_fn is None:
-            return -1.0
+        n = len(trajectories)
+        fallback_scores = [0.5] * n
+        fallback_details = [{}] * n
 
-        # Safeguard: check answer length
-        if len(answer) > 2000:
-            # Likely gaming the judge with verbose answers
-            return 0.5
+        if n == 0:
+            return [], []
+        if n == 1:
+            return [0.5], [{}]
 
-        scores = []
-        for _ in range(self.n_samples):
+        client = self._get_client()
+        if client is None:
+            return fallback_scores, fallback_details
+
+        # Build the prompt
+        candidates_block = self._build_candidates_block(trajectories)
+        candidates_placeholder = ", ".join(
+            '{{"id": {i}, "accuracy": <1-10>, "helpfulness": <1-10>, '
+            '"tool_use": <1-10>, "communication": <1-10>}}'.format(i=i + 1)
+            for i in range(n)
+        )
+        user_msg = _JUDGE_USER_TEMPLATE.format(
+            query=task_metadata.query,
+            tier=task_metadata.tier,
+            difficulty=task_metadata.difficulty,
+            candidates_block=candidates_block,
+            candidates_placeholder=candidates_placeholder,
+        )
+
+        # Call LLM with retries
+        for attempt in range(self.max_retries + 1):
             try:
-                score = self.judge_fn(answer, query)
-                scores.append(max(0.0, min(1.0, score)))
-            except Exception:
-                scores.append(0.5)  # Default on error
+                response = client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=self.temperature,
+                    max_tokens=512,
+                    extra_body={"enable_thinking": False},
+                )
+                raw_text = response.choices[0].message.content.strip()
+                result = self._parse_scores(raw_text, n)
+                if result is not None:
+                    return result
+                logger.warning(
+                    "GroupJudge: parse failed attempt %d/%d, raw=%s",
+                    attempt + 1, self.max_retries + 1, raw_text[:300],
+                )
+            except Exception as e:
+                logger.warning(
+                    "GroupJudge: API error attempt %d/%d: %s",
+                    attempt + 1, self.max_retries + 1, e,
+                )
 
-        return sum(scores) / len(scores) if scores else 0.5
+        logger.warning("GroupJudge: all attempts failed, returning fallback scores")
+        return fallback_scores, fallback_details
+
+    def _build_candidates_block(self, trajectories: list["RolloutTrajectory"]) -> str:
+        """Format trajectories into the candidates block for the judge prompt."""
+        blocks = []
+        for i, traj in enumerate(trajectories):
+            tools_called = traj.get_tools_called()
+            tools_str = ", ".join(tools_called) if tools_called else "(none)"
+
+            final = traj.final_answer or ""
+            if not final and traj.termination_reason == "max_tokens":
+                final = "[TRUNCATED — no final answer]"
+            elif not final:
+                final = "[No answer produced]"
+            # Truncate very long answers to prevent token waste
+            if len(final) > 800:
+                final = final[:800] + "... [truncated for judging]"
+
+            blocks.append(_CANDIDATE_TEMPLATE.format(
+                idx=i + 1,
+                tools_called=tools_str,
+                final_answer=final,
+            ))
+        return "\n\n".join(blocks)
+
+    def _parse_scores(
+        self, raw_text: str, expected_n: int
+    ) -> Optional[tuple[list[float], list[dict]]]:
+        """Parse multi-dimensional LLM judge output.
+
+        Expected format:
+            {"candidates": [
+                {"id": 1, "accuracy": 8, "helpfulness": 7, "tool_use": 9, "communication": 6},
+                ...
+            ]}
+
+        Also handles legacy single-score format for backward compatibility:
+            {"scores": [7, 5, 8, 3]}
+
+        Returns:
+            Tuple of (composite_scores, dimension_details) or None on failure.
+            - composite_scores: weighted average of dimensions, normalized [0,1]
+            - dimension_details: list of raw dimension dicts (1-10 scale)
+        """
+        # Extract JSON from potential markdown wrapping
+        text = raw_text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            # Try to find JSON object in the text
+            match = re.search(r"\{.*\"candidates\".*\}", text, re.DOTALL)
+            if not match:
+                match = re.search(r"\{.*\"scores\".*\}", text, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group())
+                except json.JSONDecodeError:
+                    return None
+            else:
+                return None
+
+        # --- Multi-dimensional format (preferred) ---
+        candidates = data.get("candidates")
+        if isinstance(candidates, list) and len(candidates) == expected_n:
+            composite_scores = []
+            dimension_details = []
+            for entry in candidates:
+                if not isinstance(entry, dict):
+                    return None
+                dims = {}
+                for dim in _JUDGE_DIMENSIONS:
+                    val = entry.get(dim)
+                    if val is None:
+                        return None
+                    try:
+                        dims[dim] = max(1.0, min(10.0, float(val)))
+                    except (TypeError, ValueError):
+                        return None
+
+                # Weighted composite → [0, 1]
+                weighted = sum(
+                    JUDGE_DIMENSION_WEIGHTS[d] * (dims[d] - 1.0) / 9.0
+                    for d in _JUDGE_DIMENSIONS
+                )
+                composite_scores.append(weighted)
+                dimension_details.append(dims)
+
+            return composite_scores, dimension_details
+
+        # --- Legacy single-score format (fallback) ---
+        raw_scores = data.get("scores")
+        if raw_scores is not None:
+            if isinstance(raw_scores, dict):
+                ordered = []
+                for i in range(expected_n):
+                    key = f"score_{i+1}"
+                    val = raw_scores.get(key)
+                    if val is None:
+                        return None
+                    ordered.append(float(val))
+                raw_scores = ordered
+
+            if not isinstance(raw_scores, list) or len(raw_scores) != expected_n:
+                return None
+
+            scores = []
+            for s in raw_scores:
+                try:
+                    v = max(1.0, min(10.0, float(s)))
+                    scores.append((v - 1.0) / 9.0)
+                except (TypeError, ValueError):
+                    return None
+            return scores, [{}] * expected_n
+
+        return None
 
 
-def is_recommendation_question(query: str) -> bool:
-    """Check if query is a recommendation-type question."""
-    recommendation_patterns = [
-        r"suggest",
-        r"recommend",
-        r"what should i",
-        r"what can i",
-        r"give me ideas",
-        r"help me choose",
-        r"best way to",
-        r"how can i improve",
-    ]
-    query_lower = query.lower()
-    return any(re.search(pattern, query_lower) for pattern in recommendation_patterns)
+# Singleton judge instance (lazy init, shares API client across calls)
+_default_judge: Optional[GroupJudge] = None
+
+
+def _get_default_judge() -> GroupJudge:
+    """Get or create the default GroupJudge instance."""
+    global _default_judge
+    if _default_judge is None:
+        _default_judge = GroupJudge()
+    return _default_judge
 
 
 # ============================================================================
@@ -502,63 +750,111 @@ def reward_v2(
     )
 
 
+def reward_v3_group(
+    trajectories: list[RolloutTrajectory],
+    task_metadata: TaskMetadata,
+    judge: Optional[GroupJudge] = None,
+    rule_weight: float = 0.5,
+    judge_weight: float = 0.5,
+) -> list[RewardBreakdown]:
+    """
+    GRPO v3: Group-relative hybrid reward (rule-based + LLM judge).
+
+    Unlike v1/v2 which score each trajectory independently, v3 scores the
+    entire GRPO group together. The LLM judge sees all G candidates
+    side-by-side (RULER-style) and produces relative scores, naturally
+    creating reward variance even when all trajectories are decent.
+
+    Formula: total = rule_weight * r_v2 + judge_weight * r_judge
+
+    When the judge is unavailable (no API key, API error), gracefully
+    degrades to pure v2 (rule_weight=1.0, judge_weight=0.0).
+
+    ARPO compatible: ARPO's advantage attribution is reward-function-agnostic.
+    It only needs per-step rewards (which can be the final trajectory reward
+    broadcast to all steps). The group-relative nature of v3 actually helps
+    ARPO by ensuring meaningful reward signal variance.
+
+    Args:
+        trajectories: List of G trajectories from the same prompt group.
+        task_metadata: Shared metadata for the prompt.
+        judge: GroupJudge instance (uses default singleton if None).
+        rule_weight: Weight for rule-based v2 scores (default 0.5).
+        judge_weight: Weight for LLM judge scores (default 0.5).
+
+    Returns:
+        List of RewardBreakdown, one per trajectory.
+    """
+    n = len(trajectories)
+    if n == 0:
+        return []
+
+    # Step 1: Compute per-trajectory v2 rule-based scores
+    v2_breakdowns = [reward_v2(traj, task_metadata) for traj in trajectories]
+    v2_scores = [b.total for b in v2_breakdowns]
+
+    # Step 2: Get group-relative LLM judge scores (multi-dimensional)
+    judge = judge or _get_default_judge()
+    judge_scores, judge_dims = judge.score_group(trajectories, task_metadata)
+
+    # Step 3: Combine with weights
+    # If judge returned all-same composites (fallback), shift to pure v2
+    all_same = len(set(round(s, 4) for s in judge_scores)) <= 1
+    if all_same:
+        effective_rule_w = 1.0
+        effective_judge_w = 0.0
+        judge_applied = False
+    else:
+        effective_rule_w = rule_weight
+        effective_judge_w = judge_weight
+        judge_applied = True
+
+    results = []
+    for i in range(n):
+        total = effective_rule_w * v2_scores[i] + effective_judge_w * judge_scores[i]
+        total = max(0.0, min(1.0, total))
+
+        detail = {
+            **v2_breakdowns[i].details,
+            "reward_version": "v3",
+            "judge_applied": judge_applied,
+            "rule_weight": effective_rule_w,
+            "judge_weight": effective_judge_w,
+            "v2_score": v2_scores[i],
+            "judge_composite": judge_scores[i],
+        }
+        # Per-dimension raw scores (1-10) for wandb logging
+        if judge_dims[i]:
+            detail["judge_dimensions"] = judge_dims[i]
+
+        results.append(RewardBreakdown(
+            total=total,
+            r_format=v2_breakdowns[i].r_format,
+            r_tool_selection=v2_breakdowns[i].r_tool_selection,
+            r_outcome=v2_breakdowns[i].r_outcome,
+            r_efficiency=v2_breakdowns[i].r_efficiency,
+            r_conditional=v2_breakdowns[i].r_conditional,
+            r_llm_judge=judge_scores[i],
+            details=detail,
+        ))
+
+    return results
+
+
 def reward_v3(
     trajectory: RolloutTrajectory,
     task_metadata: TaskMetadata,
-    llm_judge: Optional[LLMJudge] = None,
+    llm_judge: Optional["GroupJudge"] = None,
 ) -> RewardBreakdown:
     """
-    GRPO v3: v2 + LLM-Judge for recommendation questions.
+    Single-trajectory v3 wrapper (backward compatible).
 
-    Policy: GRPO-v2 checkpoint
-    Reference: GRPO-v2 checkpoint (frozen)
-
-    LLM-Judge safeguards:
-    - n=3 averaging
-    - Weight <= 25% (rules remain dominant)
-    - Only for recommendation-type questions
-    - Monitor answer length inflation
+    When called with a single trajectory (not in group context), falls back
+    to v2 behavior since RULER-style relative scoring requires multiple
+    candidates. Use reward_v3_group() for proper v3 group scoring.
     """
-    # Get v2 base
-    v2 = reward_v2(trajectory, task_metadata)
-
-    # Check if this is a recommendation question
-    if is_recommendation_question(task_metadata.query) and llm_judge is not None:
-        final_answer = trajectory.final_answer or ""
-        r_llm = llm_judge.judge(final_answer, task_metadata.query, task_metadata)
-
-        if r_llm >= 0:  # Valid judge score
-            # LLM-Judge weight small; rules remain dominant
-            total = 0.75 * v2.total + 0.25 * r_llm
-            return RewardBreakdown(
-                total=total,
-                r_format=v2.r_format,
-                r_tool_selection=v2.r_tool_selection,
-                r_outcome=v2.r_outcome,
-                r_efficiency=v2.r_efficiency,
-                r_conditional=v2.r_conditional,
-                r_llm_judge=r_llm,
-                details={
-                    **v2.details,
-                    "is_recommendation": True,
-                    "llm_judge_applied": True,
-                },
-            )
-
-    # Not a recommendation question or judge unavailable
-    return RewardBreakdown(
-        total=v2.total,
-        r_format=v2.r_format,
-        r_tool_selection=v2.r_tool_selection,
-        r_outcome=v2.r_outcome,
-        r_efficiency=v2.r_efficiency,
-        r_conditional=v2.r_conditional,
-        details={
-            **v2.details,
-            "is_recommendation": is_recommendation_question(task_metadata.query),
-            "llm_judge_applied": False,
-        },
-    )
+    # Single trajectory — can't do relative scoring, fall back to v2
+    return reward_v2(trajectory, task_metadata)
 
 
 # ============================================================================
@@ -836,11 +1132,6 @@ def _build_trajectory_from_solution(
 # TRL environment_factory Entry Point (ADR-007)
 # ============================================================================
 
-import logging as _logging
-
-_env_logger = _logging.getLogger(__name__)
-
-
 def reward_from_env(environments, completions, **kwargs) -> list[float]:
     """TRL reward function for environment_factory mode.
 
@@ -848,11 +1139,17 @@ def reward_from_env(environments, completions, **kwargs) -> list[float]:
     an ``environments`` kwarg containing one env instance per completion.
     We read the env's structured tool history instead of re-parsing text.
 
+    Supports reward_version selection via env var NUTRIMIND_REWARD_VERSION:
+    - "v2": Per-trajectory rule-based scoring
+    - "v3" (default): Group-relative hybrid scoring (v2 + LLM judge)
+
     Note on r_format: In environment_factory mode, TRL handles tool call parsing
     internally. Parse errors never reach the env, so env-based trajectories always
-    have r_format=1.0. This is acceptable because TRL's own parsing already
-    enforces format correctness — the model either produces valid <tool_call> JSON
-    (which TRL dispatches) or not (which TRL handles as continued generation).
+    have r_format=1.0.
+
+    Note on v3 grouping: TRL calls reward_from_env with all G completions from
+    the same prompt in one batch. So ``environments`` and ``completions`` already
+    form a natural group for RULER-style relative scoring.
 
     Args:
         environments: List of NutriMindToolEnv instances, one per completion.
@@ -867,7 +1164,7 @@ def reward_from_env(environments, completions, **kwargs) -> list[float]:
             f"environments/completions length mismatch: {len(environments)} vs {len(completions)}"
         )
 
-    scores: list[float] = []
+    reward_version = os.getenv("NUTRIMIND_REWARD_VERSION", "v3")
 
     tiers = kwargs.get("tier", ["T1"] * len(completions))
     queries = kwargs.get("query", [""] * len(completions))
@@ -875,31 +1172,55 @@ def reward_from_env(environments, completions, **kwargs) -> list[float]:
     optimal_steps_list = kwargs.get("optimal_steps", [1] * len(completions))
     branch_conditions = kwargs.get("branch_condition", [""] * len(completions))
 
+    # Build trajectories and task metadata for all completions
+    trajectories: list[RolloutTrajectory] = []
+    task_metas: list[TaskMetadata] = []
+
     for i, (env, completion) in enumerate(zip(environments, completions)):
         try:
-            trajectory = _build_trajectory_from_env(env, completion)
-
-            bc = None
-            bc_str = branch_conditions[i] if i < len(branch_conditions) else ""
-            if bc_str:
-                try:
-                    bc = json.loads(bc_str) if isinstance(bc_str, str) else bc_str
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-            task_meta = TaskMetadata(
-                query=queries[i] if i < len(queries) else "",
-                tier=tiers[i] if i < len(tiers) else "T1",
-                difficulty=difficulties[i] if i < len(difficulties) else "medium",
-                optimal_steps=int(optimal_steps_list[i]) if i < len(optimal_steps_list) else 1,
-                branch_condition=bc,
-            )
-
-            breakdown = reward_v2(trajectory, task_meta)
-            scores.append(breakdown.total)
-
+            traj = _build_trajectory_from_env(env, completion)
         except Exception as e:
-            _env_logger.warning("reward_from_env error for sample %d: %s", i, e)
+            logger.warning("reward_from_env: trajectory build error for sample %d: %s", i, e)
+            traj = RolloutTrajectory(prompt="")
+            traj.terminated = True
+            traj.termination_reason = "error"
+        trajectories.append(traj)
+
+        bc = None
+        bc_str = branch_conditions[i] if i < len(branch_conditions) else ""
+        if bc_str:
+            try:
+                bc = json.loads(bc_str) if isinstance(bc_str, str) else bc_str
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        task_metas.append(TaskMetadata(
+            query=queries[i] if i < len(queries) else "",
+            tier=tiers[i] if i < len(tiers) else "T1",
+            difficulty=difficulties[i] if i < len(difficulties) else "medium",
+            optimal_steps=int(optimal_steps_list[i]) if i < len(optimal_steps_list) else 1,
+            branch_condition=bc,
+        ))
+
+    # Score based on reward version
+    if reward_version == "v3" and len(trajectories) > 1:
+        # v3: Group-relative scoring — all completions share the same prompt
+        shared_meta = task_metas[0]
+        try:
+            breakdowns = reward_v3_group(trajectories, shared_meta)
+            return [b.total for b in breakdowns]
+        except Exception as e:
+            logger.warning("reward_from_env: v3 group scoring failed, falling back to v2: %s", e)
+            # Fall through to per-trajectory v2
+
+    # v2 (fallback or explicit): Per-trajectory scoring
+    scores: list[float] = []
+    for traj, meta in zip(trajectories, task_metas):
+        try:
+            breakdown = reward_v2(traj, meta)
+            scores.append(breakdown.total)
+        except Exception as e:
+            logger.warning("reward_from_env: v2 scoring error: %s", e)
             scores.append(0.0)
 
     return scores
