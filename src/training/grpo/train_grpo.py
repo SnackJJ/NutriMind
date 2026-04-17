@@ -145,6 +145,7 @@ def main() -> int:
         output_dir=str(output_dir),
         # Generation
         num_generations=args.num_generations,
+        generation_batch_size=args.num_generations,  # Must be divisible by num_generations
         max_completion_length=args.max_completion_length,
         # Training
         learning_rate=args.learning_rate,
