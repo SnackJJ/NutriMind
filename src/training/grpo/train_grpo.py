@@ -116,9 +116,9 @@ def main() -> int:
 
     use_gigpo = args.use_gigpo and not args.no_gigpo
     if use_gigpo:
-        from src.training.grpo.gigpo_trainer import GiGPOTrainer
-        TrainerClass = GiGPOTrainer
-        log.info("Using GiGPOTrainer (step-level advantages)")
+        from src.training.grpo.gigpo_trainer_v2 import GiGPOTrainerV2
+        TrainerClass = GiGPOTrainerV2
+        log.info("Using GiGPOTrainerV2 (step-level advantages with intercept hook)")
     else:
         TrainerClass = GRPOTrainer
         log.info("Using standard GRPOTrainer (trajectory-level advantages)")
