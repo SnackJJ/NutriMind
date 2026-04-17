@@ -45,13 +45,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", type=str, default="models/grpo-a800")
 
     # GRPO
-    p.add_argument("--num_generations", type=int, default=16, help="Number of generations per prompt (G) (default: 16)")
-    p.add_argument("--max_completion_length", type=int, default=4096,
+    p.add_argument("--num_generations", type=int, default=16, help="Number of generations per prompt (G)")
+    p.add_argument("--max_completion_length", type=int, default=6144,
                    help="Max tokens per completion")
 
     # Training
     p.add_argument("--batch_size", type=int, default=1)
-    p.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps (default: 4)")
+    p.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps")
     p.add_argument("--learning_rate", type=float, default=1e-5)
     p.add_argument("--num_epochs", type=int, default=3)
     p.add_argument("--max_steps", type=int, default=-1, help="Override epochs; -1 = use epochs")
@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
                    help="KL penalty coefficient (0.01 for 4B; DeepSeek uses 0.04 for 70B)")
 
     # LoRA
-    p.add_argument("--lora_r", type=int, default=8,
+    p.add_argument("--lora_r", type=int, default=16,
                    help="LoRA rank")
     p.add_argument("--lora_alpha", type=int, default=32)
 

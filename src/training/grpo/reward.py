@@ -485,7 +485,7 @@ class GroupJudge:
                         {"role": "user", "content": user_msg},
                     ],
                     temperature=self.temperature,
-                    max_tokens=512,
+                    max_tokens=1500,
                     extra_body={"enable_thinking": False},
                 )
                 raw_text = response.choices[0].message.content.strip()
