@@ -45,9 +45,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", type=str, default="models/grpo-a800")
 
     # GRPO
-    p.add_argument("--num_generations", type=int, default=8, help="G in GRPO")
-    p.add_argument("--max_completion_length", type=int, default=2048,
-                   help="Max tokens per completion (reduced from 4096 for G=8 memory)")
+    p.add_argument("--num_generations", type=int, default=12, help="G in GRPO")
+    p.add_argument("--max_completion_length", type=int, default=4096,
+                   help="Max tokens per completion")
 
     # Training
     p.add_argument("--batch_size", type=int, default=1)
@@ -59,14 +59,14 @@ def parse_args() -> argparse.Namespace:
                    help="KL penalty coefficient (0.01 for 4B; DeepSeek uses 0.04 for 70B)")
 
     # LoRA
-    p.add_argument("--lora_r", type=int, default=16,
-                   help="LoRA rank (reduced from 32 to save ~2GB for G=8)")
+    p.add_argument("--lora_r", type=int, default=8,
+                   help="LoRA rank")
     p.add_argument("--lora_alpha", type=int, default=32)
 
     # vLLM
     p.add_argument("--use_vllm", action="store_true", default=True)
     p.add_argument("--no_vllm", action="store_true", help="Disable vLLM (slow, for debugging)")
-    p.add_argument("--vllm_gpu_memory", type=float, default=0.35,
+    p.add_argument("--vllm_gpu_memory", type=float, default=0.45,
                    help="GPU memory fraction for vLLM in colocate mode")
 
     # Misc
@@ -161,8 +161,8 @@ def main() -> int:
         use_vllm=use_vllm,
         vllm_mode="colocate" if use_vllm else None,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory if use_vllm else None,
-        # Sleep mode: offload vLLM weights+KV to CPU during training, saves ~10GB
-        vllm_enable_sleep_mode=use_vllm,
+        # Sleep mode disabled: keep vLLM weights on GPU (faster, uses more VRAM)
+        vllm_enable_sleep_mode=False,
         # GRPO algorithm
         beta=args.beta,
         loss_type="grpo",
