@@ -1,19 +1,4 @@
 """
-GiGPO Algorithm Prototype (DEPRECATED for training).
-
-This was an independent implementation for algorithm understanding.
-For actual GiGPO training, use verl-agent:
-    ./scripts/run_verl_agent_gigpo.sh
-
-Known issues in this prototype:
-1. get_action_at_step only uses tool_name without args (step advantage diluted)
-2. get_token_level_advantages doesn't account for injected_response offset
-3. Not connected to any training loop
-
-Kept for reference and interview discussion.
-
----
-
 GiGPO (Group-in-Group Policy Optimization) Implementation.
 
 Adds step-level credit assignment on top of GRPO by finding anchor states
@@ -29,7 +14,7 @@ Algorithm:
            → Steps leading to failure get negative advantage
       Final: advantage = group_advantage × step_advantage
 
-See phase4_grpo.md Task 4.4 for design details.
+Reference: arXiv:2505.10978, NeurIPS 2025
 """
 
 import json
@@ -140,9 +125,20 @@ def build_conversation_at_step(
 
 
 def get_action_at_step(step: RolloutStep) -> str:
-    """Extract the action taken at a step (tool name or 'final_answer')."""
+    """Extract the action taken at a step.
+
+    Returns a string like 'get_food_nutrition:a3b1c9' where the suffix is a
+    short hash of the tool arguments. This provides finer-grained action
+    differentiation than tool_name alone — calling the same tool with
+    different arguments counts as a different action at the anchor state.
+    """
     if step.action_type == "tool_call" and step.tool_execution:
-        return step.tool_execution.tool_name
+        name = step.tool_execution.tool_name
+        args = step.tool_execution.tool_args or {}
+        args_hash = hashlib.md5(
+            json.dumps(args, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()[:6]
+        return f"{name}:{args_hash}"
     elif step.action_type == "final_answer":
         return "final_answer"
     else:
@@ -496,3 +492,101 @@ def compare_grpo_vs_gigpo(
         stats["step_advantage_max"] = float(np.max(all_step_advs))
 
     return stats
+
+
+# ============================================================================
+# Env-based Bridge for TRL integration
+# ============================================================================
+
+import logging as _logging
+
+_gigpo_logger = _logging.getLogger(__name__)
+
+
+def compute_gigpo_step_advantages_from_envs(
+    environments: list,
+    completions: list,
+    rewards: list[float],
+    **kwargs,
+) -> GiGPOResult:
+    """Bridge between TRL env-based pipeline and GiGPO computation.
+
+    Takes the same arguments as ``reward_from_env`` (environments, completions,
+    kwargs) plus the reward scores, builds RolloutTrajectory objects from each
+    env's tool history, and runs the full GiGPO algorithm.
+
+    This is the main entry point for GiGPOTrainer.
+
+    Args:
+        environments: NutriMindToolEnv instances (one per completion).
+        completions: TRL completion dicts (conversational format).
+        rewards: Reward scores aligned with completions.
+        **kwargs: Dataset columns (tier, query, difficulty, optimal_steps, …).
+
+    Returns:
+        GiGPOResult with anchor states and per-step advantages.
+    """
+    from src.training.grpo.reward import _build_trajectory_from_env
+
+    trajectories = []
+    for env, completion in zip(environments, completions):
+        traj = _build_trajectory_from_env(env, completion)
+        trajectories.append(traj)
+
+    query = ""
+    queries = kwargs.get("query", [])
+    if queries:
+        query = queries[0] if isinstance(queries, list) else str(queries)
+
+    tier = "T1"
+    tiers = kwargs.get("tier", [])
+    if tiers:
+        tier = tiers[0] if isinstance(tiers, list) else str(tiers)
+
+    task_meta = TaskMetadata(
+        query=query,
+        tier=tier,
+        difficulty=kwargs.get("difficulty", ["medium"])[0]
+        if isinstance(kwargs.get("difficulty"), list)
+        else kwargs.get("difficulty", "medium"),
+        optimal_steps=int(kwargs.get("optimal_steps", [1])[0])
+        if isinstance(kwargs.get("optimal_steps"), list)
+        else int(kwargs.get("optimal_steps", 1)),
+    )
+
+    computer = GiGPOComputer()
+    result = computer.compute(trajectories, rewards, task_meta)
+
+    n_anchors = len(result.anchor_states)
+    if n_anchors > 0:
+        _gigpo_logger.info(
+            "GiGPO found %d anchor states across %d rollouts",
+            n_anchors, len(trajectories),
+        )
+    else:
+        _gigpo_logger.debug(
+            "GiGPO found no anchor states for %d rollouts (all unique paths)",
+            len(trajectories),
+        )
+
+    return result
+
+
+def gigpo_result_to_per_step_advantages(
+    result: GiGPOResult,
+) -> list[list[float]]:
+    """Convert GiGPOResult to a flat list of per-step combined advantages.
+
+    Returns:
+        advantages[i][j] = combined advantage for rollout i, step j.
+        If rollout i has no steps, returns [group_advantage].
+    """
+    per_rollout = []
+    for rollout_idx in range(result.num_rollouts):
+        step_advs = result.step_advantages[rollout_idx]
+        if step_advs:
+            per_rollout.append([sa.combined_advantage for sa in step_advs])
+        else:
+            # No steps — use group advantage (e.g., model gave final answer immediately)
+            per_rollout.append([result.group_advantages[rollout_idx]])
+    return per_rollout

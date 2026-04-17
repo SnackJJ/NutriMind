@@ -53,7 +53,8 @@ Cross-cutting plans (no single spec):
 **Active ADRs**:
 - ADR-001: Pure Text Tool Calling — **Never created as file**; format is Qwen3 native `<tool_call>` JSON, not a custom protocol
 - [ADR-002: veRL to TRL Migration](docs/decisions/002-verl-to-trl-migration.md) — **Partially superseded** by ADR-007; veRL→TRL decision valid, `rollout_func` choice superseded
-- [ADR-007: environment_factory Migration](docs/decisions/007-environment-factory-migration.md) — **Proposed**; migrate from `rollout_func` to TRL native `environment_factory` for single A800
+- [ADR-007: environment_factory Migration](docs/decisions/007-environment-factory-migration.md) — **Accepted**; migrate from `rollout_func` to TRL native `environment_factory` for single A800
+- [ADR-008: GRPO Hyperparameter Tuning](docs/decisions/008-grpo-hyperparameter-tuning.md) — **Accepted**; G=4→8, beta=0→0.04, LR=5e-6→1e-5, cosine→constant_with_warmup, epochs=2→3
 
 **Obsolete Files** (per ADR-007):
 - `src/training/grpo/trl_environment.py` — rollout_func, replaced by environment_factory

@@ -45,24 +45,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir", type=str, default="models/grpo-a800")
 
     # GRPO
-    p.add_argument("--num_generations", type=int, default=4, help="G in GRPO")
-    p.add_argument("--max_completion_length", type=int, default=4096)
+    p.add_argument("--num_generations", type=int, default=8, help="G in GRPO")
+    p.add_argument("--max_completion_length", type=int, default=2048,
+                   help="Max tokens per completion (reduced from 4096 for G=8 memory)")
 
     # Training
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--grad_accum", type=int, default=8)
-    p.add_argument("--learning_rate", type=float, default=5e-6)
-    p.add_argument("--num_epochs", type=int, default=2)
+    p.add_argument("--learning_rate", type=float, default=1e-5)
+    p.add_argument("--num_epochs", type=int, default=3)
     p.add_argument("--max_steps", type=int, default=-1, help="Override epochs; -1 = use epochs")
+    p.add_argument("--beta", type=float, default=0.01,
+                   help="KL penalty coefficient (0.01 for 4B; DeepSeek uses 0.04 for 70B)")
 
     # LoRA
-    p.add_argument("--lora_r", type=int, default=32)
-    p.add_argument("--lora_alpha", type=int, default=64)
+    p.add_argument("--lora_r", type=int, default=16,
+                   help="LoRA rank (reduced from 32 to save ~2GB for G=8)")
+    p.add_argument("--lora_alpha", type=int, default=32)
 
     # vLLM
     p.add_argument("--use_vllm", action="store_true", default=True)
     p.add_argument("--no_vllm", action="store_true", help="Disable vLLM (slow, for debugging)")
-    p.add_argument("--vllm_gpu_memory", type=float, default=0.5,
+    p.add_argument("--vllm_gpu_memory", type=float, default=0.35,
                    help="GPU memory fraction for vLLM in colocate mode")
 
     # Misc
@@ -70,6 +74,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry_run", action="store_true", help="Print config and exit")
     p.add_argument("--report_to", type=str, default="wandb", choices=["wandb", "none"])
     p.add_argument("--run_name", type=str, default=None)
+    p.add_argument("--use_gigpo", action="store_true", default=True,
+                   help="Use GiGPOTrainer with step-level advantages (default: True)")
+    p.add_argument("--no_gigpo", action="store_true",
+                   help="Disable GiGPO, use standard GRPOTrainer")
 
     return p.parse_args()
 
@@ -106,6 +114,15 @@ def main() -> int:
     from src.training.grpo.trl_env_factory import NutriMindToolEnv
     from src.training.grpo.reward import reward_from_env
 
+    use_gigpo = args.use_gigpo and not args.no_gigpo
+    if use_gigpo:
+        from src.training.grpo.gigpo_trainer import GiGPOTrainer
+        TrainerClass = GiGPOTrainer
+        log.info("Using GiGPOTrainer (step-level advantages)")
+    else:
+        TrainerClass = GRPOTrainer
+        log.info("Using standard GRPOTrainer (trajectory-level advantages)")
+
     # Dataset
     log.info("Loading dataset...")
     train_dataset = load_from_disk(str(train_data_path))
@@ -137,12 +154,17 @@ def main() -> int:
         max_steps=args.max_steps,
         gradient_checkpointing=True,
         bf16=True,
+        # LR schedule: constant with warmup (avoid cosine wasting LR budget)
+        lr_scheduler_type="constant_with_warmup",
+        warmup_ratio=0.03,
         # vLLM (colocate = single GPU, shared memory)
         use_vllm=use_vllm,
         vllm_mode="colocate" if use_vllm else None,
         vllm_gpu_memory_utilization=args.vllm_gpu_memory if use_vllm else None,
+        # Sleep mode: offload vLLM weights+KV to CPU during training, saves ~10GB
+        vllm_enable_sleep_mode=use_vllm,
         # GRPO algorithm
-        beta=0.0,  # No KL penalty (standard practice)
+        beta=args.beta,
         loss_type="grpo",
         # Qwen3: disable thinking mode during RL training
         chat_template_kwargs={"enable_thinking": False},
@@ -161,7 +183,7 @@ def main() -> int:
         log.info("GRPOConfig:\n%s", grpo_config)
         log.info("LoraConfig:\n%s", lora_config)
         log.info("Environment: NutriMindToolEnv (6 tools)")
-        log.info("Reward: reward_from_env → reward_v2")
+        log.info("Reward: reward_from_env → reward_v3 (hybrid rule + LLM judge)")
         log.info("Sample prompt: %s", str(train_dataset[0]["prompt"])[:200])
         log.info("Dry run complete — no training performed.")
         return 0
@@ -178,7 +200,7 @@ def main() -> int:
     # We assign the standard Qwen3 template so it seamlessly passes all internal TRL checks.
     tokenizer.chat_template = trl.chat_template_utils.qwen3_chat_template
 
-    trainer = GRPOTrainer(
+    trainer = TrainerClass(
         model=str(model_path),
         processing_class=tokenizer,
         environment_factory=NutriMindToolEnv,
