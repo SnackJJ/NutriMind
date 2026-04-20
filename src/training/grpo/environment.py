@@ -15,6 +15,7 @@ See phase4_grpo.md Task 4.1 for design details.
 
 import json
 import hashlib
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -607,6 +608,58 @@ When user provides weight and ratio (e.g., 80kg, 2g/kg), calculate in <think> FI
         return remaining
 
 
+# Pattern to strip <think>...</think> blocks from assistant messages
+_THINK_STRIP_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+# Pattern to extract tool_call JSON for normalization
+_TOOL_CALL_EXTRACT_PATTERN = re.compile(
+    r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>)?", re.DOTALL
+)
+
+
+def _normalize_assistant_content(content: str) -> str:
+    """
+    Normalize assistant message content for state key computation.
+
+    This enables GiGPO anchor state detection by making two rollouts with
+    different <think> content but same tool calls hash to the same state.
+
+    Normalization rules:
+    1. Strip <think>...</think> blocks entirely (sampling produces unique text)
+    2. For tool_call, extract only (name, sorted_args) — ignore formatting
+    3. For final answers, keep only the answer text (strip think)
+
+    Args:
+        content: Raw assistant message content
+
+    Returns:
+        Normalized content suitable for hashing
+    """
+    # Strip <think> blocks
+    normalized = _THINK_STRIP_PATTERN.sub("", content).strip()
+
+    # Check if this is a tool_call message
+    tool_match = _TOOL_CALL_EXTRACT_PATTERN.search(normalized)
+    if tool_match:
+        try:
+            tool_json = json.loads(tool_match.group(1))
+            # Extract only name and sorted arguments
+            name = tool_json.get("name", tool_json.get("function", ""))
+            args = tool_json.get("arguments", tool_json.get("parameters", {}))
+            # Canonical form: name + sorted args JSON
+            canonical = json.dumps(
+                {"name": name, "arguments": args},
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            return f"<tool_call>{canonical}</tool_call>"
+        except json.JSONDecodeError:
+            # Malformed JSON — keep as-is after stripping think
+            pass
+
+    return normalized
+
+
 def compute_state_key(messages: List[Dict[str, str]]) -> str:
     """
     Compute deterministic state key for GiGPO anchor state detection.
@@ -614,18 +667,33 @@ def compute_state_key(messages: List[Dict[str, str]]) -> str:
     Two rollouts share an anchor state if they have identical conversation
     context up to (and including) the last tool_response.
 
+    IMPORTANT: Assistant messages are normalized to enable anchor detection:
+    - <think> blocks are stripped (sampling produces unique content)
+    - Tool calls are canonicalized to (name, sorted_args)
+
+    This fixes the GiGPO "silent degradation" issue where unique <think>
+    content caused all post-prompt states to be unique, making GiGPO
+    equivalent to GRPO. See ADR-009 for details.
+
     Args:
         messages: Conversation history up to current point
 
     Returns:
         Hash string representing the state
     """
-    # Serialize messages deterministically
-    serialized = json.dumps(
-        [(m["role"], m["content"]) for m in messages],
-        sort_keys=True,
-        ensure_ascii=False,
-    )
+    # Normalize and serialize messages deterministically
+    normalized_pairs = []
+    for m in messages:
+        role = m["role"]
+        content = m["content"]
+
+        if role == "assistant":
+            # Normalize assistant content (strip think, canonicalize tool_call)
+            content = _normalize_assistant_content(content)
+
+        normalized_pairs.append((role, content))
+
+    serialized = json.dumps(normalized_pairs, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(serialized.encode()).hexdigest()[:16]
 
 

@@ -559,9 +559,21 @@ def compute_gigpo_step_advantages_from_envs(
 
     n_anchors = len(result.anchor_states)
     if n_anchors > 0:
+        # Compute statistics about anchor states
+        anchor_sizes = [len(a.rollout_indices) for a in result.anchor_states.values()]
+        max_anchor = max(anchor_sizes) if anchor_sizes else 0
+        avg_anchor = sum(anchor_sizes) / len(anchor_sizes) if anchor_sizes else 0
+
+        # Count unique actions per anchor (diversity metric)
+        actions_per_anchor = [
+            len(set(a.actions_taken.values())) for a in result.anchor_states.values()
+        ]
+        multi_action_anchors = sum(1 for n in actions_per_anchor if n > 1)
+
         _gigpo_logger.info(
-            "GiGPO found %d anchor states across %d rollouts",
-            n_anchors, len(trajectories),
+            "GiGPO found %d anchor states across %d rollouts "
+            "(max_size=%d, avg_size=%.1f, multi_action_anchors=%d)",
+            n_anchors, len(trajectories), max_anchor, avg_anchor, multi_action_anchors,
         )
     else:
         _gigpo_logger.debug(
