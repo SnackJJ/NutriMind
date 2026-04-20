@@ -177,8 +177,15 @@ def compute_outcome_score_rule_based(
     if tier == "T1":
         return _compute_t1_outcome_from_tool_results(trajectory, final_answer)
 
-    # T2/T3: Basic completion for v1, detailed scoring in v2
-    # Check that final answer is substantive
+    # T2/T3: Tool-coverage + answer-quality (ADR-009).
+    # The old length-only rule let a 1-step shortcut tie with a full multi-step
+    # trajectory at 0.8 — GRPO group-normalization then favored the shorter
+    # path (lower KL × length, lower variance). Couple the score to coverage
+    # of `expected_tools` so that reward is monotone in completion.
+    if tier in ("T2", "T3"):
+        return _compute_t2_t3_outcome_from_coverage(trajectory, task_metadata, final_answer)
+
+    # Other tiers (e.g. T0-nonqa, unknown): basic length fallback
     if len(final_answer) < 30:
         return 0.3
     return 0.8 if len(final_answer) > 80 else 0.6
@@ -234,28 +241,89 @@ def _compute_t1_outcome_from_tool_results(
     return 1.0
 
 
+def _compute_t2_t3_outcome_from_coverage(
+    trajectory: RolloutTrajectory,
+    task_metadata: TaskMetadata,
+    final_answer: str,
+) -> float:
+    """T2/T3 outcome: tool coverage dominates, answer length is secondary.
+
+    See ADR-009. Formula: 0.7 * coverage + 0.3 * answer_quality, where
+    coverage is the fraction of ``expected_tools`` actually called and
+    answer_quality rises linearly up to 100 chars and saturates.
+
+    When ``expected_tools`` is missing or empty (pre-ADR-009 data), the
+    coverage term is neutral 0.5 and we fall back to length-based scoring
+    so the gradient is never undefined.
+    """
+    expected = [t for t in (task_metadata.expected_tools or []) if t]
+    called = trajectory.get_tools_called()
+
+    if not expected:
+        # Missing annotation — no coverage signal, fall back to length heuristic
+        if len(final_answer) < 30:
+            return 0.3
+        return 0.8 if len(final_answer) > 80 else 0.6
+
+    expected_set = set(expected)
+    called_set = set(called)
+    coverage = len(expected_set & called_set) / len(expected_set)
+
+    answer_quality = min(1.0, len(final_answer) / 100.0)
+    return 0.7 * coverage + 0.3 * answer_quality
+
+
+def compute_effort_score(
+    trajectory: RolloutTrajectory, task_metadata: TaskMetadata
+) -> float:
+    """Bidirectional effort score based on tool-call count vs ``optimal_steps``.
+
+    See ADR-009. The old ``compute_efficiency_score`` only penalized excess
+    calls — it could never push a 1-step shortcut off the Pareto frontier
+    when the rest of the reward was already saturated. This version also
+    penalizes under-calling.
+
+    Shape (with optimal_steps=N):
+        actual / N       score
+        0.0              0.0
+        0.5              0.5     (linear below 1.0)
+        1.0              1.0
+        1.3              1.0     (short plateau — LLM judgment, retries OK)
+        2.0              0.3     (linear drop after the plateau)
+        3.0+             0.0
+    """
+    actual = trajectory.total_tool_calls
+    optimal = task_metadata.optimal_steps
+
+    if optimal <= 0:
+        # Tasks that shouldn't use tools (e.g. T0-qa, some T4)
+        return 1.0 if actual == 0 else max(0.0, 1.0 - 0.3 * actual)
+
+    ratio = actual / optimal
+    if ratio <= 0.0:
+        return 0.0
+    if ratio < 1.0:
+        return ratio  # 0.33 for 1/3, 0.67 for 2/3, etc.
+    if ratio <= 1.3:
+        return 1.0
+    # ratio > 1.3: linear decay to 0 at 2.7× optimal
+    return max(0.0, 1.0 - (ratio - 1.3))
+
+
+# Backward-compatible alias — ``compute_efficiency_score`` was never wired into
+# reward_v1/v2 before ADR-009 (r_efficiency was hard-coded to 0.0). Keep the
+# name exported so any diagnostic code that imports it still works.
 def compute_efficiency_score(
     trajectory: RolloutTrajectory, task_metadata: TaskMetadata
 ) -> float:
+    """Deprecated alias for :func:`compute_effort_score`.
+
+    Historically this was a one-sided penalty for *excess* calls only.
+    ADR-009 replaced it with a bidirectional effort score that also
+    penalizes under-calling. The alias remains for callers that imported
+    the old name.
     """
-    Compute efficiency score based on tool call count.
-
-    Penalizes excessive tool calls relative to optimal_steps.
-    Score = 1.0 if steps <= optimal, decreases linearly up to 2x optimal.
-    """
-    actual_steps = trajectory.total_tool_calls
-    optimal_steps = task_metadata.optimal_steps
-
-    if optimal_steps == 0:
-        # No tools expected
-        return 1.0 if actual_steps == 0 else max(0.0, 1.0 - 0.2 * actual_steps)
-
-    if actual_steps <= optimal_steps:
-        return 1.0
-
-    # Linear penalty: 0 at 2x optimal
-    excess_ratio = (actual_steps - optimal_steps) / optimal_steps
-    return max(0.0, 1.0 - excess_ratio)
+    return compute_effort_score(trajectory, task_metadata)
 
 
 def compute_conditional_score(
@@ -485,7 +553,7 @@ class GroupJudge:
                         {"role": "user", "content": user_msg},
                     ],
                     temperature=self.temperature,
-                    max_tokens=1500,
+                    max_tokens=512,
                     extra_body={"enable_thinking": False},
                 )
                 raw_text = response.choices[0].message.content.strip()
@@ -686,46 +754,64 @@ def reward_v1(
 def reward_v2(
     trajectory: RolloutTrajectory, task_metadata: TaskMetadata
 ) -> RewardBreakdown:
+    """GRPO v2.1 (ADR-009): reward that is monotone in task completion.
+
+    Rebuilt after the 2700-step shortest-path collapse (see ADR-009). Instead
+    of stacking v1's saturating components with only a one-sided gate, this
+    version recomputes the total from five components so that multi-step
+    trajectories strictly dominate 1-step shortcuts on T2/T3:
+
+        total = 0.20 * r_format
+              + 0.20 * r_tool_selection
+              + 0.30 * r_outcome        (T2/T3: coverage-based, ADR-009)
+              + 0.20 * r_effort         (bidirectional, ADR-009)
+              + 0.10 * r_conditional    (T3 only — neutral 0.5 elsewhere)
+
+    Tier-aware hard gate (ADR-009): the old gate only required ≥1 successful
+    tool call, which any 1-step shortcut trivially passes on T2/T3. The new
+    gate requires ``ceil(optimal_steps / 2)`` for T2/T3, forcing at least
+    half of the expected work before any reward accrues. T1 still needs ≥1.
+
+    Truncation penalty unchanged: ``total *= 0.5`` when the rollout hit the
+    token cap before emitting a final answer.
     """
-    GRPO v2: v1 + conditional monitoring + strict hard gate + truncation penalty.
-
-    Policy: GRPO-v1 checkpoint
-    Reference: GRPO-v1 checkpoint (frozen)
-
-    Components:
-    - v1 base (100%)
-    - R_conditional is tracked for diagnostics only (not added to total)
-
-    Hard gate:
-    - For T1/T2/T3 tasks, if successful_tool_calls == 0, total reward = 0.0.
-
-    Truncation penalty:
-    - If trajectory was truncated by max_tokens exhaustion, total *= 0.5.
-    - Rationale: truncated rollouts have unreliable reward signals;
-      halving their weight prevents them from misleading the policy gradient.
-    """
-    # Get v1 base
-    v1 = reward_v1(trajectory, task_metadata)
-
-    # R_conditional
+    # Per-component scores
+    format_valid, format_errors = check_format_validity(trajectory)
+    r_format = 1.0 if format_valid else 0.0
+    r_tool = compute_tool_selection_score(trajectory, task_metadata)
+    r_outcome = compute_outcome_score_rule_based(trajectory, task_metadata)
+    r_effort = compute_effort_score(trajectory, task_metadata)
     r_conditional = compute_conditional_score(trajectory, task_metadata)
 
-    total = v1.total
+    total = (
+        0.20 * r_format
+        + 0.20 * r_tool
+        + 0.30 * r_outcome
+        + 0.20 * r_effort
+        + 0.10 * r_conditional
+    )
 
+    # Tier-aware hard gate (ADR-009)
     tier = task_metadata.tier or ""
     successful_tool_calls = sum(
         1
         for step in trajectory.steps
         if step.tool_execution is not None and step.tool_execution.success
     )
-    hard_gate_applied = (
-        (tier.startswith("T1") or tier.startswith("T2") or tier.startswith("T3"))
-        and successful_tool_calls == 0
-    )
+    optimal_steps = max(1, task_metadata.optimal_steps)
+    if tier.startswith("T1"):
+        min_required = 1
+    elif tier.startswith("T2") or tier.startswith("T3"):
+        # ceil(optimal / 2) — force at least half the expected work
+        min_required = (optimal_steps + 1) // 2
+    else:
+        min_required = 0
+
+    hard_gate_applied = min_required > 0 and successful_tool_calls < min_required
     if hard_gate_applied:
         total = 0.0
 
-    # Penalize truncated rollouts — their reward signal is unreliable
+    # Truncation penalty — unchanged from v2
     truncation_penalized = False
     if trajectory.termination_reason == "max_tokens":
         total *= 0.5
@@ -733,19 +819,23 @@ def reward_v2(
 
     return RewardBreakdown(
         total=total,
-        r_format=v1.r_format,
-        r_tool_selection=v1.r_tool_selection,
-        r_outcome=v1.r_outcome,
-        r_efficiency=0.0,
+        r_format=r_format,
+        r_tool_selection=r_tool,
+        r_outcome=r_outcome,
+        r_efficiency=r_effort,
         r_conditional=r_conditional,
         details={
-            **v1.details,
+            "format_errors": format_errors,
+            "tools_called": trajectory.get_tools_called(),
+            "expected_tools": task_metadata.expected_tools,
             "successful_tool_calls": successful_tool_calls,
+            "min_required_tool_calls": min_required,
             "hard_gate_applied": hard_gate_applied,
             "truncation_penalized": truncation_penalized,
             "actual_steps": trajectory.total_tool_calls,
             "optimal_steps": task_metadata.optimal_steps,
             "tier": task_metadata.tier,
+            "reward_version": "v2.1-adr009",
         },
     )
 
@@ -886,6 +976,7 @@ def trl_reward_wrapper(completions: List[str], **kwargs) -> List[float]:
     optimal_steps_list = kwargs.get("optimal_steps", [1] * len(completions))
     queries = kwargs.get("query", [""] * len(completions))
     branch_conditions = kwargs.get("branch_condition", [""] * len(completions))
+    expected_tools_list = kwargs.get("expected_tools", [[]] * len(completions))
 
     scores = []
     for i, completion in enumerate(completions):
@@ -902,11 +993,25 @@ def trl_reward_wrapper(completions: List[str], **kwargs) -> List[float]:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        et_raw = expected_tools_list[i] if i < len(expected_tools_list) else []
+        if isinstance(et_raw, str):
+            try:
+                et_parsed = json.loads(et_raw) if et_raw.strip().startswith("[") else [
+                    t.strip() for t in et_raw.split(",") if t.strip()
+                ]
+            except (json.JSONDecodeError, TypeError):
+                et_parsed = []
+        elif isinstance(et_raw, list):
+            et_parsed = et_raw
+        else:
+            et_parsed = []
+
         task_meta = TaskMetadata(
             query=queries[i] if i < len(queries) else "",
             tier=tiers[i] if i < len(tiers) else "T1",
             difficulty=difficulties[i] if i < len(difficulties) else "medium",
             optimal_steps=optimal_steps_list[i] if i < len(optimal_steps_list) else 1,
+            expected_tools=et_parsed,
             branch_condition=bc,
         )
 
@@ -1171,6 +1276,7 @@ def reward_from_env(environments, completions, **kwargs) -> list[float]:
     difficulties = kwargs.get("difficulty", ["medium"] * len(completions))
     optimal_steps_list = kwargs.get("optimal_steps", [1] * len(completions))
     branch_conditions = kwargs.get("branch_condition", [""] * len(completions))
+    expected_tools_list = kwargs.get("expected_tools", [[]] * len(completions))
 
     # Build trajectories and task metadata for all completions
     trajectories: list[RolloutTrajectory] = []
@@ -1194,11 +1300,27 @@ def reward_from_env(environments, completions, **kwargs) -> list[float]:
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        # expected_tools may be serialized as JSON strings in some datasets;
+        # tolerate both list and string forms so the coverage term is populated
+        et_raw = expected_tools_list[i] if i < len(expected_tools_list) else []
+        if isinstance(et_raw, str):
+            try:
+                et_parsed = json.loads(et_raw) if et_raw.strip().startswith("[") else [
+                    t.strip() for t in et_raw.split(",") if t.strip()
+                ]
+            except (json.JSONDecodeError, TypeError):
+                et_parsed = []
+        elif isinstance(et_raw, list):
+            et_parsed = et_raw
+        else:
+            et_parsed = []
+
         task_metas.append(TaskMetadata(
             query=queries[i] if i < len(queries) else "",
             tier=tiers[i] if i < len(tiers) else "T1",
             difficulty=difficulties[i] if i < len(difficulties) else "medium",
             optimal_steps=int(optimal_steps_list[i]) if i < len(optimal_steps_list) else 1,
+            expected_tools=et_parsed,
             branch_condition=bc,
         ))
 
