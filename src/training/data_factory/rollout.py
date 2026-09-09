@@ -191,6 +191,13 @@ class ScriptedTeacher:
 # --------------------------------------------------------------------------- #
 
 
+def _obs_text(observation) -> str:
+    """The observation exactly as the base harness embeds it in the next user
+    message (json.dumps defaults, capped at 6000 chars — spec §9.2 'copied
+    verbatim from the episode')."""
+    return json.dumps(observation, default=str)[:6000]
+
+
 def rollout(
     harness: TeacherReActHarness,
     task,
@@ -206,6 +213,7 @@ def rollout(
     started = time.monotonic()
     env = NutriEnv()
     observation = env.reset(task.s0)
+    reset_observation = _obs_text(observation)
     harness.reset()
     turns: list[TurnMeta] = []
     history: list[dict] = []
@@ -235,11 +243,7 @@ def rollout(
             observation = result["observation"]
         else:
             observation = {"error": result.get("error")}
-        turns.append(
-            harness.take_turn_meta(
-                json.dumps(observation, default=str, ensure_ascii=False)
-            )
-        )
+        turns.append(harness.take_turn_meta(_obs_text(observation)))
 
     return EpisodeResult(
         end_state=env.state(),
@@ -248,6 +252,7 @@ def rollout(
         error=error,
         task=task,
         latency_s=round(time.monotonic() - started, 6),
+        reset_observation=reset_observation,
     )
 
 
