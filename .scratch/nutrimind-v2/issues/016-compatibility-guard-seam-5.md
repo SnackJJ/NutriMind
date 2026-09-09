@@ -1,7 +1,8 @@
 ---
 id: 016
 title: Compatibility guard (Seam 5) — public-API import + signature tests + ADR-012 two-class rule
-status: ready-for-agent
+status: CLOSED (2026-09-09) — 51-symbol guard green (164 CI-file tests; 237 dir-wide)
+commit: 2a3f3d5
 depends_on: [003]
 spec: ../spec.md
 spec_sections: ["18", "19.6", "US-30"]
@@ -26,13 +27,25 @@ adr: [../../docs/decisions/012-nutrienv-read-only-benchmark.md]
 
 **Blocked by:** 003. (Independent of the pipeline — can land early.)
 
-**Status:** ready-for-agent
+**Status:** CLOSED (2026-09-09)
 
-- [ ] every symbol in the §18 public table imports; a test fails loudly if one moves or
+- [x] every symbol in the §18 public table imports; a test fails loudly if one moves or
       disappears
-- [ ] `inspect.signature` is asserted for the public set only; grepping the guard files for
+- [x] `inspect.signature` is asserted for the public set only; grepping the guard files for
       any underscore-private nutri-env name returns nothing
-- [ ] a test encodes the two-class rule (public = signature-guarded; private = explicitly
+- [x] a test encodes the two-class rule (public = signature-guarded; private = explicitly
       not, covered by behaviour tests instead)
-- [ ] the guard runs in CI on the pinned `nutrienv` rev and is green
-- [ ] no behaviour test lives in the guard files (Seam 5 is split from behaviour)
+- [x] the guard runs in CI on the pinned `nutrienv` rev and is green
+- [x] no behaviour test lives in the guard files (Seam 5 is split from behaviour)
+
+## Closure notes
+
+- One review fix over the subagent draft: the spec's §18 row for
+  `nutrienv.world.types` actually reads `MAX_ITEM_GRAMS` (plural) — same as the
+  pinned rev — so the claimed "spec typo deviation" did not exist; docstring
+  note corrected to "verbatim, no deviation".
+- `test_two_class_rule.py` imports sibling guard modules as module aliases
+  (`import ... as x`), never `from ... import test_*` — pytest would otherwise
+  double-collect the imported test functions.
+- Guard import surface proven under a meta-path hook blocking `yaml` and `src`:
+  all four CI files green (rc=0).
