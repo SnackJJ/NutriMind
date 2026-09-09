@@ -47,9 +47,14 @@ from nutrienv.world.catalog_store import load_catalog
 from src.training.data_factory import author as author_mod
 from src.training.data_factory import gates as gates_mod
 from src.training.data_factory import materialize as mz
+from src.training.data_factory import serialize as serialize_mod
+from src.training.data_factory import verify as verify_mod
 from src.training.data_factory.config import ConfigError, DataFactoryConfig, load_config
+from src.training.data_factory.concepts import AttemptRecord, RolloutCache
 from src.training.data_factory.gates import GateContext
 from src.training.data_factory.roster_train import TRAIN_ROSTER
+from src.training.data_factory.rollout import TeacherReActHarness, rollout
+from src.training.data_factory.serialize import SerializeError
 
 __all__ = ["BuildError", "build", "enumerate_intents", "main"]
 
@@ -75,6 +80,11 @@ REJECT_STAGE_FILES = {
     "gate": "gate.jsonl",
     "indeterminate": "indeterminate.jsonl",
 }
+
+
+class BuildError(Exception):
+    """A config / schema / dependency error — the whole run fails immediately
+    (spec §4.1). A partial ``run_manifest.json`` is written before re-raising."""
 
 
 class BuildError(Exception):
@@ -212,13 +222,12 @@ def _preflight(config: DataFactoryConfig) -> tuple:
 # --------------------------------------------------------------------------- #
 
 
-def _terminal_task_ids(output_dir: pathlib.Path) -> set[str]:
-    """task_ids already terminal here: a materialized package, a reject line,
-    or (from ticket 011) an accepted sft record (spec §8 resume)."""
+def _terminal_task_ids(output_dir: pathlib.Path, *, include_packages: bool) -> set[str]:
+    """task_ids already terminal here (spec §8 resume): a reject line, an
+    accepted sft record, or — only when this run stops at or before
+    materialize — a materialized package (a bare package is NOT terminal for
+    a teacher-stage run: the task may still need its episode)."""
     terminal: set[str] = set()
-    packages = output_dir / "task_packages"
-    if packages.is_dir():
-        terminal |= {path.stem for path in packages.glob("*.json")}
     rejects = output_dir / "rejects"
     if rejects.is_dir():
         for path in rejects.glob("*.jsonl"):
@@ -230,6 +239,10 @@ def _terminal_task_ids(output_dir: pathlib.Path) -> set[str]:
         for line in sft.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 terminal.add(json.loads(line)["task_id"])
+    if include_packages:
+        packages = output_dir / "task_packages"
+        if packages.is_dir():
+            terminal |= {path.stem for path in packages.glob("*.json")}
     return terminal
 
 
@@ -240,6 +253,97 @@ def _write_manifest(output_dir: pathlib.Path, manifest: dict) -> None:
     tmp = target.with_suffix(".json.tmp")
     tmp.write_text(blob, encoding="utf-8")
     tmp.replace(target)
+
+
+# --------------------------------------------------------------------------- #
+# the teacher stage (target=sft, spec §6 step 5d / §16)
+# --------------------------------------------------------------------------- #
+
+
+def _teacher_attempts_summary(cache: RolloutCache) -> list[dict]:
+    """The compact per-attempt view for reject lines — full episodes live in
+    ``rollouts/cache/<task_id>.json``."""
+    return [
+        {
+            "attempt_id": attempt.attempt_id,
+            "status": attempt.verification.status,
+            "reward": attempt.verification.reward,
+            "failure_codes": list(attempt.verification.failure_codes),
+        }
+        for attempt in cache.attempts
+    ]
+
+
+def _load_cache(path: pathlib.Path) -> RolloutCache:
+    return RolloutCache.from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def _jsonable(value):
+    """Recursively make an asdict tree JSON-writable. Only non-serializable
+    leaves get dropped (the live ``FoodCatalog`` inside ``WorldState`` —
+    huge and re-derivable from the pinned ``catalog_sha``); everything else
+    (profiles, ledger rows, plans) is plain data and survives verbatim."""
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    try:
+        json.dumps(value)
+    except TypeError:
+        return {
+            "__omitted__": type(value).__name__,
+            "note": "not JSON-serializable; the catalog is pinned by catalog_sha",
+        }
+    return value
+
+
+def _write_cache(path: pathlib.Path, cache: RolloutCache) -> None:
+    """Atomic multi-attempt cache write (spec §9: temp + rename)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob = json.dumps(_jsonable(cache.to_dict()), ensure_ascii=False, sort_keys=True) + "\n"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(blob, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _teacher_stage(
+    package, task, *, config, family_cfg, teacher_complete, out: pathlib.Path
+) -> RolloutCache:
+    """Attempts 1..k (k = family ``teacher_k``, spec §16): attempt 1 at
+    ``temperature_first``, 2..k at ``temperature_retry``, stopping at the
+    first Pass. Every attempt that ran is recorded; ``selected_attempt`` is
+    the 0-based index of the first Pass or None."""
+    cache = RolloutCache(task_id=package.task_id)
+    for n in range(1, family_cfg.teacher_k + 1):
+        extra_body = {
+            "thinking": dict(config.teacher.thinking),
+            "temperature": (
+                config.teacher.temperature_first
+                if n == 1
+                else config.teacher.temperature_retry
+            ),
+        }
+        harness = TeacherReActHarness(
+            teacher_complete=teacher_complete,
+            model=config.teacher.model_id,
+            extra_body=extra_body,
+        )
+        episode = rollout(harness, task)
+        verification = verify_mod.verify(package, episode)
+        cache.attempts.append(
+            AttemptRecord(
+                attempt_id=mz.attempt_id(package.task_id, n),
+                episode=episode,
+                verification=verification,
+            )
+        )
+        if verification.status == "pass":
+            cache.selected_attempt = n - 1
+            break
+    _write_cache(out / "rollouts" / "cache" / f"{package.task_id}.json", cache)
+    # serialize from the on-disk cache (cache-authoritative: a re-run loading
+    # the same cache produces byte-identical records)
+    return _load_cache(out / "rollouts" / "cache" / f"{package.task_id}.json")
 
 
 # --------------------------------------------------------------------------- #
@@ -308,7 +412,6 @@ def build(
         for family, rows in sorted(by_family.items()):
             _write_jsonl(out / "intents" / f"{family}.jsonl", rows)
 
-        terminal = set() if force else _terminal_task_ids(out)
         run_ctx_base = mz.RunContext(
             catalog=catalog,
             catalog_sha=catalog_sha,
@@ -317,6 +420,26 @@ def build(
             config_sha=config_sha,
         )
         gated = stop_after != "author"
+        run_teacher = (
+            config.target in ("sft", "all")
+            and stop_after is None
+            and teacher_complete is not None
+        )
+        if config.target in ("sft", "all") and stop_after is None and not run_teacher:
+            raise BuildError(
+                "target sft needs the teacher path: inject a teacher_complete "
+                "(or pass --stop-after gate to stop at materialize)"
+            )
+        terminal = (
+            set()
+            if force
+            else _terminal_task_ids(out, include_packages=not run_teacher)
+        )
+        accepted_records: list[dict] = []
+        manifest["counts"].update(
+            {"accepted": 0, "teacher_rejected": 0, "teacher_indeterminate": 0,
+             "serialize_rejected": 0, "cache_reused": 0}
+        )
 
         for intent in intents:
             task_id = intent["task_id"]
@@ -373,6 +496,95 @@ def build(
             mz.write_package(package, out / "task_packages")
             manifest["counts"]["materialized"] += 1
 
+            if not run_teacher:
+                continue
+
+            # ---- teacher stage (spec §6 step 5d) ----
+            cache_path = out / "rollouts" / "cache" / f"{task_id}.json"
+            if cache_path.is_file():
+                cache = _load_cache(cache_path)  # resume: never re-pay the teacher
+                manifest["counts"]["cache_reused"] += 1
+            else:
+                cache = _teacher_stage(
+                    package, task, config=config,
+                    family_cfg=config.families[intent["family"]],
+                    teacher_complete=teacher_complete, out=out,
+                )
+
+            common = {
+                "task_id": task_id,
+                "task_package_ref": f"task_packages/{task_id}.json",
+                "rollouts_ref": f"rollouts/cache/{task_id}.json",
+                "attempts": _teacher_attempts_summary(cache),
+                "intent": dict(intent),
+            }
+            if cache.selected_attempt is not None:
+                attempt = cache.attempts[cache.selected_attempt]
+                try:
+                    record = serialize_mod.serialize(
+                        package, attempt.episode, attempt.verification,
+                        config=config,
+                        accepted_from_attempt=cache.selected_attempt + 1,
+                    )
+                except SerializeError as exc:
+                    manifest["counts"]["serialize_rejected"] += 1
+                    _append_jsonl(
+                        out / "rejects" / "serialize.jsonl",
+                        {
+                            **common, "stage": "serialize",
+                            "status": "indeterminate",
+                            "failure_codes": [exc.code],
+                            "reason_detail": exc.detail,
+                        },
+                    )
+                    continue
+                accepted_records.append(record)
+                manifest["counts"]["accepted"] += 1
+            elif any(
+                a.verification.status == "fail" for a in cache.attempts
+            ):
+                # a completed legal episode that missed the hard contract:
+                # an SFT-reject / analysis candidate, NEVER an RLVR negative (§4.2)
+                first_fail = next(
+                    a for a in cache.attempts if a.verification.status == "fail"
+                )
+                manifest["counts"]["teacher_rejected"] += 1
+                _append_jsonl(
+                    out / "rejects" / "teacher.jsonl",
+                    {
+                        **common, "stage": "teacher", "status": "fail",
+                        "failure_codes": list(
+                            first_fail.verification.failure_codes
+                        ),
+                    },
+                )
+            else:
+                # no completed legal attempt at all: teacher error / no-finish /
+                # invalid-op — nothing usable for SFT
+                manifest["counts"]["teacher_indeterminate"] += 1
+                _append_jsonl(
+                    out / "rejects" / "indeterminate.jsonl",
+                    {
+                        **common, "stage": "teacher", "status": "indeterminate",
+                        "failure_codes": list(
+                            cache.attempts[-1].verification.failure_codes
+                        ),
+                    },
+                )
+
+        if run_teacher:
+            # sorted by task_id, temp + atomic rename (spec §6 step 6)
+            accepted_records.sort(key=lambda record: record["task_id"])
+            train_path = out / "sft" / "train.jsonl"
+            train_path.parent.mkdir(parents=True, exist_ok=True)
+            blob = "".join(
+                json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+                for record in accepted_records
+            )
+            tmp = train_path.with_suffix(".jsonl.tmp")
+            tmp.write_text(blob, encoding="utf-8")
+            tmp.replace(train_path)
+
         manifest["status"] = "complete"
         _write_manifest(out, manifest)
         return manifest
@@ -408,6 +620,11 @@ def main(argv: list[str] | None = None) -> int:
         "--expander", choices=("synthetic",), default=None,
         help="expander adapter (the production ark wrapper lands with ticket 012)",
     )
+    parser.add_argument(
+        "--teacher", choices=("ark",), default=None,
+        help="teacher adapter for target=sft (network-guarded: "
+        "NUTRIMIND_ALLOW_NETWORK=1 + ARK_API_KEY required at call time)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -427,10 +644,17 @@ def main(argv: list[str] | None = None) -> int:
 
     from src.training.data_factory.synthetic import synth_expander
 
+    teacher_complete = None
+    if args.teacher == "ark":
+        from src.training.data_factory.rollout import make_ark_teacher_client
+
+        teacher_complete = make_ark_teacher_client(config.teacher)
+
     try:
         manifest = build(
             config,
             expander=synth_expander(load_catalog(config.catalog_path)),
+            teacher_complete=teacher_complete,
             stop_after=args.stop_after,
             force=args.force,
             config_path=args.config,
@@ -441,7 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     counts = manifest["counts"]
     print(
         f"build complete: {counts['materialized']} materialized, "
-        f"{counts['rejected']['author'] + counts['rejected']['gate'] + counts['rejected']['indeterminate']} rejected, "
+        f"{counts.get('accepted', 0)} accepted, "
+        f"{counts['rejected']['author'] + counts['rejected']['gate'] + counts['rejected']['indeterminate'] + counts.get('teacher_rejected', 0) + counts.get('teacher_indeterminate', 0) + counts.get('serialize_rejected', 0)} rejected, "
         f"{counts['skipped_terminal']} skipped"
     )
     return 0
