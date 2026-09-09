@@ -61,3 +61,8 @@ training = [
     "numpy<2.0.0",
     "wandb>=0.16.0",
 ]
+
+# Ticket 003: pytest from the repo root discovers the suite (incl.
+# tests/training/data_factory/) with no -o flags.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
