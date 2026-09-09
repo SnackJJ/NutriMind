@@ -1,0 +1,8 @@
+[update   ] s0=True oracle=True meta=True reset=True achievable=True  -> OK
+[recommend] s0=True oracle=True meta=True reset=True achievable=True  -> OK
+[composite] s0=True oracle=True meta=True reset=True achievable=True  -> OK
+
+split.__all__ : ['GOLD_SPLIT_PATH', 'EXAM_SPLIT_PATH', 'load_split', 'load_exam']
+in-memory item->Task public fn present: False
+
+ALL ROUND-TRIPS OK: True
