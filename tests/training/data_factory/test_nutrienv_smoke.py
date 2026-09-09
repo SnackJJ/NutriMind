@@ -61,25 +61,7 @@ def test_installed_rev_matches_pin():
     assert head == NUTRIENV_PIN, f"nutri-env HEAD {head} != pinned {NUTRIENV_PIN}"
 
 
-def test_public_api_imports():
-    from nutrienv.bench import (  # noqa: F401
-        Oracle,
-        Scorer,
-        Task,
-        check_achievable,
-        load_exam,
-        EXAM_SPLIT_PATH,
-    )
-    from nutrienv.bench.pipeline.freezer import task_to_item  # noqa: F401
-    from nutrienv.bench.pipeline.generate_one import generate_one  # noqa: F401
-    from nutrienv.bench.pipeline.types import catalog_digest  # noqa: F401
-    from nutrienv.env import NutriEnv  # noqa: F401
-    from nutrienv.harness import ReActHarness, ScriptHarness  # noqa: F401
-    # react_manual / context_messages live in nutrienv.harness.react, not re-exported
-    # from nutrienv.harness (spec §18 note).
-    from nutrienv.harness.react import context_messages, react_manual  # noqa: F401
-    from nutrienv.harness.runner import FAMILY_MAX_STEPS, FINISH_OPS  # noqa: F401
-    from nutrienv.world.catalog_store import GOLD_CATALOG_PATH, load_catalog  # noqa: F401
+# Public-API import coverage now lives in the ticket-016 guard: test_imports.py, test_borrowed_api_signatures.py, test_two_class_rule.py.
 
 
 def test_catalog_digest_matches_exam_split():
