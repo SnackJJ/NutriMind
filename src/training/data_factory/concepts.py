@@ -141,6 +141,9 @@ class EpisodeResult:
     resolved ``Task`` the episode ran against (spec §17). ``error`` is set when the
     attempt died abnormally (API error, timeout); ``reached_finish`` is True iff a
     FINISH op terminated the episode inside the step budget.
+    ``reset_observation`` is the env's ``reset`` observation — the FIRST user
+    message of the serialized trajectory (each ``TurnMeta.observation`` is the
+    one that turn PRODUCED, i.e. the next user message; spec §9.2).
     """
 
     end_state: Any = None
@@ -149,6 +152,7 @@ class EpisodeResult:
     error: str | None = None
     task: Any = None
     latency_s: float | None = None
+    reset_observation: str | None = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -162,6 +166,7 @@ class EpisodeResult:
             error=data.get("error"),
             task=data.get("task"),
             latency_s=data.get("latency_s"),
+            reset_observation=data.get("reset_observation"),
         )
 
 
