@@ -192,6 +192,12 @@ def serialize(
     train_on = [False, False]
 
     turns_without_plan = 0
+    task = episode.task
+    persona = (
+        task.get("persona")
+        if isinstance(task, dict)
+        else getattr(task, "persona", None)
+    )  # dict-backed episode: a cache round-trip (spec §17) has no live Task
     for index, turn in enumerate(episode.turns):
         if index == 0:
             observation = reset_observation
@@ -240,7 +246,7 @@ def serialize(
             "family": task_package.family,
             "steps": list(task_package.steps),
             "tier": task_package.tier,
-            "persona": getattr(episode.task, "persona", None),
+            "persona": persona,
             "batch": batch,
             "seed": task_package.seed,
             "teacher": config.teacher.model_id,
