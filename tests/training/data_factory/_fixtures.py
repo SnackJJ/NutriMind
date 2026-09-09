@@ -17,7 +17,6 @@ from nutrienv.bench.pipeline.sampler import speakable_tracer_food
 from nutrienv.bench.pipeline.templates import recommend_query
 from nutrienv.bench.realize import Oracle, Task, compose_oracles
 from nutrienv.bench.validator import fitting_plan
-from nutrienv.env import NutriEnv
 from nutrienv.world.catalog_store import GOLD_CATALOG_PATH, load_catalog
 from nutrienv.world.daily_windows import plan_windows_for_meal
 from nutrienv.world.types import ledger_totals
@@ -136,25 +135,26 @@ def assemble_three_leg(catalog, seed: int, *, allergen: str = "fish"):
     return task, None
 
 
-def replay_three_leg(task, *, skip_update=False, skip_log=False):
-    """A correct (or deliberately broken) replay of the 3-leg — returns the
-    end state for Scorer assertions."""
+def replay_actions(task):
+    """The correct action list for an assembled 3-leg: update → log tail →
+    in-window allergen-safe plan → finish. Drives a passing episode."""
     from nutrienv.bench.realize import scored_oracles
 
     subs = scored_oracles(task.oracle)
     exp = subs[0].profile
-    env = NutriEnv()
-    env.reset(task.s0)
-    if not skip_update:
-        env.step({"op": "update_profile", "patch": {"allergies": list(exp.allergies)}})
-    if not skip_log:
-        for row in subs[1].ledger_tail:
-            env.step({"op": "log_meal", "food_id": row.food_id, "grams": row.grams,
-                      "eaten_at": row.eaten_at})
+    actions = [
+        {"op": "update_profile", "patch": {"allergies": list(exp.allergies)}}
+    ]
+    for row in subs[1].ledger_tail:
+        actions.append(
+            {"op": "log_meal", "food_id": row.food_id, "grams": row.grams,
+             "eaten_at": row.eaten_at}
+        )
     plan = fitting_plan(task.s0.catalog, subs[2].plan_windows, exp.allergies)
     if plan:
-        env.step({"op": "submit_plan", "items": plan})
-    return env.state()
+        actions.append({"op": "submit_plan", "items": plan})
+    actions.append({"op": "done"})
+    return actions
 
 
 def gold_catalog():
