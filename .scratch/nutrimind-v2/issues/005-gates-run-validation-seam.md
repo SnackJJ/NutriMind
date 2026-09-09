@@ -1,7 +1,8 @@
 ---
 id: 005
 title: gates.run pure validation seam (Seam 2) incl. exam-collision dedup
-status: ready-for-agent
+status: CLOSED (2026-09-09) — gates.run pure seam; 14 tests green (61 stable subset)
+commit: 8da38ed
 depends_on: [003]
 spec: ../spec.md
 spec_sections: ["11", "19.2", "19.6", "22.9", "9.4"]
@@ -43,17 +44,35 @@ test-constructed `GateContext`.
 
 **Blocked by:** 003.
 
-**Status:** ready-for-agent
+**Status:** CLOSED (2026-09-09)
 
-- [ ] `gates.run(task, ctx)` is pure (no I/O, no module-level state); the same
+- [x] `gates.run(task, ctx)` is pure (no I/O, no module-level state); the same
       `(task, ctx)` yields the same `GateResult` across runs
-- [ ] `GateContext.from_exam` reads the 63 exam `Task`s and precomputes the normalized
+- [x] `GateContext.from_exam` reads the 63 exam `Task`s and precomputes the normalized
       queries + `semantic_key`s exactly once; `gates.run` never touches the exam file
-- [ ] each of the 6 checks has a test that trips exactly it with the right `failure_code` / `stage`
-- [ ] a near-duplicate (not verbatim) of an exam query is **kept**
-- [ ] an authored `Task` whose `semantic_key` equals an exam task's is **dropped**
+- [x] each of the 6 checks has a test that trips exactly it with the right `failure_code` / `stage`
+- [x] a near-duplicate (not verbatim) of an exam query is **kept**
+- [x] an authored `Task` whose `semantic_key` equals an exam task's is **dropped**
       (`gate.semantic_key_collision`)
-- [ ] `gate.unachievable` yields `status=indeterminate`, routed as indeterminate not dropped
-- [ ] the 3-leg composite shape passes when `validate_draft` returns only
+- [x] `gate.unachievable` yields `status=indeterminate`, routed as indeterminate not dropped
+- [x] the 3-leg composite shape passes when `validate_draft` returns only
       `["update oracle ledger is missing"]`
-- [ ] gate ordering asserted: a `Task` failing checks 1 and 4 reports check 1
+- [x] gate ordering asserted: a `Task` failing checks 1 and 4 reports check 1
+
+## Closure notes
+
+- Exam-corpus facts verified against the pinned rev: 63 normalized queries but
+  **62** semantic keys — the frozen exam itself contains one intra-duplicate
+  pair (`adr20-rec-5019` / `adr29-conv-03`); asserted in tests.
+- Gate-6 construction that works standalone: a 3-leg composite whose update
+  leg carries stale kcal windows *declared in the query* ("lower my calorie
+  target by 555") — passes gates 1–5 (only the allow-listed FP remains) and is
+  unreachable. Fully-stale standalone `upd-weight` windows collide with the
+  exam's idempotent-update `semantic_key` (empty shift) → gate 2 preempts;
+  the kcal-declared composite avoids that.
+- `normalize_query` strips trailing whitespace+punctuation as one run (so
+  "…allergies. !!!" still collides with "…allergies."), per the spec's
+  cosmetic-tail intent.
+- Shared offline fixtures extracted to `tests/training/data_factory/_fixtures.py`
+  (synthetic expander, seeded `generate_one` factories, public-symbol 3-leg
+  assembly) for reuse by 006/007/010 tests.
