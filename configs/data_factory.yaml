@@ -1,7 +1,19 @@
-# NutriMind v2.0 data factory config.
-# Ticket 001 scope: only the NutriEnv dependency pin is populated here. The full
-# schema (teacher / expander / per-family k & N / thresholds / output_dir …) is
-# added by later tickets — see .scratch/nutrimind-v2/spec.md §7.
+# NutriMind v2.0 data factory config (spec §7 — .scratch/nutrimind-v2/spec.md).
+#
+# Number provenance (the finalized design doc /tmp/nutrienv_student_data.md is lost;
+# its load-bearing numbers are preserved in spec §2.1):
+#   pinned exactly — Batch-1 ≈ 420 accepted Pass; family mix composite ~57% /
+#     recommend ~17% / evaluate ~13% / log ~10% / update ~3%; 3-leg
+#     (update+log→recommend) target 40, teacher k = 6; max_seq_tokens 20000 and
+#     plan_max_tokens ~80 (ADR-011).
+#   derived — per-family target_n from the mix on ~420: composite 240 (200 two-leg
+#     + 40 three-leg), recommend 71, evaluate 55, log 42, update 13 (sum 421).
+#   provisional — over_generate_x, max_intents, usd_budget (re-pinned by tickets
+#     012/013/020 before the production run).
+#
+# nutrienv_rev is single-sourced from the pin block below (byte-unchanged since
+# ticket 001); the loader exposes it as DataFactoryConfig.nutrienv_rev. Keep the
+# rev the FIRST 40-hex string in this file — CI resolves the pin from it.
 
 # NutriEnv (../nutri-env) is consumed read-only (ADR-012), pinned to an exact commit.
 # The smoke test asserts the installed source tree's git HEAD equals this value.
@@ -15,3 +27,69 @@ nutrienv:
     PEP 660 editable mode (redirects to the source tree). If a clean wheel is ever
     needed, nutri-env must fix its packaging upstream (anchor the ignore as `/env/`,
     or add `[tool.hatch.build] artifacts = ["src/nutrienv/env/**"]`).
+
+target: sft                      # sft | rlvr | eval | all (spec §7)
+
+teacher:                         # ADR-011 amended 2026-09-09: ark/deepseek-v4-flash
+  model_id: "ark/deepseek-v4-flash"         # on api/plan/v3; thinking enabled is the
+  endpoint: "api/plan/v3/chat/completions"  # length control (replaces reasoning_effort)
+  credential_env: "ARK_API_KEY"             # shared with the expander (one provider)
+  thinking: {type: "enabled"}
+  temperature_first: 0.0         # attempt 1 (spec §16 / OQ-11)
+  temperature_retry: 0.7         # attempts 2..k
+  per_turn_timeout_s: 60
+
+expander:                        # same endpoint + credential as the teacher
+  model_id: "ark/deepseek-v4-flash"
+  endpoint: "api/plan/v3/chat/completions"
+  credential_env: "ARK_API_KEY"
+  thinking: {type: "disabled"}   # structured {query, foods} JSON; no reasoning needed
+  timeout_s: 60
+  parse_retries: 1               # attempts = parse_retries + 1 (spec §16)
+
+# N counts accepted Pass task_ids after intra-family semantic_key dedup (spec §10).
+# teacher_k = 6 is the pinned value (spec §2.1 preserves it for the 3-leg; applied
+# family-wide pending the design-doc reconstruction, ticket 021).
+families:
+  composite:                     # 2-leg composites (log→recommend, update→recommend)
+    target_n: 200
+    teacher_k: 6
+    over_generate_x: 3.0         # provisional — design value lost with the doc
+    gram_anchor: false
+  composite_update_log_recommend:  # the 3-leg (spec §22.9); inside the ~57% bucket
+    target_n: 40
+    teacher_k: 6
+    over_generate_x: 3.0         # provisional — ticket 013 replaces this with the
+    gram_anchor: true            # measured-rate sizing; ladder on from the start
+  recommend:
+    target_n: 71
+    teacher_k: 6
+    over_generate_x: 3.0
+    gram_anchor: false
+  evaluate:
+    target_n: 55
+    teacher_k: 6
+    over_generate_x: 3.0
+    gram_anchor: false
+  log:
+    target_n: 42
+    teacher_k: 6
+    over_generate_x: 3.0
+    gram_anchor: false
+  update:
+    target_n: 13
+    teacher_k: 6
+    over_generate_x: 3.0
+    gram_anchor: false
+
+max_seq_tokens: 20000            # ADR-011: 20k full-log; over → serialize.too_long
+plan_max_tokens: 80              # ~80-token hard plan truncation (ADR-011)
+tokenizer_name: null             # student tokenizer id, or null → char heuristic
+max_intents: 2000                # per-run runaway guard (provisional)
+usd_budget: 100.0                # provisional — re-pinned at production (ticket 020)
+on_budget: warn                  # warn | stop (spec §16)
+output_dir: data/student/        # v2 outputs only; v1 data dirs are never touched
+rubric_version: v2-r1
+reward_version: v2-r1
+catalog_path: null               # null → nutrienv load_catalog() gold default
+exam_split_path: null            # null → nutrienv.bench.EXAM_SPLIT_PATH
