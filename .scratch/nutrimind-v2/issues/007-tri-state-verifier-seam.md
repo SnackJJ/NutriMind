@@ -1,7 +1,8 @@
 ---
 id: 007
 title: Tri-state verifier seam (Seam 3) — VerificationResult, three axes, indeterminate
-status: ready-for-agent
+status: CLOSED (2026-09-09) — 25 tests green (278 dir-wide)
+commit: 3a6a41a
 depends_on: [003]
 spec: ../spec.md
 spec_sections: ["11", "12", "19.2", "19.3"]
@@ -52,23 +53,46 @@ Pure given the `EpisodeResult`. `TurnMeta` / `EpisodeResult` live in ticket 003;
 
 **Blocked by:** 003.
 
-**Status:** ready-for-agent
+**Status:** CLOSED (2026-09-09)
 
-- [ ] `verify(task_package, episode)` is pure given the `EpisodeResult`; carries
+- [x] `verify(task_package, episode)` is pure given the `EpisodeResult`; carries
       `oracle_version` / `rubric_version` / `reward_version`
-- [ ] `derive_execution(episode)` (if factored out) returns the right axis value for a
+- [x] `derive_execution(episode)` (if factored out) returns the right axis value for a
       finished / no-finish / fallback-substituted / errored episode
-- [ ] a test for each `indeterminate` trigger: `teacher_error`, `teacher_no_finish`,
+- [x] a test for each `indeterminate` trigger: `teacher_error`, `teacher_no_finish`,
       `teacher_invalid_op`, `oracle_error`, `env_reconstruction_mismatch`, `gate.unachievable`
-- [ ] a completed legal episode with `Scorer.passed is False` → `status=fail`,
+- [x] a completed legal episode with `Scorer.passed is False` → `status=fail`,
       `failure_codes=["task_fail", <tag>]`; never `indeterminate`
-- [ ] an episode where `Scorer` raises → `status=indeterminate` with traceback in `evidence`;
+- [x] an episode where `Scorer` raises → `status=indeterminate` with traceback in `evidence`;
       never `fail`
-- [ ] hard-constraint boundaries: window just inside vs just outside the ±15% tolerance;
+- [x] hard-constraint boundaries: window just inside vs just outside the ±15% tolerance;
       allergen present; off-`allowed_food_ids` food; missing required op
-- [ ] two different in-window, allergen-safe plans both → `pass` (order-independent, no
+- [x] two different in-window, allergen-safe plans both → `pass` (order-independent, no
       verbatim match)
-- [ ] nonexistent `food_id` → `fail` (`wrong_goal`), never `pass`
-- [ ] the `teacher_invalid_op` test is built from trajectory metadata with no reference to
+- [x] nonexistent `food_id` → `fail` (`wrong_goal`), never `pass`
+- [x] the `teacher_invalid_op` test is built from trajectory metadata with no reference to
       `_parse_action`
-- [ ] a low `diagnostic_scores` value changes neither `status` nor `reward`
+- [x] a low `diagnostic_scores` value changes neither `status` nor `reward`
+
+## Closure notes
+
+- `derive_execution` factored out as the ticket suggested; priority order:
+  error > no_finish > invalid_op (the episode is judged by its most
+  fundamental defect first).
+- v2's parser (`parse_action_text`) mirrors ONE executed normalization: an
+  accepted submit_plan drops free-form `reasons` — otherwise a genuine plan
+  would falsely mismatch the action the env received. The legal-op vocabulary
+  is v2-owned (nutri-env's `OPS` is not in `__all__`; ADR-012 forbids the
+  import). No reference to `_parse_action` anywhere in src or tests.
+- The ±15 % spec line is the LEDGER gram tolerance (ADR-0023, inside
+  `_match_ledger_multiset`), NOT the plan windows — plan windows are strict
+  lo/hi. Both boundary classes are tested: ledger 1.14x passes / 1.2x fails
+  (log_miss); plan total == hi passes / total > hi fails (window) with the
+  window pinned to the fitting plan's exact kcal total.
+- The env REJECTS malformed submit_plans without storing them, so
+  wrong_goal evidence falls back to the episode's last submitted payload
+  (v2's own recorded metadata) to name the nonexistent food_id.
+- gate.unachievable stays routed at the gate stage (ticket 005): the §19.2
+  trigger test asserts the pipeline ordering instead of calling verify.
+- `diagnostic_scores` is always None from verify in v2.0; the test also
+  proves a hand-set value cannot flip status/reward (§19.3).
