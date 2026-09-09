@@ -1,7 +1,8 @@
 ---
 id: 008
 title: serialize seam (Seam 4) → v2 SFT record (segments + train_on, plan truncation)
-status: ready-for-agent
+status: CLOSED (2026-09-09) — 18 serialize tests green (314 dir-wide)
+commit: b0386a4
 depends_on: [003, 006]
 spec: ../spec.md
 spec_sections: ["9.2", "11", "19.4", "22.10", "22.11"]
@@ -35,21 +36,46 @@ anywhere in assistant content.
 
 **Blocked by:** 003, 006.
 
-**Status:** ready-for-agent
+**Status:** CLOSED (2026-09-09)
 
-- [ ] pure; a scripted Pass episode → exactly one record with
+- [x] pure; a scripted Pass episode → exactly one record with
       `len(messages) == len(segments) == len(train_on)`, `segments[-1] == "final"`,
       `train_on` true only on `step` / `final`
-- [ ] `meta` version block complete: `oracle_version`, `rubric_version`, `reward_version`,
+- [x] `meta` version block complete: `oracle_version`, `rubric_version`, `reward_version`,
       `environment_version`, `task_schema_version`, `catalog_sha`, `nutrienv_rev`,
       `nutrimind_rev`, `seed`, family / steps / tier / persona / batch
-- [ ] each serialize-edge failure has its own test (no system turn; consecutive assistant;
+- [x] each serialize-edge failure has its own test (no system turn; consecutive assistant;
       missing observation; empty; last turn not FINISH; record over `max_seq_tokens` →
       `too_long`)
-- [ ] one turn without `reasoning_content` → `plan=""` + `meta.n_turns_without_plan == 1`;
+- [x] one turn without `reasoning_content` → `plan=""` + `meta.n_turns_without_plan == 1`;
       every turn without a plan → `serialize.no_plan_any_turn`
-- [ ] `reasoning_content` longer than `plan_max_tokens` → truncated, `meta.plan_truncation`
+- [x] `reasoning_content` longer than `plan_max_tokens` → truncated, `meta.plan_truncation`
       set, `op_json` still parses
-- [ ] no `<tool_call>` / `<think>` / `<|im_start|>` in any assistant content
-- [ ] if v2's own parse of `raw_action_text` does not yield the executed op, no record is
+- [x] no `<tool_call>` / `<think>` / `<|im_start|>` in any assistant content
+- [x] if v2's own parse of `raw_action_text` does not yield the executed op, no record is
       produced
+
+## Closure notes
+
+- `EpisodeResult` gained an optional `reset_observation` field (backward
+  compatible; `from_dict` defaults None): the first user message of the
+  serialized trajectory had no home in 003's types — each `TurnMeta.observation`
+  is the obs that turn *produced*. `rollout` now records observations exactly
+  as the base harness embeds them (`json.dumps` defaults, 6000-char cap) so
+  the record's user messages are byte-faithful to what the teacher saw.
+- The user message format is reconstructed: `Step budget: {max_steps - i}
+  action(s) remaining, including this turn.\nObservation:\n{obs}` (matches
+  the base `act()` and spec §9.2's example). max_steps derives from the family
+  budget, consistent with `rollout`'s default.
+- `validate_record` is exported — the loader-mirror structural check (the §9.2
+  rejection rules). Serialize runs it on its own output; ticket 019's loader
+  reuses it instead of re-implementing. Its `serialize.v1_marker` code is a
+  v2-local extension (markers cannot survive serialize's sanitization).
+- The invalid-op guard raises `serialize.invalid_op_turn` — defensive only:
+  verify() already routes non-genuine parses to indeterminate/teacher_invalid_op
+  (§12), so build never sends such episodes here.
+- No `<tool_call>`/`<think>`/`<|im_start|>` markers in any assistant content:
+  plans are sanitized at compose time (markers stripped; the text between
+  them is kept — the spec forbids the markers, not the reasoning).
+- Token counting for `too_long`: sum over messages (tokenizer-exact when
+  injected, else ~4 chars/token rounded up per message).
