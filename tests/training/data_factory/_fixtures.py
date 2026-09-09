@@ -13,7 +13,6 @@ import dataclasses
 
 from nutrienv.bench.pipeline.generate_one import generate_one
 from nutrienv.bench.pipeline.roster import ROSTER
-from nutrienv.bench.pipeline.sampler import speakable_tracer_food
 from nutrienv.bench.pipeline.templates import recommend_query
 from nutrienv.bench.realize import Oracle, Task, compose_oracles
 from nutrienv.bench.validator import fitting_plan
@@ -21,23 +20,17 @@ from nutrienv.world.catalog_store import GOLD_CATALOG_PATH, load_catalog
 from nutrienv.world.daily_windows import plan_windows_for_meal
 from nutrienv.world.types import ledger_totals
 
+from src.training.data_factory.synthetic import synth_expander
+
 # allergen values that are NOT exam update-slot values (egg/milk/peanut/
 # shellfish/tree_nut at rev 203d807) — keeps gate-3 quiet in 3-leg fixtures
 SAFE_ALLERGENS = ["fish", "soy", "wheat"]
 
-
-def synth_expander(catalog):
-    """A deterministic stand-in for the speech LLM: picks one pool food and
-    speaks a fixed {query, foods} pair (nutri-env's expander contract)."""
-
-    def expander(pool, *, persona, family, amount_path=None):
-        picked = speakable_tracer_food(pool, catalog, amount_path=amount_path or "named_measure")
-        if picked is None:
-            return {"query": "", "foods": []}
-        food, phrase, spoken = picked
-        return {"query": f"For lunch I had {phrase} of {spoken}.", "foods": [food.food_id]}
-
-    return expander
+__all__ = [
+    "SAFE_ALLERGENS", "assemble_three_leg", "first_person", "gold_catalog",
+    "make_log_task", "make_recommend_task", "make_update_task",
+    "replay_actions", "synth_expander",
+]
 
 
 def first_person(*, require_no_allergies: bool = True):
