@@ -1,0 +1,17 @@
+# NutriMind v2.0 data factory config.
+# Ticket 001 scope: only the NutriEnv dependency pin is populated here. The full
+# schema (teacher / expander / per-family k & N / thresholds / output_dir …) is
+# added by later tickets — see .scratch/nutrimind-v2/spec.md §7.
+
+# NutriEnv (../nutri-env) is consumed read-only (ADR-012), pinned to an exact commit.
+# The smoke test asserts the installed source tree's git HEAD equals this value.
+nutrienv:
+  repo: "https://github.com/SnackJJ/NutriEnv"
+  rev: "203d807b19953a86b5486303ba6f7dd3b9cf7bb6"     # nutrienv_rev
+  install: "uv pip install -e ../nutri-env --config-settings editable_mode=strict"
+  note: >
+    Default (compat) editable / wheel / git+ installs drop nutrienv/env/ because
+    nutri-env's .gitignore has a bare `env/` line that hatchling honours. Use strict
+    PEP 660 editable mode (redirects to the source tree). If a clean wheel is ever
+    needed, nutri-env must fix its packaging upstream (anchor the ignore as `/env/`,
+    or add `[tool.hatch.build] artifacts = ["src/nutrienv/env/**"]`).

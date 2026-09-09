@@ -1,0 +1,83 @@
+name: nutrienv-smoke
+
+# Ticket 001 — prove `nutrienv` installs and its borrowed public API works, in a
+# CLEAN environment. This job never touches a checked-in `.venv` and never runs
+# `uv sync` on the whole project (the `vllm==0.12.0` pin in inference/training is a
+# known, unrelated blocker). It creates a fresh venv and installs only pytest +
+# NutriEnv (strict-editable), then runs the smoke test.
+#
+# The NutriEnv revision is taken from configs/data_factory.yaml (single source of
+# truth) and CI asserts the checked-out NutriEnv HEAD equals it.
+
+on:
+  push:
+    paths:
+      - "pyproject.toml"
+      - "configs/data_factory.yaml"
+      - "scripts/setup_nutrienv.sh"
+      - "tests/training/data_factory/**"
+      - ".github/workflows/nutrienv-smoke.yml"
+  pull_request:
+    paths:
+      - "pyproject.toml"
+      - "configs/data_factory.yaml"
+      - "scripts/setup_nutrienv.sh"
+      - "tests/training/data_factory/**"
+      - ".github/workflows/nutrienv-smoke.yml"
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout NutriMind
+        uses: actions/checkout@v4
+        with:
+          path: nutrimind
+
+      - name: Resolve NutriEnv pin from configs/data_factory.yaml
+        id: pin
+        run: |
+          rev="$(grep -oE '[0-9a-f]{40}' nutrimind/configs/data_factory.yaml | head -1)"
+          if [ -z "$rev" ]; then echo "no 40-hex rev in configs/data_factory.yaml" >&2; exit 1; fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+          echo "NutriEnv pin: $rev"
+
+      - name: Checkout NutriEnv at the pin (as a sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: SnackJJ/NutriEnv
+          ref: ${{ steps.pin.outputs.rev }}
+          path: nutri-env
+
+      - name: Assert NutriEnv HEAD == configured pin
+        run: |
+          head="$(git -C nutri-env rev-parse HEAD)"
+          echo "checked-out HEAD: $head"
+          test "$head" = "${{ steps.pin.outputs.rev }}"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Create a fresh venv + install pytest only
+        working-directory: nutrimind
+        run: |
+          uv venv --python 3.12
+          uv pip install --python .venv/bin/python "pytest>=8"
+
+      - name: Install NutriEnv (strict editable — default install drops nutrienv/env/)
+        working-directory: nutrimind
+        run: |
+          . .venv/bin/activate
+          scripts/setup_nutrienv.sh ../nutri-env
+
+      - name: Run NutriEnv public-API smoke test
+        working-directory: nutrimind
+        run: |
+          . .venv/bin/activate
+          pytest tests/training/data_factory/test_nutrienv_smoke.py -v
