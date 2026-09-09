@@ -6,8 +6,8 @@ Domain vocabulary: `CONTEXT.md` (repo root) — used verbatim below
 Governing ADRs: [ADR-010](../../docs/decisions/010-nutrimind-v2-rescope.md),
 [ADR-011](../../docs/decisions/011-batch1-sft-trajectory-short-plan-thinking-teacher.md),
 [ADR-012](../../docs/decisions/012-nutrienv-read-only-benchmark.md) (amended 2026-09-08)
-Design doc: `/tmp/nutrienv_student_data.md` (pending move to
-`docs/plans/nutrimind_v2_data_factory.md`)
+Design doc: `docs/plans/nutrimind_v2_data_factory.md` — the `/tmp` original is lost;
+reconstructed by ticket 021 from §2.1 + the ADRs + ticket 002
 Open decision/prototype tickets: `.scratch/nutrimind-v2/issues/001`, `002`
 
 This spec turns the finalized design into a verifiable local project spec. It pins the
@@ -56,10 +56,10 @@ v1/v2 project boundary.
 
 ### 2.1 Design provenance (copied here — do not depend on `/tmp`)
 
-Key numbers below come from the finalized design doc, currently at
-`/tmp/nutrienv_student_data.md` (a temporary file; pending move to
-`docs/plans/nutrimind_v2_data_factory.md`). Recorded here so this spec is
-self-sufficient:
+Key numbers below come from the finalized design doc that was at
+`/tmp/nutrienv_student_data.md` and is now **lost** (ticket 021 reconstructs it at
+`docs/plans/nutrimind_v2_data_factory.md` from this section + the ADRs + ticket 002).
+Recorded here so this spec is self-sufficient regardless:
 
 - Batch-1 overall target ≈ **420 accepted Pass traces** (design §7 table column
   "Pass traces"; total row "~420"). Family mix: composite ~57 % / recommend ~17 % /
@@ -67,9 +67,11 @@ self-sufficient:
 - `composite update+log→recommend` (3-leg) family target = **40**, teacher **k = 6**.
   **N = 40 is an accepted-Pass count, not a candidate count.** Nothing in the code or an
   existing spec contradicts this; do not reinterpret it.
-- Teacher = `deepseek/deepseek-v4-flash` direct, thinking on, `reasoning_effort=low`
-  (ADR-011). Expander = `ark/deepseek-v4-flash`. `max_seq_length` 20k, `context_limit=None`
-  train + eval.
+- Teacher = `ark/deepseek-v4-flash` on `api/plan/v3`, `thinking: {"type": "enabled"}` as
+  the length control (ADR-011 **amended 2026-09-09** — was `deepseek/` direct +
+  `reasoning_effort=low`). Expander = `ark/deepseek-v4-flash` with
+  `thinking: {"type": "disabled"}`. One provider, one credential (`ARK_API_KEY`) for both.
+  `max_seq_length` 20k, `context_limit=None` train + eval.
 - The design doc's §5 still sketches the 3-leg assembly via **private** helpers
   (`_update_from_template` / `_bind_log_foods`) and a `compose3.py`. That is the
   pre-spec draft. **This spec and ADR-012 (amended) require public symbols only**; the
@@ -291,8 +293,8 @@ injected `teacher_complete`, capturing `reasoning_content` per turn.
 
 - **`configs/data_factory.yaml`** (new). Keys (names indicative, shapes fixed):
   `nutrienv_rev`, `catalog_path`, `exam_split_path`, `target` (`sft`|`rlvr`|`eval`|`all`),
-  `teacher` (`{model_id, reasoning_effort, temperature_first, temperature_retry,
-  per_turn_timeout_s}`), `expander` (`{model_id, timeout_s, parse_retries}`),
+  `teacher` (`{model_id, thinking, temperature_first, temperature_retry,
+  per_turn_timeout_s}`), `expander` (`{model_id, thinking, timeout_s, parse_retries}`),
   `families` (per family `{target_n, teacher_k, over_generate_x, amount_path_weights?,
   gram_anchor: bool}`), `max_seq_tokens` (20000), `plan_max_tokens` (~80),
   `tokenizer_name` (student tokenizer id or `null`), `max_intents`, `usd_budget`,
@@ -306,9 +308,10 @@ injected `teacher_complete`, capturing `reasoning_content` per turn.
 - **Injected `teacher_complete`**: `callable(model_id: str, messages: Sequence[Mapping])
   -> {"content": str, "reasoning_content": str | None, "finish_reason": str,
   "usage": {"prompt_tokens": int, "completion_tokens": int, "reasoning_tokens": int}}`.
-- **Environment**: `DEEPSEEK_API_KEY` (teacher; in `.env.example`), `ARK_API_KEY` +
-  `ARK_BASE_URL` (expander; **not** in `.env.example` — add). Real network calls only in
-  production wiring; a guard requires `NUTRIMIND_ALLOW_NETWORK=1`.
+- **Environment**: `ARK_API_KEY` + `ARK_BASE_URL` — one credential for **both** the
+  teacher and the expander (ADR-011 amended: `ark/deepseek-v4-flash` on `api/plan/v3`).
+  Add both to `.env.example`. Real network calls only in production wiring; a guard
+  requires `NUTRIMIND_ALLOW_NETWORK=1`.
 - **Dependency**: `pyproject.toml` must add `nutrienv` as an editable path dependency
   pinned to an exact git rev. Ticket 001.
 
@@ -456,8 +459,8 @@ Field readiness against the current code:
   "meta": {
     "family": "log", "steps": ["log"], "tier": "", "persona": "everyday", "batch": 1,
     "seed": 42,
-    "teacher": "deepseek/deepseek-v4-flash",
-    "teacher_params": {"reasoning_effort": "low", "temperature_first": 0.0, "temperature_retry": 0.7},
+    "teacher": "ark/deepseek-v4-flash",
+    "teacher_params": {"thinking": {"type": "enabled"}, "temperature_first": 0.0, "temperature_retry": 0.7},
     "expander": "ark/deepseek-v4-flash",
     "verification": {"status": "pass", "reward": 1.0, "failure_codes": [], "evidence": []},
     "oracle_version": "nutrienv-203d807",
@@ -888,9 +891,13 @@ implementation:
   target vs actual; `cost`; `versions`.
 - Every accepted / reject record carries the `meta` version block (§9.2).
 - `task_packages/<task_id>.json` — the canonical task, replayable by nutri-env tooling.
-- `rollouts/cache/<task_id>.json` — the full teacher episode: messages sent per step,
+- `rollouts/cache/<task_id>.json` — a `RolloutCache`: `{task_id, attempts:
+  [{attempt_id, EpisodeResult, VerificationResult}], selected_attempt}`. One entry per
+  teacher attempt 1..k that ran; each `EpisodeResult` carries the messages sent per step,
   each assistant turn's `content` + `reasoning_content` + `finish_reason` + `usage` +
-  latency, the resolved `Task`, and the `VerificationResult`.
+  latency, the resolved `Task`, and the produced `end_state`. `selected_attempt` is the
+  first Pass (or `null`). Multi-attempt by construction — this is what
+  `--from-stage serialize` re-reads without re-paying the teacher.
 - `loguru` logs (existing dep): task-level INFO outcomes, WARNING on retries and cost
   thresholds, ERROR on serialize failures. API keys and full prompts never logged
   (prompts live in the cache files).
@@ -1032,11 +1039,15 @@ produced — not internal call order.
   (`nutri-env/scripts/generate_one_cli.py::make_synthetic_query_foods_expander`) and a
   scripted `teacher_complete` (queue of `(content, reasoning_content)`; prior art
   `tests/training/grpo/test_environment_execute.py` mock registry).
-- **Seam 2** — `gates.run(task) -> GateResult(keep, failure_code, reason_detail, stage)`
-  (pure). Build `Task`s with `generate_one(expander=synthetic)` offline.
-- **Seam 3** — the **verifier** `verify(task_package, end_state) -> VerificationResult`
-  (pure given the end state).
-- **Seam 4** — `serialize(task_package, episode) -> record` (pure).
+- **Seam 2** — `gates.run(task, ctx=GateContext.from_exam(exam_tasks)) ->
+  GateResult(keep, failure_code, reason_detail, stage)` (pure; the exam corpus is passed
+  in, never loaded implicitly). Build `Task`s with `generate_one(expander=synthetic)`
+  offline.
+- **Seam 3** — the **verifier** `verify(task_package, episode: EpisodeResult) ->
+  VerificationResult` (pure given the `EpisodeResult`; `EpisodeResult` bundles
+  `end_state` + per-turn `TurnMeta` + `reached_finish` + `error`, so the verifier can
+  derive all three axes of §12).
+- **Seam 4** — `serialize(task_package, episode: EpisodeResult) -> record` (pure).
 - **Seam 5** — the compatibility guard (§19.6), split from behaviour tests.
 - pytest: no config today; add `[tool.pytest.ini_options] testpaths=["tests"]` or rely
   on discovery. Tests under `tests/training/data_factory/`. Prior art
@@ -1079,11 +1090,11 @@ failures.
 
 v2 processes only synthetic data — `TRAIN_ROSTER` (fictional `train-*` people), USDA
 catalog foods, LLM-authored queries. **No real user data enters the pipeline.** Prompts
-sent to DeepSeek (`api.deepseek.com`) and Volcengine (`ark/`) contain only synthetic
-roster + catalog content; nothing sensitive to redact. `rollouts/cache/` and logs may
-hold raw (synthetic) teacher responses under the git-ignored `data/`. No
-de-identification required. The only external data boundary: synthetic prompts leave the
-machine to two model providers.
+sent to Volcengine (`ark/deepseek-v4-flash` on `api/plan/v3`, one endpoint for teacher +
+expander) contain only synthetic roster + catalog content; nothing sensitive to redact.
+`rollouts/cache/` and logs may hold raw (synthetic) teacher responses under the
+git-ignored `data/`. No de-identification required. The only external data boundary:
+synthetic prompts leave the machine to one model provider.
 
 ## 22. Implementation Decisions
 
@@ -1111,10 +1122,13 @@ machine to two model providers.
    `nutrimind_rev` (git sha), `nutrienv_rev`.
 7. **Two injected dependencies** (§7): `expander` (the `generate_one` contract) and
    `teacher_complete` (returns `content` + `reasoning_content` separately). Production
-   `teacher_complete` uses the `openai` SDK directly against `api.deepseek.com` with
-   `extra_body={"thinking": {"type": "enabled"}}` + `reasoning_effort="low"`;
-   `nutrienv.io.chat.complete_chat` is **not** used for rollouts (it sends no thinking
-   param and `_message_text` collapses `content`/`reasoning_content`).
+   `teacher_complete` is a thin client against `ark/deepseek-v4-flash` on
+   `api/plan/v3/chat/completions` (`ARK_API_KEY`), reading `message.content` +
+   `message.reasoning_content` + `usage.completion_tokens_details.reasoning_tokens`, with
+   `thinking: {"type": "enabled"}` as the length control (ADR-011 amended — replaces the
+   DeepSeek-direct `reasoning_effort`); `nutrienv.io.chat.complete_chat` is **not** used
+   for rollouts (it sends no thinking param and `_message_text` collapses
+   `content`/`reasoning_content`).
 8. **Teacher rollout** subclasses `nutrienv.harness.ReActHarness`, overriding the
    completion to use `teacher_complete` and keep `reasoning_content`, and **recording per
    turn** a v2-owned trajectory-metadata structure: at minimum `raw_action_text` (the
@@ -1254,13 +1268,14 @@ tuning decisions that can be made inline or carried on a ticket.
   `<tool_call>` single-token vocab, Qwen3-4B) and does not govern v2. A v2 training spec
   is a separate future doc.
 - nutri-env's `EXPANDER_MODELS["deepseek-v4-flash-0731"]` (DashScope snapshot) is a
-  different id and route from the v2 teacher `deepseek/deepseek-v4-flash` (direct). Do
-  not conflate.
+  different id and route from the v2 teacher `ark/deepseek-v4-flash` on `api/plan/v3`
+  (ADR-011 amended). Do not conflate.
 - nutri-env's eval suite already has a `void` / `is_void` / `clean_pass_rate` concept —
   v2's `indeterminate` is the same idea, named.
-- The finalized design doc is still at `/tmp/nutrienv_student_data.md`; ADR-010/011
-  reference `docs/plans/nutrimind_v2_data_factory.md`. Moving it in is a pending chore,
-  deliberately not done here.
+- The finalized design doc `/tmp/nutrienv_student_data.md` (which ADR-010/011 reference as
+  `docs/plans/nutrimind_v2_data_factory.md`) is **lost** — no copy survives. Its
+  load-bearing numbers are preserved in §2.1 above and in ticket 002. **Ticket 021**
+  reconstructs the doc at that path from §2.1 + the ADRs + ticket 002.
 - `nutrienv` is currently **not importable** in this repo. Ticket 001 is a hard
   prerequisite for all implementation.
 

@@ -66,10 +66,11 @@ The model that writes `speech` (`LogExpander` / `UnfitRewriter`). Batch 1 uses
 _Avoid_: "the writer", "paraphraser"
 
 **teacher**:
-The model whose Pass-filtered trajectories become SFT data —
-`deepseek/deepseek-v4-flash` **direct**, thinking-on at `reasoning_effort=low`. Same
-model family as the eval comparator `ark/deepseek-v4-flash`; the comparison is end-state
-Pass, not style.
+The model whose Pass-filtered trajectories become SFT data — `ark/deepseek-v4-flash` on
+`api/plan/v3`, `thinking: {"type": "enabled"}` as the length control (ADR-011 amended
+2026-09-09 — was `deepseek/` direct + `reasoning_effort=low`). Same endpoint and
+`ARK_API_KEY` as the `expander`. Same model as the eval comparator; the comparison is
+end-state Pass, not style.
 _Avoid_: "the expert"; do not call it "the oracle" (that is the Scorer's gold state)
 
 **Pass-filter**:
