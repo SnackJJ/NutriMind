@@ -1,7 +1,8 @@
 ---
 id: 021
 title: Reconstruct the design doc at docs/plans/nutrimind_v2_data_factory.md (the /tmp original is lost)
-status: ready-for-agent
+status: CLOSED (2026-09-09) — docs/plans/nutrimind_v2_data_factory.md written (234 lines); all facts source-tagged
+commit: local-only
 depends_on: []
 spec: ../spec.md
 spec_sections: ["2.1", "24"]
@@ -41,15 +42,27 @@ reference so "design §7" in tickets 012 / 013 / 020 resolves to something concr
 
 **Blocked by:** None — can start immediately (all sources already exist in-repo).
 
-**Status:** ready-for-agent
+**Status:** CLOSED (2026-09-09)
 
-- [ ] `docs/plans/nutrimind_v2_data_factory.md` exists with a §6 / §7 / §8 the other
+- [x] `docs/plans/nutrimind_v2_data_factory.md` exists with a §6 / §7 / §8 the other
       tickets can cite
-- [ ] the §7 per-family N table sums to ~420 and matches spec §2.1 and ticket 002
-- [ ] the 3-leg recipe uses only public nutrienv symbols (spec §22.9); no
+- [x] the §7 per-family N table sums to ~420 and matches spec §2.1 and ticket 002
+- [x] the 3-leg recipe uses only public nutrienv symbols (spec §22.9); no
       `_update_from_template` / `_bind_log_foods` / `compose3.py`
-- [ ] the teacher endpoint reads `ark/deepseek-v4-flash` on `api/plan/v3` (ADR-011 amended),
+- [x] the teacher endpoint reads `ark/deepseek-v4-flash` on `api/plan/v3` (ADR-011 amended),
       not `deepseek/` direct
-- [ ] every reconstructed figure carries a source tag; unsourced items are listed as open,
+- [x] every reconstructed figure carries a source tag; unsourced items are listed as open,
       not guessed
-- [ ] ADR-010 / ADR-011's "Related" links to the doc path now resolve
+- [x] ADR-010 / ADR-011's "Related" links to the doc path now resolve
+
+## Closure notes
+
+- Local-only as required (docs/plans/ is git-ignored); no commit sha — the file
+  lives outside version control by design.
+- §7 per-family N table matches configs/data_factory.yaml exactly (421 total:
+  composite 240 = 200 two-leg + 40 three-leg, recommend 71, evaluate 55, log 42,
+  update 13); only the 3-leg's 40 / k=6 are pinned, everything else tagged
+  derived, and per-family k / over_generate_x / usd_budget / two-leg split / OQ-9
+  citation stay OPEN (never guessed).
+- ADR-010/011 already reference `docs/plans/nutrimind_v2_data_factory.md`; with the
+  doc written those links resolve again (no ADR edit was needed).
