@@ -1,0 +1,82 @@
+=== multi-turn reasoning_content under _SYSTEM_V2 ===
+ turn 0: content='{"op": "search_foods", "q": "tongue"}'  reasoning_tokens=739  reasoning?=YES
+          plan[:120]='We need respond to user\'s task. They say: "I had a plate of sliced tongue with a homemade cornbread muffin."\n\nNeed inter'
+ turn 1: content='{"op": "search_foods", "q": "tongue"}'  reasoning_tokens=180  reasoning?=YES
+          plan[:120]='We need respond with JSON op. The user said "I had a plate of sliced tongue with a homemade cornbread muffin." We need i'
+ turn 2: content='{"op": "search_foods", "q": "cornbread"}'  reasoning_tokens=2289  reasoning?=YES
+          plan[:120]="The previous search didn't return results? I need to interpret the observation. In NutriEnv, observations after search_f"
+
+=== real ark expander 3-leg sweep (20 seeds) ===
+Traceback (most recent call last):
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 101, in map_httpcore_exceptions
+    yield
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 250, in handle_request
+    resp = self._pool.handle_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 256, in handle_request
+    raise exc from None
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_sync/connection_pool.py", line 236, in handle_request
+    response = connection.handle_request(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_sync/connection.py", line 103, in handle_request
+    return self._connection.handle_request(request)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 136, in handle_request
+    raise exc
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 106, in handle_request
+    ) = self._receive_response_headers(**kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 177, in _receive_response_headers
+    event = self._receive_event(timeout=timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_sync/http11.py", line 217, in _receive_event
+    data = self._network_stream.read(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_backends/sync.py", line 126, in read
+    with map_exceptions(exc_map):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/miniforge3/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpcore/_exceptions.py", line 14, in map_exceptions
+    raise to_exc(exc) from exc
+httpcore.ReadTimeout: The read operation timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<stdin>", line 108, in <module>
+  File "<stdin>", line 72, in assemble
+  File "/home/jzq/Projects/nutri-env/src/nutrienv/bench/pipeline/generate_one.py", line 303, in generate_one
+    raw = expander(
+          ^^^^^^^^^
+  File "/home/jzq/Projects/nutri-env/src/nutrienv/bench/pipeline/generate_one.py", line 1534, in __call__
+    parsed = parse_query_foods_payload(self._complete(self._model_id, messages))
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<stdin>", line 64, in ark_complete
+  File "<stdin>", line 20, in ark_raw
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1144, in post
+    return self.request(
+           ^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_client.py", line 825, in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_client.py", line 914, in send
+    response = self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_client.py", line 942, in _send_handling_auth
+    response = self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_client.py", line 979, in _send_handling_redirects
+    response = self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_client.py", line 1014, in _send_single_request
+    response = transport.handle_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 249, in handle_request
+    with map_httpcore_exceptions():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jzq/miniforge3/lib/python3.12/contextlib.py", line 158, in __exit__
+    self.gen.throw(value)
+  File "/home/jzq/Projects/NutriMind/.venv/lib/python3.12/site-packages/httpx/_transports/default.py", line 118, in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+httpx.ReadTimeout: The read operation timed out

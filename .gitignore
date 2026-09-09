@@ -7,8 +7,12 @@ data/
 logs/
 knowledge_db/
 
-# Doc files
-docs/
+# Doc files (ignored except agent config + ADRs, which are project engineering config)
+docs/*
+!docs/agents/
+!docs/agents/**
+!docs/decisions/
+!docs/decisions/**
 
 # Lock files
 uv.lock

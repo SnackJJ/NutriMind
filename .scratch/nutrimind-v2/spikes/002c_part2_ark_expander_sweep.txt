@@ -1,0 +1,20 @@
+=== real ark expander (thinking disabled) 3-leg sweep, 12 seeds ===
+  seed 3000: reject author.log.ambiguous
+  seed 3001: gated, correct-replay Pass=True
+  seed 3002: reject author.log.unresolvable
+  seed 3003: gated, correct-replay Pass=True
+  seed 3004: reject author.log.amount_path
+  seed 3005: reject author.log.ambiguous
+  seed 3006: reject author.log.ambiguous
+  seed 3007: gated, correct-replay Pass=True
+  seed 3008: reject author.log.amount_path
+  seed 3009: reject author.log.unresolvable
+  seed 3010: reject author.log.amount_path
+  seed 3011: reject author.log.small_grams
+
+assembled            : 3  reject reasons: {'author.log.ambiguous': 3, 'author.log.unresolvable': 2, 'author.log.amount_path': 3, 'author.log.small_grams': 1}
+assembled + gated    : 3
+correct-replay Pass  : 3 / 3
+semantic_key-unique  : 3
+estimated_unique_accepted_rate : 0.25  (unique / seeds)
+ark calls: 12 in=24366 out=578 reasoning=0 retries=0

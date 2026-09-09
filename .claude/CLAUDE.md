@@ -43,6 +43,11 @@ Cross-cutting plans (no single spec):
 - Sequential tool execution only (no parallel tool calls)
 - Max 6 tool rounds per conversation
 
+## Agent Skills Config
+- Domain glossary: [CONTEXT.md](../CONTEXT.md) — use its vocabulary; don't introduce synonyms
+- Issue tracker: **local Markdown**, not GitHub Issues — see [docs/agents/issue-tracker.md](../docs/agents/issue-tracker.md). Do not run `gh issue create`.
+- Current feature workspace: `.scratch/nutrimind-v2/` (`spec.md` + `issues/`)
+
 ## Key Decisions
 
 **ADR (Architecture Decision Records)**: `docs/decisions/`
@@ -55,6 +60,9 @@ Cross-cutting plans (no single spec):
 - [ADR-002: veRL to TRL Migration](docs/decisions/002-verl-to-trl-migration.md) — **Partially superseded** by ADR-007; veRL→TRL decision valid, `rollout_func` choice superseded
 - [ADR-007: environment_factory Migration](docs/decisions/007-environment-factory-migration.md) — **Accepted**; migrate from `rollout_func` to TRL native `environment_factory` for single A800
 - [ADR-008: GRPO Hyperparameter Tuning](docs/decisions/008-grpo-hyperparameter-tuning.md) — **Accepted**; G=4→8, beta=0→0.04, LR=5e-6→1e-5, cosine→constant_with_warmup, epochs=2→3
+- [ADR-010: NutriMind v2.0 Rescope](docs/decisions/010-nutrimind-v2-rescope.md) — **Accepted**; Qwen3.5-2B student on frozen NutriEnv v1.0; phase-1 → `NutriMind v1 (archive)`; data waves = Batch 1/2
+- [ADR-011: Batch-1 SFT Trajectory](docs/decisions/011-batch1-sft-trajectory-short-plan-thinking-teacher.md) — **Accepted** (amended 2026-09-09); assistant turn = short plan + JSON op; teacher = **`ark/deepseek-v4-flash` `api/plan/v3`** (was `deepseek/` direct — ark returns `reasoning_content` by default; same endpoint+key as expander); reverses `nutrienv_student.md:37` non-thinking default; full-log train+eval, `max_seq_length=20k`
+- [ADR-012: NutriEnv Read-Only Benchmark](docs/decisions/012-nutrienv-read-only-benchmark.md) — **Accepted** (amended 2026-09-08); NutriMind never patches `../nutri-env`; authoring gaps (3-leg composite, amend/starve/closed-list) solved NutriMind-side from **public** symbols; nutri-env pinned to git SHA; compat guard = signature check for public `__all__` API only, private helpers not frozen
 
 **Obsolete Files** (per ADR-007):
 - `src/training/grpo/trl_environment.py` — rollout_func, replaced by environment_factory

@@ -1,0 +1,16 @@
+gates: {'stage_a': [], 'validate_draft': ['update oracle ledger is missing'], 'achievable': True} -> pass
+  correct     -> passed=True tag=pass         sub_tags=('pass', 'pass', 'pass')
+  skip_log    -> passed=False tag=log_miss     sub_tags=('pass', 'log_miss', 'log_miss')
+  over_window -> passed=False tag=window       sub_tags=('pass', 'pass', 'window')
+  skip_update -> passed=False tag=update_miss  sub_tags=('update_miss', 'update_miss', 'update_miss')
+
+--- 20-seed sweep ---
+seeds                     : 20
+assembled + gates ok      : 11  | reject/gate reasons: {'author.log.unresolvable': 1, 'gate_fail': 3, 'author.log.small_grams': 4, 'author.log.schema': 1}
+correct-replay Scorer Pass: 11
+semantic_key-unique       : 11
+raw_pass_rate             : 0.55
+distinct_task_survival    : 0.79
+semantic_dedup_survival   : 1.00
+indeterminate_rate        : 0.00  (no exceptions; rejects are authoring, not indeterminate)
+estimated_unique_accepted_rate : 0.55
