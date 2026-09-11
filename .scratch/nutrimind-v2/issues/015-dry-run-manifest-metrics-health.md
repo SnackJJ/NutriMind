@@ -1,7 +1,8 @@
 ---
 id: 015
 title: --dry-run projection + run_manifest.json metrics + §20 health checks + reject histograms
-status: ready-for-agent
+status: CLOSED (2026-09-11)
+commit: 36777a3
 depends_on: [011]
 spec: ../spec.md
 spec_sections: ["9.5", "17", "20", "US-11", "US-13", "US-26"]
@@ -29,17 +30,22 @@ spec_sections: ["9.5", "17", "20", "US-11", "US-13", "US-26"]
 
 **Blocked by:** 011.
 
-**Status:** ready-for-agent
+**Status:** CLOSED (2026-09-11)
 
-- [ ] `--dry-run` issues zero teacher calls and writes `dry_run_report.json` with projected
+- [x] `--dry-run` issues zero teacher calls and writes `dry_run_report.json` with projected
       accepts + reject-reason histogram
-- [ ] `run_manifest.json` splits counts by `status` and by `failure_code`, `indeterminate`
+- [x] `run_manifest.json` splits counts by `status` and by `failure_code`, `indeterminate`
       a separate bucket from `fail`
-- [ ] the `versions` block is present and matches the per-record `meta` versions
-- [ ] `serialization_success_rate`, `teacher_completion_rate`, `teacher_pass_rate` are
+- [x] the `versions` block is present and matches the per-record `meta` versions
+- [x] `serialization_success_rate`, `teacher_completion_rate`, `teacher_pass_rate` are
       computed and match a hand-count on a scripted run
-- [ ] `indeterminate_rate` is a ratio only when `attempted_task_ids ≥ 40`, else raw counts
+- [x] `indeterminate_rate` is a ratio only when `attempted_task_ids ≥ 40`, else raw counts
       with a note
-- [ ] `family_mix` shows target vs actual per family
-- [ ] the reject-histogram shape check flags a synthetic run with an inflated
+- [x] `family_mix` shows target vs actual per family
+- [x] the reject-histogram shape check flags a synthetic run with an inflated
       `gate.draft_invalid` share
+
+## Closure notes
+
+- Health flags live on `run_manifest.json` (`health.reject_histogram_ok`); they do not
+  abort the run. `catalog_sha_match` remains the preflight hard gate.
