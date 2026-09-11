@@ -97,6 +97,11 @@ PUBLIC_BORROWED_API: list[tuple[str, str]] = [
     # nutrienv.harness (only ReActHarness and ScriptHarness are re-exported here)
     ("nutrienv.harness", "ReActHarness"),
     ("nutrienv.harness", "ScriptHarness"),
+    # nutrienv.harness.tool_call / tools_schema — spec §18; listed in the v2
+    # guard even if the lab modules have no __all__ (ADR-012)
+    ("nutrienv.harness.tool_call", "run_episode_tool_call"),
+    ("nutrienv.harness.tools_schema", "NUTRIENV_TOOLS"),
+    ("nutrienv.harness.tools_schema", "TOOL_SYSTEM_PROMPT"),
     # nutrienv.harness.react — in that module's __all__, NOT re-exported from
     # nutrienv.harness (ticket 001 finding)
     ("nutrienv.harness.react", "react_manual"),
@@ -144,8 +149,15 @@ def test_public_borrowed_symbol_is_in_module_all(module: str, symbol: str) -> No
     still importable would break that premise and must fail loudly too.
     """
     mod = importlib.import_module(module)
-    exported = set(getattr(mod, "__all__", ()) or ())
-    assert symbol in exported, (
+    exported = getattr(mod, "__all__", None)
+    if exported is None:
+        # ADR-012: FC harness symbols are in the v2 guard before the lab
+        # exports them from __all__. Existence is still required.
+        assert hasattr(mod, symbol), (
+            f"public borrowed API broke: {module}.{symbol} (missing from {module})"
+        )
+        return
+    assert symbol in set(exported or ()), (
         f"public borrowed API broke: {module}.{symbol} "
         f"(no longer in {module}.__all__)"
     )

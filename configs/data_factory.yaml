@@ -11,22 +11,24 @@
 #   provisional — over_generate_x, max_intents, usd_budget (re-pinned by tickets
 #     012/013/020 before the production run).
 #
-# nutrienv_rev is single-sourced from the pin block below (byte-unchanged since
-# ticket 001); the loader exposes it as DataFactoryConfig.nutrienv_rev. Keep the
-# rev the FIRST 40-hex string in this file — CI resolves the pin from it.
+# nutrienv_rev is single-sourced from the pin block below (ticket 023 lab pin);
+# the loader exposes it as DataFactoryConfig.nutrienv_rev. Keep the rev the
+# FIRST 40-hex string in this file — CI resolves the pin from it.
 
-# NutriEnv (../nutri-env) is consumed read-only (ADR-012), pinned to an exact commit.
-# The smoke test asserts the installed source tree's git HEAD equals this value.
+# NutriEnv (../nutri-env-lab) is consumed read-only (ADR-012), pinned to an exact
+# commit. The smoke test asserts the installed source tree's git HEAD equals this
+# value. The older ../nutri-env@203d807 pin is v1 / factory-history.
 nutrienv:
   repo: "https://github.com/SnackJJ/NutriEnv"
-  rev: "203d807b19953a86b5486303ba6f7dd3b9cf7bb6"     # nutrienv_rev
-  install: "uv pip install -e ../nutri-env --config-settings editable_mode=strict"
+  rev: "0ee68eaa6c246e8079915761c95fc986c53d4979"     # nutrienv_rev
+  install: "uv pip install -e ../nutri-env-lab --config-settings editable_mode=strict"
   note: >
     Default (compat) editable / wheel / git+ installs drop nutrienv/env/ because
-    nutri-env's .gitignore has a bare `env/` line that hatchling honours. Use strict
+    the lab's .gitignore has a bare `env/` line that hatchling honours. Use strict
     PEP 660 editable mode (redirects to the source tree). If a clean wheel is ever
-    needed, nutri-env must fix its packaging upstream (anchor the ignore as `/env/`,
-    or add `[tool.hatch.build] artifacts = ["src/nutrienv/env/**"]`).
+    needed, packaging must be fixed upstream (anchor the ignore as `/env/`,
+    or add `[tool.hatch.build] artifacts = ["src/nutrienv/env/**"]`). NutriMind
+    never patches the lab tree.
 
 target: sft                      # sft | rlvr | eval | all (spec §7)
 

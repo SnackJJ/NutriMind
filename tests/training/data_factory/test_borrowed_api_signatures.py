@@ -1,6 +1,6 @@
 """Ticket 016 — compatibility guard (Seam 5), part 2: pinned signatures.
 
-Baseline captured at nutrienv rev 203d807b19953a86b5486303ba6f7dd3b9cf7bb6
+Baseline captured at nutrienv rev 0ee68eaa6c246e8079915761c95fc986c53d4979
 (the pin in `configs/data_factory.yaml`; the installed-rev == pin assertion
 lives in `test_nutrienv_smoke.py`, which CI runs alongside this file). An
 upstream change that breaks any borrowed signature must fail CI loudly.
@@ -56,7 +56,7 @@ from tests.training.data_factory.test_imports import (
 pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 
 # The rev the baseline below was captured from (configs/data_factory.yaml pin).
-NUTRIENV_BASELINE_REV = "203d807b19953a86b5486303ba6f7dd3b9cf7bb6"
+NUTRIENV_BASELINE_REV = "0ee68eaa6c246e8079915761c95fc986c53d4979"
 
 # One pinned string per (module, symbol) — keys MUST equal PUBLIC_BORROWED_API
 # exactly (asserted by test_two_class_rule.py). Order mirrors that table.
@@ -106,6 +106,9 @@ EXPECTED_SIGNATURES: dict[tuple[str, str], str] = {
     ("nutrienv.world.catalog_store", "load_catalog"): "(path: 'Path | str | None' = None) -> 'FoodCatalog'",
     ("nutrienv.harness", "ReActHarness"): "(*, api_key: 'str | None' = None, base_url: 'str | None' = None, model: 'str' = 'deepseek-chat', timeout: 'float' = 60.0, leak_oracle: 'bool' = False, max_steps: 'int' = 12, extra_body: 'dict | None' = None, version: 'str' = 'v0', context_limit: 'int | None' = None) -> 'None'",
     ("nutrienv.harness", "ScriptHarness"): "()",
+    ("nutrienv.harness.tool_call", "run_episode_tool_call"): "(task, harness_spec: 'dict[str, Any]', catalog: 'Any', step_telemetry_cls: 'Any', task_telemetry_cls: 'Any') -> 'Any'",
+    ("nutrienv.harness.tools_schema", "NUTRIENV_TOOLS"): "<constant:list>",
+    ("nutrienv.harness.tools_schema", "TOOL_SYSTEM_PROMPT"): "<constant:str>",
     ("nutrienv.harness.react", "react_manual"): "(version: 'str') -> 'str'",
     ("nutrienv.harness.react", "context_messages"): "(messages: 'list[dict]', *, limit: 'int | None' = 12) -> 'list[dict]'",
     ("nutrienv.harness.runner", "DEFAULT_MAX_STEPS"): "<constant:int>",
