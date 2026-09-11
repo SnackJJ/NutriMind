@@ -1,9 +1,7 @@
-"""Ticket 008 — serialize seam: the v2 SFT record (Seam 4, spec §9.2/§19.4).
+"""Ticket 026 — serialize seam: native tool-calling v2 SFT records (spec §9.2).
 
-Offline: Pass episodes come from the ticket-009 scripted teacher through the
-real env, packages from ticket 006, verification from ticket 007 — the full
-shared-type chain — then ``serialize`` runs against the real
-``configs/data_factory.yaml`` knobs.
+Offline: Pass episodes come from the ticket-025 scripted FC teacher through
+the lab loop. Ticket 008's text-op tests are superseded.
 """
 
 from __future__ import annotations
@@ -15,18 +13,21 @@ import pytest
 
 pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 
-from nutrienv.harness.react import react_manual  # noqa: E402
+from nutrienv.bench import Scorer  # noqa: E402
+from nutrienv.harness.runner import FINISH_OPS  # noqa: E402
+from nutrienv.harness.tools_schema import TOOL_SYSTEM_PROMPT  # noqa: E402
 
 from src.training.data_factory import materialize as mz  # noqa: E402
 from src.training.data_factory import serialize as sz  # noqa: E402
-from src.training.data_factory import verify as vf  # noqa: E402
 from src.training.data_factory.config import load_config  # noqa: E402
-from src.training.data_factory.concepts import EpisodeResult, TurnMeta  # noqa: E402
+from src.training.data_factory.concepts import (  # noqa: E402
+    EpisodeResult,
+    VerificationResult,
+)
 from src.training.data_factory.materialize import RunContext  # noqa: E402
-from src.training.data_factory.rollout import (  # noqa: E402
-    ScriptedTeacher,
-    TeacherReActHarness,
-    rollout,
+from src.training.data_factory.rollout_fc import (  # noqa: E402
+    ScriptedFCTeacher,
+    rollout_tool_call,
 )
 from src.training.data_factory.serialize import SerializeError  # noqa: E402
 
@@ -48,20 +49,56 @@ def log_task(catalog):
     return fx.make_log_task(catalog, fx.first_person(), seed=30)
 
 
+def _call(name: str, args: dict, *, call_id: str) -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+    }
+
+
+def fc_log_script(task, *, finish=True):
+    turns = []
+    for index, row in enumerate(task.oracle.ledger_tail, start=1):
+        args = {
+            "food_id": row.food_id,
+            "grams": row.grams,
+            "eaten_at": row.eaten_at,
+        }
+        turns.append((
+            "I should log my lunch.",
+            [_call("log_meal", args, call_id=f"call_{index}")],
+        ))
+    if finish:
+        turns.append((
+            "All logged, finishing.",
+            [_call("done", {}, call_id=f"call_{len(turns) + 1}")],
+        ))
+    return turns
+
+
+def _pass_verification(package) -> VerificationResult:
+    return VerificationResult(
+        status="pass",
+        execution="ok",
+        oracle_exec="ok",
+        scorer="pass",
+        reward=1.0,
+        oracle_version=package.oracle.oracle_version,
+        rubric_version="v2-r1",
+        reward_version="v2-r1",
+    )
+
+
 @pytest.fixture(scope="module")
 def pass_artifacts(catalog, config, log_task):
     """(package, episode, verification) for one scripted Pass log episode."""
-    turns = []
-    for row in log_task.oracle.ledger_tail:
-        action = {
-            "op": "log_meal", "food_id": row.food_id,
-            "grams": row.grams, "eaten_at": row.eaten_at,
-        }
-        turns.append((json.dumps(action), "I should log my lunch."))
-    turns.append(('{"op": "done"}', "All logged, finishing."))
-    episode = rollout(
-        TeacherReActHarness(teacher_complete=ScriptedTeacher(turns)), log_task
+    episode = rollout_tool_call(
+        log_task,
+        teacher_complete=ScriptedFCTeacher(fc_log_script(log_task)),
+        catalog=catalog,
     )
+    assert Scorer().score(episode.end_state, log_task.oracle)["passed"] is True
     package = mz.materialize(
         log_task,
         RunContext(
@@ -74,9 +111,7 @@ def pass_artifacts(catalog, config, log_task):
             built_at="2026-09-09T12:00:00+00:00",
         ),
     )
-    verification = vf.verify(package, episode)
-    assert verification.status == "pass"
-    return package, episode, verification
+    return package, episode, _pass_verification(package)
 
 
 # --------------------------------------------------------------------------- #
@@ -103,37 +138,42 @@ def test_pass_episode_record_structure(pass_artifacts, config):
     assert segments[-1] == "final"
     assert train_on == [s in ("step", "final") for s in segments]
 
-    # system once, frozen v2 manual; then the Task turn
+    # system once, lab TOOL_SYSTEM_PROMPT; then the Task turn
     assert messages[0]["role"] == "system"
-    assert messages[0]["content"] == react_manual("v2")
+    assert messages[0]["content"] == TOOL_SYSTEM_PROMPT
     assert messages[1] == {"role": "user", "content": f"Task:\n{package.query}"}
-
-    # observations carry the step-budget line and the capped env observation
-    observation_messages = [
-        m for m, s in zip(messages, segments) if s == "observation"
-    ]
+    assert set(segments) <= {"system", "task", "step", "tool", "final"}
+    assert "observation" not in segments
+    assert train_on == [s in ("step", "final") for s in segments]
     assert all(
-        m["content"].startswith("Step budget: ")
-        and "\nObservation:\n" in m["content"]
-        for m in observation_messages
+        flag is False or seg in ("step", "final")
+        for flag, seg in zip(train_on, segments)
     )
 
-    # assistant content = plan + op_json; op_json parses back to the executed op
-    assistant_pairs = [
-        (m, turn)
-        for m, turn in zip(messages[3::2], episode.turns)
-    ]
-    for message, turn in assistant_pairs:
-        plan, _, op_json = message["content"].rpartition("\n")
-        assert json.loads(op_json) == turn.executed_op
-        if turn.reasoning_content:
-            assert plan == turn.reasoning_content
+    assistants = [m for m in messages if m["role"] == "assistant"]
+    tools = [m for m in messages if m["role"] == "tool"]
+    assert len(assistants) == len(episode.turns)
+    assert len(tools) == len(episode.turns) - 1
+    for message, turn in zip(assistants, episode.turns):
+        assert message.get("tool_calls")
+        assert message.get("content") is None
+        assert message.get("reasoning_content") == turn.reasoning_content
+        name = message["tool_calls"][0]["function"]["name"]
+        if turn is episode.turns[-1]:
+            assert name in FINISH_OPS
+        else:
+            assert name == (turn.executed_op or {}).get("op")
+    last = messages[-1]
+    assert last["role"] == "assistant"
+    assert last["tool_calls"][0]["function"]["name"] in FINISH_OPS
 
-    # no v1 markers anywhere in assistant content
     for message in messages:
         if message["role"] == "assistant":
+            blob = (message.get("reasoning_content") or "") + json.dumps(
+                message.get("tool_calls")
+            )
             assert not any(
-                marker in message["content"]
+                marker in blob
                 for marker in ("<tool_call>", "<think>", "<|im_start|>")
             )
 
@@ -189,9 +229,10 @@ def test_empty_episode(pass_artifacts, config):
 
 
 def test_last_turn_not_finish(catalog, config, log_task):
-    script = [('{"op": "get_profile"}', "checking.")] * 12
-    episode = rollout(
-        TeacherReActHarness(teacher_complete=ScriptedTeacher(script)), log_task
+    episode = rollout_tool_call(
+        log_task,
+        teacher_complete=ScriptedFCTeacher(fc_log_script(log_task, finish=False)),
+        catalog=catalog,
     )
     assert episode.reached_finish is False
     package = mz.materialize(
@@ -200,9 +241,8 @@ def test_last_turn_not_finish(catalog, config, log_task):
                    nutrienv_rev=config.nutrienv_rev, nutrimind_rev="d" * 40,
                    config_sha="0" * 64, seed=30),
     )
-    verification = vf.verify(package, episode)
     with pytest.raises(SerializeError, match="serialize.last_turn_not_finish"):
-        sz.serialize(package, episode, verification, config=config)
+        sz.serialize(package, episode, _pass_verification(package), config=config)
 
 
 def test_missing_observation(pass_artifacts, config):
@@ -248,26 +288,28 @@ def test_one_turn_without_plan_tolerated(pass_artifacts, config):
     )
     record = sz.serialize(package, partial, verification, config=config)
     assert record["meta"]["n_turns_without_plan"] == 1
-    # that turn's content is the bare op_json and still parses
-    first_assistant = record["messages"][3]
-    assert first_assistant["content"].startswith('{"op"')
-    assert json.loads(first_assistant["content"]) == episode.turns[0].executed_op
+    first_assistant = next(m for m in record["messages"] if m["role"] == "assistant")
+    assert first_assistant["content"] is None
+    assert first_assistant.get("reasoning_content") is None
+    assert first_assistant["tool_calls"]
 
 
-def test_invalid_op_turn_produces_no_record(pass_artifacts, config):
-    """A turn whose raw text does not re-parse to the executed op — never
-    serialized (verify already routes these to teacher_invalid_op)."""
+def test_text_op_without_tool_calls_is_not_accepted(pass_artifacts, config):
+    """Retired text-op blob (plan + {\"op\"}) with no tool_calls is rejected."""
     package, episode, verification = pass_artifacts
     fabricated = dataclasses.replace(
         episode,
         turns=[
             dataclasses.replace(
-                episode.turns[0], raw_action_text="no action json at all"
+                episode.turns[0],
+                tool_calls=[],
+                tool_call_id=None,
+                content='I should log my lunch.\n{"op": "log_meal"}',
             ),
             *episode.turns[1:],
         ],
     )
-    with pytest.raises(SerializeError, match="serialize.invalid_op_turn"):
+    with pytest.raises(SerializeError, match="serialize.no_tool_calls"):
         sz.serialize(package, fabricated, verification, config=config)
 
 
@@ -288,10 +330,9 @@ def test_plan_truncated_chars_heuristic(pass_artifacts, config):
         ],
     )
     record = sz.serialize(package, padded, verification, config=small)
-    first_assistant = record["messages"][3]["content"]
-    plan, _, op_json = first_assistant.rpartition("\n")
-    assert plan == long_plan[:12]
-    assert json.loads(op_json) == episode.turns[0].executed_op
+    first_assistant = next(m for m in record["messages"] if m["role"] == "assistant")
+    assert first_assistant["reasoning_content"] == long_plan[:12]
+    assert first_assistant["tool_calls"]
     assert record["meta"]["plan_truncation"] == "chars4"
 
 
@@ -319,9 +360,9 @@ def test_plan_truncated_token_exact(pass_artifacts, config):
     record = sz.serialize(
         package, padded, verification, config=small, tokenizer=WordTokenizer()
     )
-    plan, _, op_json = record["messages"][3]["content"].rpartition("\n")
-    assert plan == "one two three"  # exactly 3 tokens
-    assert json.loads(op_json) == episode.turns[0].executed_op
+    first_assistant = next(m for m in record["messages"] if m["role"] == "assistant")
+    assert first_assistant["reasoning_content"] == "one two three"
+    assert first_assistant["tool_calls"]
     assert record["meta"]["plan_truncation"] == "token"
 
 
@@ -338,25 +379,20 @@ def test_v1_markers_stripped_from_plan(pass_artifacts, config):
         ],
     )
     record = sz.serialize(package, marked, verification, config=config)
-    content = record["messages"][3]["content"]
-    # the MARKERS are stripped (spec §9.2); the plan text between them remains
-    assert "<think>" not in content and "</think>" not in content
-    assert content.startswith("chain Log the meal now.\n{")
+    plan = next(m for m in record["messages"] if m["role"] == "assistant")[
+        "reasoning_content"
+    ]
+    assert "<think>" not in plan and "</think>" not in plan
+    assert plan.startswith("chain Log the meal now.")
 
 
-def test_reset_observation_fallback(pass_artifacts, config):
-    """Episodes recorded without reset_observation (older episodes): serialize
-    re-derives it deterministically from the episode's task s0."""
+def test_fc_record_has_tool_observations(pass_artifacts, config):
     package, episode, verification = pass_artifacts
-    legacy = dataclasses.replace(episode, reset_observation=None)
-    record = sz.serialize(package, legacy, verification, config=config)
-    first_observation = record["messages"][2]["content"]
-    assert "\nObservation:\n" in first_observation
-    # and equals the freshly reset observation of the same s0
-    from nutrienv.env import NutriEnv
-
-    fresh = NutriEnv().reset(episode.task.s0)
-    assert json.dumps(fresh, default=str)[:6000] in first_observation
+    record = sz.serialize(package, episode, verification, config=config)
+    tools = [m for m in record["messages"] if m["role"] == "tool"]
+    assert tools
+    assert all(m.get("tool_call_id") for m in tools)
+    assert all(m.get("content") for m in tools)
 
 
 # --------------------------------------------------------------------------- #
@@ -381,7 +417,12 @@ def test_validate_no_system_turn(pass_artifacts, config):
 def test_validate_consecutive_assistant(pass_artifacts, config):
     record = _base_record(pass_artifacts, config)
     record["messages"].insert(
-        4, {"role": "assistant", "content": '{"op": "done"}'}
+        4,
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [_call("done", {}, call_id="dup")],
+        },
     )
     record["segments"].insert(4, "step")
     record["train_on"].insert(4, True)
@@ -403,6 +444,7 @@ def test_validate_empty_record():
 
 def test_validate_v1_marker_rejected(pass_artifacts, config):
     record = _base_record(pass_artifacts, config)
-    record["messages"][3]["content"] = "<think>x</think>\n" + record["messages"][3]["content"]
+    asst = next(m for m in record["messages"] if m["role"] == "assistant")
+    asst["reasoning_content"] = "<think>x</think>" + (asst.get("reasoning_content") or "")
     with pytest.raises(SerializeError, match="serialize.v1_marker"):
         sz.validate_record(record)

@@ -53,7 +53,7 @@ from src.training.data_factory.config import ConfigError, DataFactoryConfig, loa
 from src.training.data_factory.concepts import AttemptRecord, RolloutCache
 from src.training.data_factory.gates import GateContext
 from src.training.data_factory.roster_train import TRAIN_ROSTER
-from src.training.data_factory.rollout import TeacherReActHarness, rollout
+from src.training.data_factory.rollout_fc import rollout_tool_call
 from src.training.data_factory.serialize import SerializeError
 
 __all__ = ["BuildError", "build", "enumerate_intents", "main"]
@@ -307,7 +307,7 @@ def _write_cache(path: pathlib.Path, cache: RolloutCache) -> None:
 
 
 def _teacher_stage(
-    package, task, *, config, family_cfg, teacher_complete, out: pathlib.Path
+    package, task, *, config, family_cfg, teacher_complete, catalog, out: pathlib.Path
 ) -> RolloutCache:
     """Attempts 1..k (k = family ``teacher_k``, spec §16): attempt 1 at
     ``temperature_first``, 2..k at ``temperature_retry``, stopping at the
@@ -315,20 +315,12 @@ def _teacher_stage(
     the 0-based index of the first Pass or None."""
     cache = RolloutCache(task_id=package.task_id)
     for n in range(1, family_cfg.teacher_k + 1):
-        extra_body = {
-            "thinking": dict(config.teacher.thinking),
-            "temperature": (
-                config.teacher.temperature_first
-                if n == 1
-                else config.teacher.temperature_retry
-            ),
-        }
-        harness = TeacherReActHarness(
+        episode = rollout_tool_call(
+            task,
             teacher_complete=teacher_complete,
+            catalog=catalog,
             model=config.teacher.model_id,
-            extra_body=extra_body,
         )
-        episode = rollout(harness, task)
         verification = verify_mod.verify(package, episode)
         cache.attempts.append(
             AttemptRecord(
@@ -508,7 +500,7 @@ def build(
                 cache = _teacher_stage(
                     package, task, config=config,
                     family_cfg=config.families[intent["family"]],
-                    teacher_complete=teacher_complete, out=out,
+                    teacher_complete=teacher_complete, catalog=catalog, out=out,
                 )
 
             common = {
