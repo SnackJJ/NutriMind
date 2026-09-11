@@ -90,16 +90,18 @@ class GateResult:
 
 @dataclasses.dataclass
 class TurnMeta:
-    """One ReAct turn, as recorded by v2's instrumented harness (spec §12).
+    """One assistant turn (spec §12 / ticket 024).
 
-    ``raw_action_text`` is the assistant text whose action was executed;
-    ``executed_op`` the action ``NutriEnv.step`` actually received. ``parse_status``
-    / ``fallback_used`` / ``fallback_reason`` come from v2's **own** re-parse of
-    ``raw_action_text`` — never from ``nutrienv.harness.react._parse_action``
-    internals. ``content`` / ``reasoning_content`` / ``finish_reason`` / ``usage``
-    are the teacher client's completion payload for the turn (spec §7);
-    ``observation`` is the env observation this turn produced (the next ``user``
-    message in the serialized trajectory, spec §9.2).
+    Native tool calling (the v2 protocol): ``tool_calls`` is the assistant
+    payload and ``tool_call_id`` is the id used on the following ``tool``
+    message. ``executed_op`` is what ``NutriEnv.step`` received, or ``None``
+    if nothing was stepped (including a turn with no ``tool_calls``).
+
+    ReAct-only fields (``raw_action_text`` / ``parse_status`` /
+    ``fallback_used`` / ``fallback_reason``) stay unused on the FC path
+    (null/false). They are not a second protocol. ``content`` /
+    ``reasoning_content`` / ``finish_reason`` / ``usage`` are the completion
+    payload; ``observation`` is the env observation this turn produced.
     """
 
     raw_action_text: str | None = None
@@ -112,6 +114,8 @@ class TurnMeta:
     finish_reason: str | None = None
     usage: dict | None = None  # {prompt_tokens, completion_tokens, reasoning_tokens}
     observation: str | None = None
+    tool_calls: list | None = None
+    tool_call_id: str | None = None
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -129,6 +133,8 @@ class TurnMeta:
             finish_reason=data.get("finish_reason"),
             usage=data.get("usage"),
             observation=data.get("observation"),
+            tool_calls=data.get("tool_calls"),
+            tool_call_id=data.get("tool_call_id"),
         )
 
 
