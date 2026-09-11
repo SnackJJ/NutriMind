@@ -131,6 +131,16 @@ def derive_execution(episode: EpisodeResult) -> str:
     if not episode.reached_finish:
         return "no_finish"
     for turn in episode.turns:
+        if turn.tool_calls and not turn.raw_action_text:
+            func = (turn.tool_calls[0].get("function") or {})
+            name = func.get("name")
+            if not isinstance(name, str) or not name:
+                return "invalid_op"
+            if name in FINISH_OPS:
+                continue
+            if turn.executed_op is None or turn.executed_op.get("op") != name:
+                return "invalid_op"
+            continue
         action, status = parse_action_text(turn.raw_action_text)
         if action is None:
             return "invalid_op"

@@ -1,27 +1,13 @@
-"""serialize — Seam 4: the pure v2 SFT record writer (spec §9.2 / §11 / §19.4).
+"""serialize — Seam 4: the pure v2 SFT record writer (spec §9.2 / ticket 026).
 
-``serialize(task_package, episode, verification, *, config, ...)`` builds the
-OpenAI-shaped record: ``system`` (the frozen ``react_manual("v2")``) once, the
-``Task:`` user turn, then strictly alternating observation / assistant turns,
-ending in an assistant FINISH turn. Parallel ``segments`` / ``train_on``
-arrays; ``train_on`` is true exactly on ``step`` / ``final`` messages for
-Batch 1. ``assistant.content = f"{plan}\\n{op_json}"`` where ``plan`` is the
-teacher ``reasoning_content`` truncated to ``plan_max_tokens`` (token-exact
-with an injected tokenizer, else a ~4 chars/token heuristic — the mode is
-recorded in ``meta.plan_truncation``) and ``op_json`` the action actually
-executed against ``NutriEnv``.
+``serialize`` writes ADR-014 native tool calling: ``system`` is
+``TOOL_SYSTEM_PROMPT``, assistant turns carry ``tool_calls`` plus truncated
+``reasoning_content``, observations are ``role=tool`` keyed by
+``tool_call_id``. Ticket 008's text-op serializer stays CLOSED; this is the
+production path.
 
-No token-level ``loss_mask`` is stored — the v2 loader (ticket 019) derives it
-from ``train_on``. ``validate_record`` (also exported) is the loader-mirror
-structural check serialize runs on its own output; ticket 019 can reuse it.
-
-Failures raise :class:`SerializeError` with a spec §11 slug
-(``serialize.empty_episode`` / ``no_system_turn`` / ``consecutive_assistant`` /
-``missing_observation`` / ``turn_count_mismatch`` / ``last_turn_not_finish`` /
-``too_long`` / ``no_plan_any_turn``); build routes them to
-``rejects/serialize.jsonl`` as indeterminate. One turn without a plan is
-tolerated (``plan=""`` + ``meta.n_turns_without_plan``); every turn without a
-plan is ``no_plan_any_turn``.
+No token-level ``loss_mask`` is stored — the v2 loader (ticket 028) derives it
+from ``train_on``. ``validate_record`` is the loader-mirror structural check.
 
 Stage module: imports nutrienv at module level (allowed by spec §18).
 """
@@ -30,16 +16,15 @@ from __future__ import annotations
 
 import json
 
-from nutrienv.env import NutriEnv
-from nutrienv.harness.react import react_manual
-from nutrienv.harness.runner import DEFAULT_MAX_STEPS, FAMILY_MAX_STEPS, FINISH_OPS
+from nutrienv.harness.runner import FINISH_OPS
+from nutrienv.harness.tools_schema import TOOL_SYSTEM_PROMPT
 
 from src.training.data_factory.concepts import (
     EpisodeResult,
     TaskPackage,
+    TurnMeta,
     VerificationResult,
 )
-from src.training.data_factory.verify import parse_action_text
 
 __all__ = ["SerializeError", "serialize", "validate_record"]
 
@@ -86,20 +71,42 @@ def _sanitize_plan(plan: str) -> str:
     return plan
 
 
-def _step_budget(max_steps: int, turn_index: int) -> str:
-    remaining = max(0, max_steps - turn_index)
-    return f"Step budget: {remaining} action(s) remaining, including this turn."
+def _tool_name(turn: TurnMeta) -> str | None:
+    calls = turn.tool_calls or []
+    if not calls:
+        return None
+    func = calls[0].get("function") or {}
+    name = func.get("name")
+    return name if isinstance(name, str) else None
 
 
-def _reset_observation(episode: EpisodeResult) -> str:
-    """The first user message's observation. Prefer the recorded one; fall
-    back to re-deriving from the episode's task s0 (deterministic)."""
-    if episode.reset_observation:
-        return episode.reset_observation
-    if episode.task is None:
-        raise SerializeError("serialize.missing_observation", "reset observation")
-    observation = NutriEnv().reset(episode.task.s0)
-    return json.dumps(observation, default=str)[:6000]
+def _tool_call_id(turn: TurnMeta) -> str | None:
+    if turn.tool_call_id:
+        return turn.tool_call_id
+    calls = turn.tool_calls or []
+    if calls and isinstance(calls[0].get("id"), str):
+        return calls[0]["id"]
+    return None
+
+
+def _is_text_op_blob(content: str | None) -> bool:
+    if not content:
+        return False
+    stripped = content.strip()
+    if '{"op"' in stripped or "\n{\"op\"" in stripped:
+        return True
+    return stripped.startswith("{") and '"op"' in stripped
+
+
+def _message_text(message: dict) -> str:
+    parts: list[str] = []
+    if message.get("content"):
+        parts.append(str(message["content"]))
+    if message.get("reasoning_content"):
+        parts.append(str(message["reasoning_content"]))
+    if message.get("tool_calls"):
+        parts.append(json.dumps(message["tool_calls"], ensure_ascii=False))
+    return "\n".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -127,23 +134,31 @@ def validate_record(record: dict) -> None:
             raise SerializeError("serialize.consecutive_assistant")
     if not (len(messages) == len(segments) == len(train_on)):
         raise SerializeError("serialize.turn_count_mismatch")
-    # after system (+task), user/assistant alternate strictly
-    if len(messages) > 2:
-        for index in range(2, len(messages)):
-            expected = "user" if index % 2 == 0 else "assistant"
-            if messages[index]["role"] != expected:
-                raise SerializeError("serialize.turn_count_mismatch")
     if messages[-1]["role"] != "assistant" or segments[-1] != "final":
+        raise SerializeError("serialize.last_turn_not_finish")
+    last_calls = messages[-1].get("tool_calls") or []
+    if not last_calls:
+        raise SerializeError("serialize.last_turn_not_finish")
+    last_name = (last_calls[0].get("function") or {}).get("name")
+    if last_name not in FINISH_OPS:
         raise SerializeError("serialize.last_turn_not_finish")
     for index, (segment, flag) in enumerate(zip(segments, train_on)):
         if flag != (segment in ("step", "final")):
             raise SerializeError("serialize.turn_count_mismatch")
+        if segment == "tool" and messages[index].get("role") != "tool":
+            raise SerializeError("serialize.turn_count_mismatch")
+        if segment in ("step", "final") and messages[index].get("role") != "assistant":
+            raise SerializeError("serialize.turn_count_mismatch")
     for message in messages:
-        if message["role"] == "assistant":
-            if any(marker in message["content"] for marker in _V1_MARKERS):
-                # cannot happen from serialize() (plans are sanitized); this is
-                # the loader-mirror invariant (spec §9.2 v1-record rejection)
-                raise SerializeError("serialize.v1_marker")
+        if message["role"] != "assistant":
+            continue
+        if not message.get("tool_calls"):
+            raise SerializeError("serialize.no_tool_calls")
+        if _is_text_op_blob(message.get("content")):
+            raise SerializeError("serialize.no_tool_calls", "text-op blob")
+        blob = _message_text(message)
+        if any(marker in blob for marker in _V1_MARKERS):
+            raise SerializeError("serialize.v1_marker")
 
 
 # --------------------------------------------------------------------------- #
@@ -168,24 +183,16 @@ def serialize(
     """
     if not episode.turns:
         raise SerializeError("serialize.empty_episode")
-    if not episode.reached_finish or (
-        episode.turns[-1].executed_op or {}
-    ).get("op") not in FINISH_OPS:
+    if not episode.reached_finish or _tool_name(episode.turns[-1]) not in FINISH_OPS:
         raise SerializeError("serialize.last_turn_not_finish")
     for index, turn in enumerate(episode.turns):
-        parsed, _status = parse_action_text(turn.raw_action_text)
-        if parsed != turn.executed_op:
-            # defensive: verify() already routes these to teacher_invalid_op,
-            # so build never sends a non-genuine episode here (spec §12)
-            raise SerializeError(
-                "serialize.invalid_op_turn", f"turn {index} not a genuine parse"
-            )
-
-    max_steps = FAMILY_MAX_STEPS.get(task_package.family, DEFAULT_MAX_STEPS)
-    reset_observation = _reset_observation(episode)
+        if not turn.tool_calls:
+            raise SerializeError("serialize.no_tool_calls", f"turn {index}")
+        if _is_text_op_blob(turn.content) and not turn.tool_calls:
+            raise SerializeError("serialize.no_tool_calls", f"turn {index} text-op")
 
     messages: list[dict] = [
-        {"role": "system", "content": react_manual("v2")},
+        {"role": "system", "content": TOOL_SYSTEM_PROMPT},
         {"role": "user", "content": f"Task:\n{task_package.query}"},
     ]
     segments = ["system", "task"]
@@ -198,37 +205,40 @@ def serialize(
         if isinstance(task, dict)
         else getattr(task, "persona", None)
     )  # dict-backed episode: a cache round-trip (spec §17) has no live Task
+    last_index = len(episode.turns) - 1
     for index, turn in enumerate(episode.turns):
-        if index == 0:
-            observation = reset_observation
-        else:
-            observation = episode.turns[index - 1].observation
-        if not observation:
-            raise SerializeError(
-                "serialize.missing_observation", f"turn {index}"
-            )
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"{_step_budget(max_steps, index)}\nObservation:\n{observation}"
-                ),
-            }
-        )
-        segments.append("observation")
-        train_on.append(False)
-
         plan = _sanitize_plan(turn.reasoning_content or "")
         if not plan:
             turns_without_plan += 1
         plan = _truncate_plan(
             plan, plan_max_tokens=config.plan_max_tokens, tokenizer=tokenizer
         )
-        op_json = json.dumps(turn.executed_op)
-        content = f"{plan}\n{op_json}" if plan else op_json
-        messages.append({"role": "assistant", "content": content})
-        segments.append("final" if index == len(episode.turns) - 1 else "step")
+        is_final = index == last_index
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": plan or None,
+            "tool_calls": list(turn.tool_calls),
+        })
+        segments.append("final" if is_final else "step")
         train_on.append(True)
+        if is_final:
+            continue
+        observation = turn.observation
+        if not observation:
+            raise SerializeError(
+                "serialize.missing_observation", f"turn {index}"
+            )
+        call_id = _tool_call_id(turn)
+        if not call_id:
+            raise SerializeError("serialize.no_tool_calls", f"turn {index} missing id")
+        messages.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": observation,
+        })
+        segments.append("tool")
+        train_on.append(False)
 
     if turns_without_plan == len(episode.turns):
         raise SerializeError("serialize.no_plan_any_turn")
@@ -276,7 +286,7 @@ def serialize(
         },
     }
 
-    record_tokens = sum(_token_count(m["content"], tokenizer) for m in messages)
+    record_tokens = sum(_token_count(_message_text(m), tokenizer) for m in messages)
     if record_tokens > config.max_seq_tokens:
         raise SerializeError(
             "serialize.too_long", f"{record_tokens} > {config.max_seq_tokens}"

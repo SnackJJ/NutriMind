@@ -10,6 +10,7 @@ pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 
 from nutrienv.bench import Scorer  # noqa: E402
 from nutrienv.harness.runner import FINISH_OPS  # noqa: E402
+from nutrienv.harness.tool_call import run_episode_tool_call as lab_loop  # noqa: E402
 
 from src.training.data_factory.rollout_fc import (  # noqa: E402
     NUTRIENV_TOOLS,

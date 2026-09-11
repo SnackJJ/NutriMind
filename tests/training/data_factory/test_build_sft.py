@@ -23,7 +23,7 @@ from src.training.data_factory import author as author_mod  # noqa: E402
 from src.training.data_factory.build import build, enumerate_intents  # noqa: E402
 from src.training.data_factory.config import load_config  # noqa: E402
 from src.training.data_factory.concepts import RolloutCache  # noqa: E402
-from src.training.data_factory.rollout import ScriptedTeacher  # noqa: E402
+from src.training.data_factory.rollout_fc import ScriptedFCTeacher  # noqa: E402
 from src.training.data_factory.synthetic import synth_expander  # noqa: E402
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -62,22 +62,36 @@ def author_all(config, expander):
 
 
 def episode_script(task, *, grams_scale=1.0):
-    """One scripted episode for a log task: the tail rows, then done."""
+    """One scripted FC episode for a log task: the tail rows, then done."""
     turns = []
-    for row in task.oracle.ledger_tail:
-        turns.append(
-            (
-                json.dumps(
-                    {
-                        "op": "log_meal", "food_id": row.food_id,
-                        "grams": round(row.grams * grams_scale, 2),
-                        "eaten_at": row.eaten_at,
-                    }
-                ),
-                "I should log my lunch.",
-            )
-        )
-    turns.append(('{"op": "done"}', "All logged, finishing."))
+    for index, row in enumerate(task.oracle.ledger_tail, start=1):
+        args = {
+            "op": "log_meal",
+            "food_id": row.food_id,
+            "grams": round(row.grams * grams_scale, 2),
+            "eaten_at": row.eaten_at,
+        }
+        # tool arguments omit the env "op" key
+        tool_args = {k: v for k, v in args.items() if k != "op"}
+        turns.append((
+            "I should log my lunch.",
+            [{
+                "id": f"call_{index}",
+                "type": "function",
+                "function": {
+                    "name": "log_meal",
+                    "arguments": json.dumps(tool_args, ensure_ascii=False),
+                },
+            }],
+        ))
+    turns.append((
+        "All logged, finishing.",
+        [{
+            "id": f"call_{len(turns) + 1}",
+            "type": "function",
+            "function": {"name": "done", "arguments": "{}"},
+        }],
+    ))
     return turns
 
 
@@ -107,7 +121,7 @@ def test_scripted_pass_to_train_jsonl(tmp_path, catalog, expander):
     script = teacher_script(tasks, pass_at_attempt=1, teacher_k=2)
     out = tmp_path / "out"
     manifest = build(
-        config, expander=expander, teacher_complete=ScriptedTeacher(script),
+        config, expander=expander, teacher_complete=ScriptedFCTeacher(script),
         output_dir=out,
     )
     assert manifest["status"] == "complete"
@@ -140,7 +154,7 @@ def test_retry_until_pass_then_stop(tmp_path, catalog, expander):
     script = teacher_script(tasks, pass_at_attempt=2, teacher_k=2)
     out = tmp_path / "out"
     manifest = build(
-        config, expander=expander, teacher_complete=ScriptedTeacher(script),
+        config, expander=expander, teacher_complete=ScriptedFCTeacher(script),
         output_dir=out,
     )
     assert manifest["counts"]["accepted"] == 2
@@ -165,9 +179,9 @@ def test_byte_identical_train_jsonl_across_runs(tmp_path, catalog, expander):
     tasks = author_all(config_a, expander)
     script_a = teacher_script(tasks, pass_at_attempt=2, teacher_k=2)
     script_b = teacher_script(tasks, pass_at_attempt=2, teacher_k=2)
-    build(config_a, expander=expander, teacher_complete=ScriptedTeacher(script_a),
+    build(config_a, expander=expander, teacher_complete=ScriptedFCTeacher(script_a),
           output_dir=tmp_path / "a")
-    build(config_b, expander=expander, teacher_complete=ScriptedTeacher(script_b),
+    build(config_b, expander=expander, teacher_complete=ScriptedFCTeacher(script_b),
           output_dir=tmp_path / "b")
     assert (tmp_path / "a" / "sft" / "train.jsonl").read_bytes() == (
         tmp_path / "b" / "sft" / "train.jsonl"
@@ -185,7 +199,7 @@ def test_all_attempts_fail_to_teacher_jsonl(tmp_path, catalog, expander):
     script = teacher_script(tasks, pass_at_attempt=99, teacher_k=2)  # never passes
     out = tmp_path / "out"
     manifest = build(
-        config, expander=expander, teacher_complete=ScriptedTeacher(script),
+        config, expander=expander, teacher_complete=ScriptedFCTeacher(script),
         output_dir=out,
     )
     assert manifest["counts"]["accepted"] == 0
@@ -213,14 +227,21 @@ def test_all_attempts_fail_to_teacher_jsonl(tmp_path, catalog, expander):
 def test_no_finish_to_indeterminate_jsonl(tmp_path, catalog, expander):
     config = sft_config(tmp_path / "out", teacher_k=1)
     tasks = author_all(config, expander)
-    script = [
-        ("no finish: read the profile forever", "checking."),
-    ] * 1  # attempt 1 only; the episode burns the budget without finishing
     # one episode per task: 12 idle reads hit the log step budget
-    script = [('{"op": "get_profile"}', "checking.")] * 12 * len(tasks)
+    script = [
+        (
+            "checking.",
+            [{
+                "id": f"call_{i}",
+                "type": "function",
+                "function": {"name": "get_profile", "arguments": "{}"},
+            }],
+        )
+        for i in range(12 * len(tasks))
+    ]
     out = tmp_path / "out"
     manifest = build(
-        config, expander=expander, teacher_complete=ScriptedTeacher(script),
+        config, expander=expander, teacher_complete=ScriptedFCTeacher(script),
         output_dir=out,
     )
     assert manifest["counts"]["accepted"] == 0
@@ -254,7 +275,7 @@ def test_one_bad_intent_among_good_lands(tmp_path, catalog, expander):
 
     out = tmp_path / "out"
     manifest = build(
-        config, expander=flaky, teacher_complete=ScriptedTeacher(script),
+        config, expander=flaky, teacher_complete=ScriptedFCTeacher(script),
         output_dir=out,
     )
     assert manifest["status"] == "complete"
@@ -278,7 +299,7 @@ def test_cache_round_trips_full_attempt_records(tmp_path, catalog, expander):
     tasks = author_all(config, expander)
     script = teacher_script(tasks, pass_at_attempt=2, teacher_k=2)
     out = tmp_path / "out"
-    build(config, expander=expander, teacher_complete=ScriptedTeacher(script),
+    build(config, expander=expander, teacher_complete=ScriptedFCTeacher(script),
           output_dir=out)
 
     cache_paths = sorted((out / "rollouts" / "cache").glob("*.json"))
@@ -296,9 +317,12 @@ def test_cache_round_trips_full_attempt_records(tmp_path, catalog, expander):
             assert episode.reached_finish is True
             assert episode.reset_observation
             for turn in episode.turns:
-                assert turn.raw_action_text and turn.executed_op is not None
+                assert turn.tool_calls
                 assert turn.reasoning_content  # kept separate from content
                 assert turn.usage is not None
+                name = turn.tool_calls[0]["function"]["name"]
+                if name not in ("done", "finish", "stop"):
+                    assert turn.executed_op is not None
             assert episode.end_state is not None
             # VerificationResult
             assert attempt.verification.status in ("pass", "fail")
@@ -314,7 +338,7 @@ def test_rerun_reuses_cache_without_teacher(tmp_path, catalog, expander):
     tasks = author_all(config, expander)
     script = teacher_script(tasks, pass_at_attempt=1, teacher_k=1)
     out = tmp_path / "out"
-    build(config, expander=expander, teacher_complete=ScriptedTeacher(script),
+    build(config, expander=expander, teacher_complete=ScriptedFCTeacher(script),
           output_dir=out)
     first = (out / "sft" / "train.jsonl").read_bytes()
 
