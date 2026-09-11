@@ -2,7 +2,7 @@
 
 Covers the acceptance list: every spec §7 key present in the shipped yaml; the
 loader returns a typed object and raises a clear error on a missing / mistyped /
-unknown key; the ticket-001 NutriEnv pin block is byte-unchanged; the pinned
+unknown key; the ticket-023 NutriEnv lab pin is the first 40-hex in the yaml; the pinned
 design numbers (spec §2.1) are asserted so they cannot drift silently.
 """
 
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 import pathlib
-import subprocess
 
 import pytest
 import yaml
@@ -20,7 +19,7 @@ from src.training.data_factory import ConfigError, DataFactoryConfig, load_confi
 REPO = pathlib.Path(__file__).resolve().parents[3]
 CONFIG_PATH = REPO / "configs" / "data_factory.yaml"
 
-NUTRIENV_PIN = "203d807b19953a86b5486303ba6f7dd3b9cf7bb6"
+NUTRIENV_PIN = "0ee68eaa6c246e8079915761c95fc986c53d4979"
 CATALOG_SHA = "57184b2bbce4519076b4238a8d64861950db46fdc793d0e43055f07f43c28b5f"
 
 
@@ -235,7 +234,7 @@ def test_amount_path_weights_accepted(shipped_dict):
 
 
 # --------------------------------------------------------------------------- #
-# the ticket-001 pin block is byte-unchanged
+# the ticket-023 lab pin
 # --------------------------------------------------------------------------- #
 
 
@@ -251,16 +250,13 @@ def _pin_block(text: str) -> str:
     return "\n".join(lines[start:end]).rstrip()
 
 
-def test_nutrienv_pin_block_byte_unchanged():
-    """The ticket-001 `nutrienv:` block must survive 003 byte-for-byte."""
-    head = subprocess.check_output(
-        ["git", "show", "HEAD:configs/data_factory.yaml"], cwd=REPO, text=True
-    )
-    assert _pin_block(CONFIG_PATH.read_text()) == _pin_block(head)
-    # and the pin is what the smoke test + CI expect
-    assert NUTRIENV_PIN in _pin_block(CONFIG_PATH.read_text())
-    # the pin stays the FIRST 40-hex string in the file (CI resolves it that way)
+def test_nutrienv_pin_is_lab_rev():
+    """v2 pin is ``../nutri-env-lab`` at the ticket-023 SHA; CI reads the first 40-hex."""
+    text = CONFIG_PATH.read_text()
+    block = _pin_block(text)
+    assert NUTRIENV_PIN in block
+    assert "../nutri-env-lab" in block
     import re
 
-    first_hex = re.search(r"[0-9a-f]{40}", CONFIG_PATH.read_text()).group(0)
+    first_hex = re.search(r"[0-9a-f]{40}", text).group(0)
     assert first_hex == NUTRIENV_PIN

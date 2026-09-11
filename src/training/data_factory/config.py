@@ -7,9 +7,10 @@ in the concept-types module.
 
 Single-sourcing notes:
 
-- ``nutrienv_rev`` (spec §7) is the ``rev`` of the ticket-001 ``nutrienv:`` pin
-  block, exposed as ``DataFactoryConfig.nutrienv_rev``. There is deliberately no
-  top-level ``nutrienv_rev`` key — two spellings of the pin would drift.
+- ``nutrienv_rev`` (spec §7) is the ``rev`` of the ``nutrienv:`` pin block
+  (ticket 023 lab SHA), exposed as ``DataFactoryConfig.nutrienv_rev``. There is
+  deliberately no top-level ``nutrienv_rev`` key — two spellings of the pin
+  would drift.
 - ``catalog_path`` / ``exam_split_path`` may be ``null``: the build stage resolves
   them to the nutrienv public defaults (``load_catalog()``'s gold catalog and
   ``nutrienv.bench.EXAM_SPLIT_PATH``). This module never imports nutrienv.
@@ -96,7 +97,7 @@ _TEACHER_K_MIN, _TEACHER_K_MAX = 1, 6
 
 @dataclasses.dataclass(frozen=True)
 class NutriEnvPin:
-    """The ticket-001 dependency pin block — byte-frozen in the yaml."""
+    """The ``nutrienv:`` dependency pin block in the yaml (ticket 023 lab SHA)."""
 
     repo: str
     rev: str

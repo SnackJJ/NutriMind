@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# Ticket 001 — install the NutriEnv benchmark/library into the NutriMind venv.
+# Ticket 023 — install the NutriEnv lab pin into the NutriMind venv.
 #
-# NutriEnv is consumed read-only (ADR-012). It is a local sibling repo. The wheel
-# build at the pinned rev DROPS `nutrienv/env/` (nutri-env's .gitignore has a bare
-# `env/` line that hatchling honours), so a plain wheel / `git+` / default-editable
-# install produces a broken package (`import nutrienv.bench` -> ModuleNotFoundError:
-# nutrienv.env). Strict PEP 660 editable mode redirects imports to the source tree
-# and includes every module.
+# NutriEnv is consumed read-only (ADR-012). v2 uses the local sibling
+# `../nutri-env-lab`. The wheel build at the pinned rev DROPS `nutrienv/env/`
+# (the lab's .gitignore has a bare `env/` line that hatchling honours), so a
+# plain wheel / `git+` / default-editable install produces a broken package
+# (`import nutrienv.bench` -> ModuleNotFoundError: nutrienv.env). Strict PEP 660
+# editable mode redirects imports to the source tree and includes every module.
 #
-# Usage:  scripts/setup_nutrienv.sh [PATH_TO_NUTRI_ENV]
+# Usage:  scripts/setup_nutrienv.sh [PATH_TO_NUTRI_ENV_LAB]
 set -euo pipefail
 
-NUTRI_ENV="${1:-../nutri-env}"
-PIN="203d807b19953a86b5486303ba6f7dd3b9cf7bb6"   # keep in sync with configs/data_factory.yaml
+NUTRI_ENV="${1:-../nutri-env-lab}"
+PIN="0ee68eaa6c246e8079915761c95fc986c53d4979"   # keep in sync with configs/data_factory.yaml
 
 if [[ ! -d "${NUTRI_ENV}/src/nutrienv" ]]; then
-  echo "ERROR: ${NUTRI_ENV}/src/nutrienv not found. Pass the nutri-env checkout path." >&2
+  echo "ERROR: ${NUTRI_ENV}/src/nutrienv not found. Pass the nutri-env-lab checkout path." >&2
   exit 1
 fi
 
