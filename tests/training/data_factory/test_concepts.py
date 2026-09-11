@@ -118,6 +118,62 @@ def test_turn_meta_round_trip():
     assert TurnMeta.from_dict(turn.to_dict()) == turn
 
 
+def test_turn_meta_fc_round_trip():
+    """Ticket 024: native tool-calling turn stores tool_calls + tool_call_id."""
+    turn = TurnMeta(
+        tool_calls=[{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "search_foods", "arguments": '{"q": "oatmeal"}'},
+        }],
+        tool_call_id="call_1",
+        executed_op={"op": "search_foods", "q": "oatmeal"},
+        reasoning_content="find oatmeal in the catalog",
+        content=None,
+        raw_action_text=None,
+        parse_status=None,
+        fallback_used=False,
+        fallback_reason=None,
+        observation='{"hits": [...]}',
+    )
+    restored = TurnMeta.from_dict(turn.to_dict())
+    assert restored == turn
+    assert restored.tool_calls[0]["id"] == "call_1"
+    assert restored.tool_call_id == "call_1"
+    assert restored.executed_op == {"op": "search_foods", "q": "oatmeal"}
+    assert restored.raw_action_text is None
+    assert restored.parse_status is None
+    assert restored.fallback_used is False
+    assert restored.fallback_reason is None
+
+
+def test_turn_meta_no_tool_calls_is_distinct():
+    """A turn with no tool_calls is representable and is not coerced into an op."""
+    empty = TurnMeta(
+        tool_calls=[],
+        tool_call_id=None,
+        executed_op=None,
+        reasoning_content="nothing to call",
+        raw_action_text=None,
+        parse_status=None,
+        fallback_used=False,
+        fallback_reason=None,
+    )
+    restored = TurnMeta.from_dict(empty.to_dict())
+    assert restored == empty
+    assert restored.tool_calls == []
+    assert restored.executed_op is None
+    fallback = TurnMeta(
+        executed_op={"op": "get_profile"},
+        fallback_used=True,
+        fallback_reason="no_json",
+        parse_status="no_json",
+        raw_action_text="sure, let me look that up",
+    )
+    assert restored != fallback
+    assert restored.executed_op != {"op": "get_profile"}
+
+
 def test_episode_result_round_trip():
     episode = EpisodeResult(
         end_state={"profile": {"weight_kg": 70}, "ledger": []},  # dict form (opaque Any)

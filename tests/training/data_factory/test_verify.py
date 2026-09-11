@@ -190,6 +190,19 @@ def test_legal_log_episode_passes(catalog, log_task):
     assert result.rubric_version == result.reward_version == "v2-r1"
 
 
+def test_verify_reads_end_state_not_tool_calls(catalog, log_task):
+    """Ticket 024: verify is invariant to tool_calls; it scores end_state."""
+    pkg = pkg_for(log_task, catalog, seed=30)
+    episode = run_episode(log_task, _log_actions(log_task))
+    baseline = vf.verify(pkg, episode)
+    episode.turns[0].tool_calls = [{"id": "bogus", "type": "function"}]
+    episode.turns[0].tool_call_id = "bogus"
+    again = vf.verify(pkg, episode)
+    assert again.status == baseline.status
+    assert again.scorer == baseline.scorer
+    assert again.reward == baseline.reward
+
+
 def test_ledger_gram_tolerance_just_inside_passes(catalog, log_task):
     """±15 % gram tolerance (ADR-0023): 1.14x stays a multiset match → pass."""
     actions = _log_actions(log_task)
