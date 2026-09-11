@@ -37,10 +37,11 @@ import math
 import pathlib
 import subprocess
 import sys
+from collections import Counter
 from collections.abc import Callable
 
-from nutrienv.bench import EXAM_SPLIT_PATH, load_exam
-from nutrienv.bench.pipeline.freezer import task_to_item
+from nutrienv.bench import EXAM_SPLIT_PATH, check_achievable, load_exam
+from nutrienv.bench.pipeline.freezer import freeze_tasks, task_to_item
 from nutrienv.bench.pipeline.types import catalog_digest
 from nutrienv.world.catalog_store import load_catalog
 
@@ -56,7 +57,7 @@ from src.training.data_factory.roster_train import TRAIN_ROSTER
 from src.training.data_factory.rollout_fc import rollout_tool_call
 from src.training.data_factory.serialize import SerializeError
 
-__all__ = ["BuildError", "build", "enumerate_intents", "main"]
+__all__ = ["BuildError", "build", "enumerate_intents", "main", "mini_exam_intents"]
 
 MANIFEST_SCHEMA_VERSION = "nutrimind-v2-runmanifest/1"
 INTENT_SCHEMA_VERSION = "nutrimind-v2-intent/1"
@@ -87,9 +88,10 @@ class BuildError(Exception):
     (spec §4.1). A partial ``run_manifest.json`` is written before re-raising."""
 
 
-class BuildError(Exception):
-    """A config / schema / dependency error — the whole run fails immediately
-    (spec §4.1). A partial ``run_manifest.json`` is written before re-raising."""
+# Mini-exam val (ticket 017): reserved seeds, disjoint from Batch-1's 0..max_intents.
+MINI_EXAM_N = 30
+MINI_EXAM_SEED_BASE = 900_000
+MINI_EXAM_POOL = 80
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +257,198 @@ def _write_manifest(output_dir: pathlib.Path, manifest: dict) -> None:
     tmp.replace(target)
 
 
+def _bump_codes(histogram: Counter[str], codes: list[str] | None) -> None:
+    for code in codes or []:
+        histogram[code] += 1
+
+
+def _rate(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def mini_exam_intents() -> list[dict]:
+    """Reserved-seed log intents for ``--freeze-mini`` (ticket 017)."""
+    intents: list[dict] = []
+    task_family, steps = FAMILY_SPECS["log"]
+    for index in range(MINI_EXAM_POOL):
+        seed = MINI_EXAM_SEED_BASE + index
+        person = TRAIN_ROSTER[index % len(TRAIN_ROSTER)]
+        task_key = f"{task_family}--{'+'.join(steps)}--{person.user_id}"
+        intents.append(
+            {
+                "schema_version": INTENT_SCHEMA_VERSION,
+                "task_id": f"{task_key}--{seed:06d}",
+                "task_key": task_key,
+                "family": "log",
+                "task_family": task_family,
+                "steps": list(steps),
+                "user_id": person.user_id,
+                "seed": seed,
+                "occasion": ("breakfast", "lunch", "dinner")[index % 3],
+                "scene": "empty",
+                "shell": None,
+                "slots": None,
+                "amount_path": _AMOUNT_PATHS[index % len(_AMOUNT_PATHS)],
+                "knife": None,
+                "tier": "",
+            }
+        )
+    intents.sort(key=lambda intent: intent["task_id"])
+    return intents
+
+
+def _run_freeze_mini(
+    *,
+    expander: Callable,
+    catalog,
+    catalog_sha: str,
+    gate_ctx: GateContext,
+    out: pathlib.Path,
+    manifest: dict,
+) -> dict:
+    """Author 30 TRAIN_ROSTER tasks, gate them, freeze to ``sft/val_mini.json``."""
+    kept = []
+    for intent in mini_exam_intents():
+        if len(kept) >= MINI_EXAM_N:
+            break
+        task, reject = author_mod.author_task(
+            intent, catalog=catalog, expander=expander
+        )
+        if task is None:
+            _append_jsonl(out / "rejects" / "author.jsonl", reject)
+            manifest["counts"]["rejected"]["author"] += 1
+            continue
+        manifest["counts"]["authored"] += 1
+        task = dataclasses.replace(task, id=intent["task_id"])
+        gate_result = gates_mod.run(task, gate_ctx)
+        if not gate_result.keep:
+            record = gates_mod.rejects_record(gate_result, task, intent=intent)
+            route = "indeterminate" if record["status"] == "indeterminate" else "gate"
+            _append_jsonl(out / "rejects" / REJECT_STAGE_FILES[route], record)
+            manifest["counts"]["rejected"][route] += 1
+            continue
+        manifest["counts"]["gate_kept"] += 1
+        kept.append(task)
+    if len(kept) < MINI_EXAM_N:
+        raise BuildError(
+            f"--freeze-mini kept {len(kept)} tasks, need {MINI_EXAM_N}"
+        )
+    kept.sort(key=lambda task: task.id)
+    report = check_achievable(kept)
+    unreachable = [task.id for task in kept if task.id in report.unreachable]
+    if unreachable:
+        raise BuildError(f"--freeze-mini unreachable: {unreachable[:5]}")
+    target = out / "sft" / "val_mini.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    freeze_tasks(
+        kept,
+        catalog=catalog,
+        catalog_sha=catalog_sha,
+        output_path=target,
+        extra={"kind": "mini-exam-val", "n": MINI_EXAM_N},
+        overwrite=True,
+    )
+    manifest["counts"]["eval_frozen"] = MINI_EXAM_N
+    manifest["mini_exam"] = {
+        "n": MINI_EXAM_N,
+        "seed_base": MINI_EXAM_SEED_BASE,
+        "path": "sft/val_mini.json",
+    }
+    return manifest
+
+
+def _finalize_observability(
+    manifest: dict,
+    *,
+    config: DataFactoryConfig,
+    catalog_sha: str,
+    reject_histogram: Counter[str],
+    accepted_by_family: Counter[str],
+    teacher_completed: int,
+    teacher_error: int,
+    teacher_no_finish: int,
+    pass_count: int,
+    serialized: int,
+    attempted_task_ids: int,
+    indeterminate_task_ids: int,
+    accepted_records: list[dict],
+    tokens: int,
+) -> None:
+    """Fill §9.5 / §17 / §20 blocks on the run manifest (ticket 015)."""
+    fail_n = manifest["counts"].get("teacher_rejected", 0)
+    indeterminate_n = (
+        manifest["counts"]["rejected"]["indeterminate"]
+        + manifest["counts"].get("teacher_indeterminate", 0)
+        + manifest["counts"].get("serialize_rejected", 0)
+    )
+    accepted_n = manifest["counts"].get("accepted", 0)
+    manifest["counts"]["by_status"] = {
+        "accepted": accepted_n,
+        "fail": fail_n,
+        "indeterminate": indeterminate_n,
+    }
+    manifest["counts"]["by_failure_code"] = dict(sorted(reject_histogram.items()))
+    family_mix = {}
+    for name, family in config.families.items():
+        family_mix[name] = {
+            "target": family.target_n,
+            "actual": accepted_by_family.get(name, 0),
+        }
+    manifest["family_mix"] = family_mix
+    usd_per_mtok = 0.3
+    manifest["cost"] = {
+        "est_usd": round((tokens / 1_000_000) * usd_per_mtok, 6),
+        "budget_usd": config.usd_budget,
+        "teacher_tokens": tokens,
+    }
+    versions = {
+        "oracle_version": f"nutrienv-{config.nutrienv_rev[:7]}",
+        "rubric_version": config.rubric_version,
+        "reward_version": config.reward_version,
+        "environment_version": f"nutrienv-{config.nutrienv_rev[:7]}",
+        "task_schema_version": mz.SCHEMA_VERSION,
+    }
+    if accepted_records:
+        meta = accepted_records[0]["meta"]
+        for key in versions:
+            if meta.get(key) != versions[key]:
+                raise BuildError(
+                    f"versions.{key} {versions[key]!r} != record meta {meta.get(key)!r}"
+                )
+    manifest["versions"] = versions
+
+    flagged = reject_histogram.get("gate.draft_invalid", 0) + reject_histogram.get(
+        "gate.unachievable", 0
+    )
+    reject_n = sum(reject_histogram.values())
+    flagged_share = flagged / reject_n if reject_n else 0.0
+    health: dict = {
+        "catalog_sha_match": manifest.get("catalog_sha") == catalog_sha,
+        "serialization_success_rate": _rate(serialized, pass_count),
+        "teacher_completion_rate": _rate(
+            teacher_completed,
+            teacher_completed + teacher_error + teacher_no_finish,
+        ),
+        "teacher_pass_rate": _rate(pass_count, teacher_completed),
+        "reject_histogram_ok": flagged_share <= 0.25,
+        "reject_histogram_flagged_share": flagged_share,
+    }
+    if attempted_task_ids >= 40:
+        health["indeterminate_rate"] = _rate(indeterminate_task_ids, attempted_task_ids)
+        health["indeterminate_rate_note"] = None
+    else:
+        health["indeterminate_rate"] = None
+        health["indeterminate_rate_note"] = (
+            f"raw counts only (attempted_task_ids={attempted_task_ids} < 40): "
+            f"indeterminate_task_ids={indeterminate_task_ids}"
+        )
+        health["indeterminate_task_ids"] = indeterminate_task_ids
+        health["attempted_task_ids"] = attempted_task_ids
+    manifest["health"] = health
+
+
 # --------------------------------------------------------------------------- #
 # the teacher stage (target=sft, spec §6 step 5d / §16)
 # --------------------------------------------------------------------------- #
@@ -352,6 +546,8 @@ def build(
     force: bool = False,
     output_dir: str | pathlib.Path | None = None,
     config_path: str | pathlib.Path | None = None,
+    dry_run: bool = False,
+    freeze_mini: bool = False,
 ) -> dict:
     """Run the pipeline through materialize (teacher path: ticket 011).
 
@@ -361,6 +557,8 @@ def build(
     """
     from datetime import datetime, timezone
 
+    if dry_run and freeze_mini:
+        raise BuildError("cannot combine --dry-run and --freeze-mini")
     if stop_after not in (None, "author", "gate"):
         raise BuildError(f"unknown --stop-after {stop_after!r}")
     out = pathlib.Path(output_dir if output_dir is not None else config.output_dir)
@@ -378,6 +576,8 @@ def build(
         "status": "running",
         "target": config.target,
         "stop_after": stop_after,
+        "dry_run": dry_run,
+        "freeze_mini": freeze_mini,
         "output_dir": str(out),
         "config_sha": config_sha,
         "counts": {
@@ -396,6 +596,35 @@ def build(
             timespec="seconds"
         )
 
+        if freeze_mini:
+            _run_freeze_mini(
+                expander=expander,
+                catalog=catalog,
+                catalog_sha=catalog_sha,
+                gate_ctx=gate_ctx,
+                out=out,
+                manifest=manifest,
+            )
+            manifest["status"] = "complete"
+            _finalize_observability(
+                manifest,
+                config=config,
+                catalog_sha=catalog_sha,
+                reject_histogram=Counter(),
+                accepted_by_family=Counter(),
+                teacher_completed=0,
+                teacher_error=0,
+                teacher_no_finish=0,
+                pass_count=0,
+                serialized=0,
+                attempted_task_ids=0,
+                indeterminate_task_ids=0,
+                accepted_records=[],
+                tokens=0,
+            )
+            _write_manifest(out, manifest)
+            return manifest
+
         intents = enumerate_intents(config)
         manifest["counts"]["intents"] = len(intents)
         by_family: dict[str, list[dict]] = {}
@@ -411,16 +640,23 @@ def build(
             nutrimind_rev=manifest["nutrimind_rev"],
             config_sha=config_sha,
         )
-        gated = stop_after != "author"
+
+        gated = stop_after != "author" and not dry_run
         run_teacher = (
             config.target in ("sft", "all")
             and stop_after is None
             and teacher_complete is not None
+            and not dry_run
         )
-        if config.target in ("sft", "all") and stop_after is None and not run_teacher:
+        if (
+            config.target in ("sft", "all")
+            and stop_after is None
+            and not run_teacher
+            and not dry_run
+        ):
             raise BuildError(
                 "target sft needs the teacher path: inject a teacher_complete "
-                "(or pass --stop-after gate to stop at materialize)"
+                "(or pass --stop-after gate / --dry-run to stop at materialize)"
             )
         terminal = (
             set()
@@ -432,6 +668,12 @@ def build(
             {"accepted": 0, "teacher_rejected": 0, "teacher_indeterminate": 0,
              "serialize_rejected": 0, "cache_reused": 0}
         )
+        reject_histogram: Counter[str] = Counter()
+        accepted_by_family: Counter[str] = Counter()
+        teacher_completed = teacher_error = teacher_no_finish = 0
+        pass_count = serialized = 0
+        attempted_task_ids = indeterminate_task_ids = 0
+        tokens = 0
 
         for intent in intents:
             task_id = intent["task_id"]
@@ -445,6 +687,7 @@ def build(
             if task is None:
                 _append_jsonl(out / "rejects" / "author.jsonl", reject)
                 manifest["counts"]["rejected"]["author"] += 1
+                _bump_codes(reject_histogram, reject.get("failure_codes"))
                 continue
             manifest["counts"]["authored"] += 1
             _append_jsonl(
@@ -468,8 +711,13 @@ def build(
                 route = "indeterminate" if record["status"] == "indeterminate" else "gate"
                 _append_jsonl(out / "rejects" / REJECT_STAGE_FILES[route], record)
                 manifest["counts"]["rejected"][route] += 1
+                _bump_codes(reject_histogram, record.get("failure_codes"))
+                if route == "indeterminate":
+                    indeterminate_task_ids += 1
                 continue
             manifest["counts"]["gate_kept"] += 1
+            if dry_run:
+                continue
 
             package = mz.materialize(
                 task,
@@ -490,6 +738,7 @@ def build(
 
             if not run_teacher:
                 continue
+            attempted_task_ids += 1
 
             # ---- teacher stage (spec §6 step 5d) ----
             cache_path = out / "rollouts" / "cache" / f"{task_id}.json"
@@ -510,8 +759,22 @@ def build(
                 "attempts": _teacher_attempts_summary(cache),
                 "intent": dict(intent),
             }
+            for attempt in cache.attempts:
+                status = attempt.verification.execution
+                if status == "ok":
+                    teacher_completed += 1
+                elif status == "error":
+                    teacher_error += 1
+                elif status == "no_finish":
+                    teacher_no_finish += 1
+                for turn in attempt.episode.turns:
+                    usage = turn.usage or {}
+                    tokens += int(usage.get("prompt_tokens") or 0) + int(
+                        usage.get("completion_tokens") or 0
+                    )
             if cache.selected_attempt is not None:
                 attempt = cache.attempts[cache.selected_attempt]
+                pass_count += 1
                 try:
                     record = serialize_mod.serialize(
                         package, attempt.episode, attempt.verification,
@@ -520,6 +783,7 @@ def build(
                     )
                 except SerializeError as exc:
                     manifest["counts"]["serialize_rejected"] += 1
+                    indeterminate_task_ids += 1
                     _append_jsonl(
                         out / "rejects" / "serialize.jsonl",
                         {
@@ -529,9 +793,12 @@ def build(
                             "reason_detail": exc.detail,
                         },
                     )
+                    _bump_codes(reject_histogram, [exc.code])
                     continue
                 accepted_records.append(record)
                 manifest["counts"]["accepted"] += 1
+                serialized += 1
+                accepted_by_family[intent["family"]] += 1
             elif any(
                 a.verification.status == "fail" for a in cache.attempts
             ):
@@ -541,28 +808,29 @@ def build(
                     a for a in cache.attempts if a.verification.status == "fail"
                 )
                 manifest["counts"]["teacher_rejected"] += 1
+                codes = list(first_fail.verification.failure_codes)
                 _append_jsonl(
                     out / "rejects" / "teacher.jsonl",
                     {
                         **common, "stage": "teacher", "status": "fail",
-                        "failure_codes": list(
-                            first_fail.verification.failure_codes
-                        ),
+                        "failure_codes": codes,
                     },
                 )
+                _bump_codes(reject_histogram, codes)
             else:
                 # no completed legal attempt at all: teacher error / no-finish /
                 # invalid-op — nothing usable for SFT
                 manifest["counts"]["teacher_indeterminate"] += 1
+                indeterminate_task_ids += 1
+                codes = list(cache.attempts[-1].verification.failure_codes)
                 _append_jsonl(
                     out / "rejects" / "indeterminate.jsonl",
                     {
                         **common, "stage": "teacher", "status": "indeterminate",
-                        "failure_codes": list(
-                            cache.attempts[-1].verification.failure_codes
-                        ),
+                        "failure_codes": codes,
                     },
                 )
+                _bump_codes(reject_histogram, codes)
 
         if run_teacher:
             # sorted by task_id, temp + atomic rename (spec §6 step 6)
@@ -577,7 +845,40 @@ def build(
             tmp.write_text(blob, encoding="utf-8")
             tmp.replace(train_path)
 
+        if dry_run:
+            report = {
+                "schema_version": "nutrimind-v2-dryrun/1",
+                "projected_accepts": {
+                    "total": manifest["counts"]["gate_kept"],
+                },
+                "reject_histogram": dict(sorted(reject_histogram.items())),
+                "intents": manifest["counts"]["intents"],
+                "authored": manifest["counts"]["authored"],
+                "gate_kept": manifest["counts"]["gate_kept"],
+            }
+            report_path = out / "dry_run_report.json"
+            report_path.write_text(
+                json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
         manifest["status"] = "complete"
+        _finalize_observability(
+            manifest,
+            config=config,
+            catalog_sha=catalog_sha,
+            reject_histogram=reject_histogram,
+            accepted_by_family=accepted_by_family,
+            teacher_completed=teacher_completed,
+            teacher_error=teacher_error,
+            teacher_no_finish=teacher_no_finish,
+            pass_count=pass_count,
+            serialized=serialized,
+            attempted_task_ids=attempted_task_ids,
+            indeterminate_task_ids=indeterminate_task_ids,
+            accepted_records=accepted_records,
+            tokens=tokens,
+        )
         _write_manifest(out, manifest)
         return manifest
     except BuildError as exc:
@@ -617,6 +918,14 @@ def main(argv: list[str] | None = None) -> int:
         help="teacher adapter for target=sft (network-guarded: "
         "NUTRIMIND_ALLOW_NETWORK=1 + ARK_API_KEY required at call time)",
     )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="author + gate only; write dry_run_report.json (no teacher)",
+    )
+    parser.add_argument(
+        "--freeze-mini", action="store_true",
+        help="freeze 30 TRAIN_ROSTER tasks to sft/val_mini.json (no teacher)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -650,6 +959,8 @@ def main(argv: list[str] | None = None) -> int:
             stop_after=args.stop_after,
             force=args.force,
             config_path=args.config,
+            dry_run=args.dry_run,
+            freeze_mini=args.freeze_mini,
         )
     except BuildError as exc:
         print(f"build aborted: {exc}", file=sys.stderr)
