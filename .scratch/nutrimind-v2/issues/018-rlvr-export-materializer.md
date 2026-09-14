@@ -1,7 +1,7 @@
 ---
 id: 018
 title: RLVR export materializer (thin) — TaskPackage → rlvr/<task_id>.json
-status: ready-for-agent
+status: SUPERSEDED by 027 (2026-09-11) — prompt was react_manual("v2"); ADR-014 requires TOOL_SYSTEM_PROMPT + NUTRIENV_TOOLS
 depends_on: [006, 010]
 spec: ../spec.md
 spec_sections: ["4.1", "4.2", "8", "9.3", "19.5"]
@@ -26,7 +26,7 @@ schema-level (§19.5) — a full RLVR run is out of scope.
 
 **Blocked by:** 006, 010.
 
-**Status:** ready-for-agent
+**Status:** SUPERSEDED by 027 — do not implement this ticket. The §9.3 prompt is native tool calling, not `react_manual("v2")`.
 
 - [ ] `build --target rlvr` writes `rlvr/<task_id>.json` for each gated task with zero
       teacher calls

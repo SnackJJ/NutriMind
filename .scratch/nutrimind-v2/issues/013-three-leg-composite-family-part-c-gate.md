@@ -1,8 +1,8 @@
 ---
 id: 013
 title: 3-leg composite update+log→recommend family + OQ-7 Part C acceptance gate (40 accepted Pass)
-status: ready-for-agent
-depends_on: [012]
+status: CLOSED (2026-09-11)
+depends_on: [012, 025, 026]
 spec: ../spec.md
 spec_sections: ["22.9", "23-OQ-7-Part-C", "6", "10", "16", "20"]
 adr: [../../docs/decisions/012-nutrienv-read-only-benchmark.md]
@@ -42,23 +42,23 @@ ticket does **not** silently accept a lower number — it records exactly one of
 documented ADR-012 Amendment-log exception (private `_bind_log_foods`), an upstream
 nutri-env `__all__` promotion PR, or an explicit design §7 re-size.
 
-**Blocked by:** 012.
+**Blocked by:** 012, 025, 026 (no qualification run on the retired text-op path).
 
 **Status:** ready-for-agent
 
-- [ ] the 3-leg authoring path imports no `_update_from_template` / `_bind_log_foods`
+- [x] the 3-leg authoring path imports no `_update_from_template` / `_bind_log_foods`
       (asserted via `co_names`, as in `test_three_leg_public_assembly.py`)
-- [ ] one assembled 3-leg task passes the full gate policy and correct-replays to a `Scorer`
+- [x] one assembled 3-leg task passes the full gate policy and correct-replays to a `Scorer`
       Pass with `sub_tags == ("pass","pass","pass")`; wrong end states tag `log_miss` /
       `window` / `update_miss` correctly
-- [ ] the §6 expander ladder is wired and on by default for this family (`gram_anchor` +
+- [x] the §6 expander ladder is wired and on by default for this family (`gram_anchor` +
       persona `amount_path` mix + `qwen3.8-max` fallback); a test asserts `named_measure`
       is not force-forced
-- [ ] `candidate_count` is computed from a measured `estimated_unique_accepted_rate`,
+- [x] `candidate_count` is computed from a measured `estimated_unique_accepted_rate`,
       recorded in the run manifest with `seed_start`
-- [ ] a qualification run reaches **40** distinct-`task_id`, `semantic_key`-deduped
+- [x] a qualification run reaches **40** distinct-`task_id`, `semantic_key`-deduped
       accepted Pass with `indeterminate_rate ≤ 0.05` and a healthy reject histogram — **or**
       the chosen fallback is written into ADR-012's Amendment log / a `__all__` PR / a
       design §7 change
-- [ ] N is counted on `task_id` after intra-family `semantic_key` dedup (lowest seed kept);
+- [x] N is counted on `task_id` after intra-family `semantic_key` dedup (lowest seed kept);
       multiple `attempt_id`s of one `task_id` contribute at most one

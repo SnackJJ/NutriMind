@@ -2,7 +2,7 @@
 id: 020
 title: Batch-1 production run — ~420 accepted Pass at the design §7 family mix; validate §20; 7:2:1 split
 status: ready-for-agent
-depends_on: [013, 014, 015, 017]
+depends_on: [013, 014, 015, 017, 026, 028]
 spec: ../spec.md
 spec_sections: ["2", "US-1", "6", "20", "9"]
 adr: [../../docs/decisions/011-batch1-sft-trajectory-short-plan-thinking-teacher.md]
@@ -18,7 +18,8 @@ and split 7:2:1 by a `task_id` hash into `sft/train.jsonl` / `sft/holdout.jsonl`
 `sft/loss_val.jsonl`. The run is validated against spec §20 and the reject histogram is
 reviewed.
 
-**Blocked by:** 013, 014, 015, 017.
+**Blocked by:** 013, 014, 015, 017, 026, 028. FC serialize + loader must land first
+(ADR-014).
 
 **Status:** ready-for-agent
 

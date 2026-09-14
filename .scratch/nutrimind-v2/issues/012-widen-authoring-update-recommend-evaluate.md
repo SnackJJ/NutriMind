@@ -1,8 +1,8 @@
 ---
 id: 012
 title: Widen authoring — update, recommend, evaluate (EVALUATE_TIERS), amount_path / gram_anchor
-status: ready-for-agent
-depends_on: [011]
+status: CLOSED (2026-09-11)
+depends_on: [011, 025, 026]
 spec: ../spec.md
 spec_sections: ["6.4", "9.2", "22.12", "22.13", "US-12", "18"]
 ---
@@ -24,16 +24,17 @@ spec_sections: ["6.4", "9.2", "22.12", "22.13", "US-12", "18"]
 - intent enumeration covers each family up to `target_n × over_generate_x`.
 - the manifest reports accepted family mix vs target (US-12).
 
-**Blocked by:** 011.
+**Blocked by:** 011, 025, 026 (FC teacher + serialize must land before any
+`target=sft` accepted-record run — ADR-014).
 
 **Status:** ready-for-agent
 
-- [ ] `build --target sft` produces ≥ 1 accepted record for each of `log`, `update`,
+- [x] `build --target sft` produces ≥ 1 accepted record for each of `log`, `update`,
       `recommend`, `evaluate`
-- [ ] every `evaluate` record's `meta.tier` is one of `EVALUATE_TIERS`; no non-`evaluate`
+- [x] every `evaluate` record's `meta.tier` is one of `EVALUATE_TIERS`; no non-`evaluate`
       record has a non-empty `tier`
-- [ ] the `amount_path` distribution over a run matches the per-persona weights within
+- [x] the `amount_path` distribution over a run matches the per-persona weights within
       tolerance (test over a synthetic run)
-- [ ] setting `gram_anchor: true` for a family visibly changes authored speech; default off
-- [ ] `run_manifest.json` has `family_mix` with target vs actual per family
-- [ ] intent count per family respects `target_n × over_generate_x` and `max_intents`
+- [x] setting `gram_anchor: true` for a family visibly changes authored speech; default off
+- [x] `run_manifest.json` has `family_mix` with target vs actual per family
+- [x] intent count per family respects `target_n × over_generate_x` and `max_intents`
