@@ -1,9 +1,9 @@
 # ADR-007: Migrate from rollout_func to TRL environment_factory
 
-- **Status**: accepted
+- **Status**: accepted for **NutriMind v1**; **not used by v2** (see [ADR-015](015-v2-post-training-stack-trl-sft-verl-rl.md))
 - **Date**: 2026-04-15
 - **Deciders**: zeqing
-- **Supersedes**: ADR-002 (partially)
+- **Supersedes**: ADR-002 (partially) — v1 only
 
 ## Context
 

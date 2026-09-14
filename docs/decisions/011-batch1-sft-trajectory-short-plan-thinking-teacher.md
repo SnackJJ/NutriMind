@@ -1,8 +1,8 @@
 # ADR-011: Batch-1 SFT Trajectory — Short Plan + JSON Op, Thinking Teacher
 
-- **Status**: accepted
+- **Status**: accepted — **protocol half superseded by [ADR-014](014-native-tool-calling-v2-protocol.md)**
 - **Date**: 2026-09-08
-- **Amended**: 2026-09-09 — teacher endpoint `deepseek/` direct → `ark/deepseek-v4-flash` (`api/plan/v3`); see the Amendment log
+- **Amended**: 2026-09-09 — teacher endpoint `deepseek/` direct → `ark/deepseek-v4-flash` (`api/plan/v3`); 2026-09-11 — text-op shape superseded by native tool calling (ADR-014); 2026-09-13 — teacher + expander → Command Code Provider API `deepseek/deepseek-v4.1-flash`; see the Amendment log
 - **Deciders**: zeqing
 - **Supersedes**: reverses the non-thinking default in `docs/plans/nutrienv_student.md:37`
 
@@ -89,6 +89,43 @@ trimming, 24k) is a **Batch-2 escalation**, taken only if the B3 diagnostic show
 
 ## Amendment log
 
+### 2026-09-13 — teacher + expander: Command Code Provider API (`deepseek/deepseek-v4.1-flash`)
+
+Live probe (2026-09-13; `.scratch/nutrimind-v2/spikes/029_commandcode_v41_flash.txt`):
+
+- Base `https://api.commandcode.ai/provider/v1`, OpenAI-compatible
+  `/chat/completions`. Credential `COMMANDCODE_API_KEY`.
+- Wire model id is `deepseek/deepseek-v4.1-flash` (the catalog name). Bare
+  `deepseek-v4.1-flash` is rejected (`unsupported_model`).
+- Plan text is `message.reasoning` (not `reasoning_content`). Usage still
+  reports `completion_tokens_details.reasoning_tokens`. Native tool calling
+  works (`finish_reason=tool_calls`, OpenAI-shaped `tool_calls`).
+- Python's default urllib User-Agent is Cloudflare 1010; the factory client
+  sends `NutriMind-data-factory/1.0`.
+- `thinking: {"type": "disabled"}` does **not** drop `reasoning` on this
+  model. Expander still consumes `content` only.
+
+**Amended decision:** teacher and expander share this provider and model.
+`configs/data_factory.yaml` pins the full completions URL and
+`COMMANDCODE_API_KEY`. The client forwards `tools` / `parallel_tool_calls`
+and maps `reasoning` → `reasoning_content`. Unchanged: thinking as the
+teacher length-control flag, ~80-token plan truncation, Pass-filter,
+native tool calling (ADR-014), `max_seq_length=20k`.
+
+### 2026-09-11 — protocol half superseded (native tool calling)
+
+The text-op shape (`plan` concatenated with `{"op": …}`, parsed by ReAct) is
+**superseded by [ADR-014](014-native-tool-calling-v2-protocol.md)**. Assistant turns
+now carry `tool_calls`; observations are `tool` messages; the plan is stored as
+truncated `reasoning_content`.
+
+**Unchanged by that supersession:** teacher endpoint and credential; thinking as
+length control; ~80-token plan cap; Pass-filter; whole-trajectory SFT;
+`max_seq_length=20k` / `context_limit=None`; non-thinking as the ablation.
+
+Comparability is **with-reasoning / tools-only**, not "plan prefix stripped by
+`_parse_action`".
+
 ### 2026-09-09 — teacher endpoint: `deepseek/` direct → `ark/deepseek-v4-flash` (`api/plan/v3`)
 
 The original Context and Decision chose the **DeepSeek direct** API for the teacher
@@ -139,4 +176,5 @@ A live probe (2026-09-09, ticket 002; 3 calls) established:
 - [ADR-001](001-pure-text-tool-calling.md) (phase-1 used `enable_thinking=True`)
 - [ADR-009](009-grpo-reward-redesign-against-shortest-path-collapse.md)
   (`<think>` stripping in `compute_state_key` already precedented)
-- [ADR-010](010-nutrimind-v2-rescope.md), [ADR-012](012-nutrienv-read-only-benchmark.md)
+- [ADR-010](010-nutrimind-v2-rescope.md), [ADR-012](012-nutrienv-read-only-benchmark.md),
+  [ADR-014](014-native-tool-calling-v2-protocol.md)
