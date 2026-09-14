@@ -34,6 +34,15 @@ _GRAMS = re.compile(r"\b\d+(?:\.\d+)?\s*g(?:rams?)?\b", re.I)
 
 
 def _handles(catalog: Mapping, food_id: str) -> list[str]:
+    """Surface forms the binder itself accepts for this food, longest first-ish.
+
+    `nutrienv`'s `_local_clause` locates a food by matching the catalog name, its
+    **first-comma head**, and the aliases against a comma-split clause. The check
+    here has to accept the same set: a scrambled `spoken_display_name`
+    ("made from any kind of meat reduced fat pastrami") is a *different* noun
+    phrase, and an utterance that says "reduced-fat pastrami" — which binds grams
+    correctly — used to be rejected for not containing the scrambled form.
+    """
     entry = catalog.get(food_id) or {}
     aliases = [str(alias).strip().lower() for alias in (entry.get("aliases") or [])]
     name = str(entry.get("name") or food_id).strip().lower()
@@ -42,6 +51,15 @@ def _handles(catalog: Mapping, food_id: str) -> list[str]:
         if item and item not in out:
             out.append(item)
     return out
+
+
+def _head(catalog: Mapping, food_id: str) -> str:
+    """The comma head — the food's identity as the binder resolves it."""
+    entry = catalog.get(food_id) or {}
+    name = str(entry.get("name") or "").strip()
+    if name:
+        return name.split(",", 1)[0].strip().lower()
+    return str(food_id).lower()
 
 
 def _primary(catalog: Mapping, food_id: str) -> str:
@@ -110,10 +128,12 @@ def query_entity_consistency(
     if (intent.get("amount_path") or "") == "named_measure" and _GRAMS.search(blob):
         return "author.intent_conflict"
 
+    bound_heads = [_head(catalog, food_id) for food_id in food_ids]
     bound_handles = [_primary(catalog, food_id) for food_id in food_ids]
-    for food_id, handle in zip(food_ids, bound_handles):
-        display = spoken_display_name(catalog, food_id).lower()
-        if (display and display in blob) or (handle and handle in blob):
+    for food_id in food_ids:
+        # any surface form the binder accepts counts as naming the food
+        forms = _handles(catalog, food_id)
+        if any(form and form in blob for form in forms):
             continue
         return "author.query_foods_mismatch"
 
@@ -146,13 +166,13 @@ def query_entity_consistency(
                 if handle.startswith(other + " ") or other.startswith(handle + " "):
                     return "author.ambiguous_entity"
 
-    for food_id, handle in zip(food_ids, bound_handles):
-        if not handle:
+    for food_id, head in zip(food_ids, bound_heads):
+        if not head:
             continue
         for other_id in neighbors:
             if other_id == food_id:
                 continue
-            other = _primary(catalog, other_id)
-            if other.startswith(handle + " ") and other not in blob:
+            other = _head(catalog, other_id)
+            if other.startswith(head + " ") and other not in blob:
                 return "author.missing_disambiguation"
     return None
