@@ -1,10 +1,10 @@
-"""Ticket 009 — instrumented teacher rollouts (harness subclass + ark clients).
+"""Ticket 009 — instrumented teacher rollouts (harness subclass + chat clients).
 
 Offline: episodes run through the real NutriEnv with a scripted
-``teacher_complete``; the production ark client is tested against a fake
+``teacher_complete``; the production client is tested against a fake
 ``urlopen`` (request capture, retry behavior, the network guard) — never a
 real endpoint. The live smoke test sits behind ``NUTRIMIND_ALLOW_NETWORK=1``
-and an ``ARK_API_KEY`` and skips otherwise.
+and ``COMMANDCODE_API_KEY`` and skips otherwise.
 """
 
 from __future__ import annotations
@@ -270,6 +270,7 @@ def captured(monkeypatch):
 
     monkeypatch.setattr(ro.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("NUTRIMIND_ALLOW_NETWORK", "1")
+    monkeypatch.setenv("COMMANDCODE_API_KEY", "sk-test-key-never-appear")
     monkeypatch.setenv("ARK_API_KEY", "sk-test-key-never-appear")
     monkeypatch.setenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
     return box
@@ -310,16 +311,78 @@ def test_client_request_shape_from_config(captured, config):
         }
     )
     (request,) = captured["requests"]
-    # the config endpoint is a path; ARK_BASE_URL resolves it to the full URL
-    assert request["url"] == (
-        "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
-    )
-    # the routing prefix is stripped for the wire
-    assert request["body"]["model"] == "deepseek-v4-flash"
+    assert request["url"] == config.teacher.endpoint
+    assert request["body"]["model"] == "deepseek/deepseek-v4.1-flash"
     assert request["body"]["thinking"] == {"type": "enabled"}  # length control
     assert request["body"]["temperature"] == 0.0
     assert request["timeout"] == config.teacher.per_turn_timeout_s
-    assert request["headers"]["Authorization"] == "Bearer sk-test-key-never-appear"
+    headers = {k.lower(): v for k, v in request["headers"].items()}
+    assert headers["authorization"] == "Bearer sk-test-key-never-appear"
+    assert headers["user-agent"] == ro._HTTP_USER_AGENT
+
+
+def test_client_maps_reasoning_field_and_forwards_tools(monkeypatch, config):
+    box = {"body": None}
+
+    def fake_urlopen(req, timeout=None):
+        box["body"] = json.loads(req.data.decode("utf-8"))
+        return _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "reasoning": "search oats",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_foods",
+                                        "arguments": '{"q": "oats"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 8,
+                    "completion_tokens_details": {"reasoning_tokens": 4},
+                },
+            }
+        )
+
+    monkeypatch.setattr(ro.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setenv("NUTRIMIND_ALLOW_NETWORK", "1")
+    monkeypatch.setenv(config.teacher.credential_env, "sk-x")
+    client = make_ark_teacher_client(config.teacher)
+    tools = [{"type": "function", "function": {"name": "search_foods"}}]
+    completion = client(
+        {
+            "model": config.teacher.model_id,
+            "messages": [{"role": "user", "content": "search oats"}],
+            "tools": tools,
+            "parallel_tool_calls": False,
+        }
+    )
+    assert box["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert box["body"]["tools"] == tools
+    assert box["body"]["parallel_tool_calls"] is False
+    assert completion["content"] == ""
+    assert completion["reasoning_content"] == "search oats"
+    assert completion["tool_calls"][0]["function"]["name"] == "search_foods"
+    assert completion["finish_reason"] == "tool_calls"
+
+
+def test_endpoint_model_strips_ark_prefix_only():
+    assert ro._endpoint_model("ark/deepseek-v4-flash") == "deepseek-v4-flash"
+    assert ro._endpoint_model("deepseek/deepseek-v4.1-flash") == (
+        "deepseek/deepseek-v4.1-flash"
+    )
+    assert ro._endpoint_model("deepseek-v4.1-flash") == "deepseek-v4.1-flash"
 
 
 def test_endpoint_resolution_variants(monkeypatch):
@@ -352,9 +415,8 @@ def test_expander_client_sends_thinking_disabled(captured, config):
         }
     )
     (request,) = captured["requests"]
-    assert request["url"] == (
-        "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
-    )
+    assert request["url"] == config.expander.endpoint
+    assert request["body"]["model"] == "deepseek/deepseek-v4.1-flash"
     assert request["body"]["thinking"] == {"type": "disabled"}
     assert request["timeout"] == config.expander.timeout_s
 
@@ -400,7 +462,7 @@ def test_client_non_retryable_status_raises(captured, config, monkeypatch):
 
 def test_network_disabled_without_guard(monkeypatch, config):
     monkeypatch.delenv("NUTRIMIND_ALLOW_NETWORK", raising=False)
-    monkeypatch.setenv("ARK_API_KEY", "sk-x")
+    monkeypatch.setenv(config.teacher.credential_env, "sk-x")
 
     def must_not_call(req, timeout=None):
         raise AssertionError("real network call attempted without the guard")
@@ -415,9 +477,9 @@ def test_network_disabled_without_guard(monkeypatch, config):
 
 
 def test_missing_credential_raises(captured, monkeypatch, config):
-    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    monkeypatch.delenv(config.teacher.credential_env, raising=False)
     client = make_ark_teacher_client(config.teacher)
-    with pytest.raises(RuntimeError, match="ARK_API_KEY is not set"):
+    with pytest.raises(RuntimeError, match=f"{config.teacher.credential_env} is not set"):
         client(
             {"model": config.teacher.model_id,
              "messages": [{"role": "user", "content": "hi"}]}
@@ -448,8 +510,8 @@ def test_api_key_never_in_episodes_or_cache(captured, config, log_task):
 
 @pytest.mark.skipif(
     __import__("os").environ.get("NUTRIMIND_ALLOW_NETWORK") != "1"
-    or not __import__("os").environ.get("ARK_API_KEY"),
-    reason="live call: set NUTRIMIND_ALLOW_NETWORK=1 and ARK_API_KEY",
+    or not __import__("os").environ.get("COMMANDCODE_API_KEY"),
+    reason="live call: set NUTRIMIND_ALLOW_NETWORK=1 and COMMANDCODE_API_KEY",
 )
 def test_live_teacher_smoke_reasoning_content():
     config = load_config(CONFIG_PATH)

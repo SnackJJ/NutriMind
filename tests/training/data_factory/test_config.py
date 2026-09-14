@@ -55,10 +55,12 @@ def test_every_spec7_key_present(shipped):
 
 
 def test_teacher_block_pinned(shipped):
-    # user-pinned teacher config (ADR-011 amended 2026-09-09)
-    assert shipped.teacher.model_id == "ark/deepseek-v4-flash"
-    assert shipped.teacher.endpoint == "api/plan/v3/chat/completions"
-    assert shipped.teacher.credential_env == "ARK_API_KEY"
+    # user-pinned teacher config (ADR-011 amended 2026-09-13)
+    assert shipped.teacher.model_id == "deepseek/deepseek-v4.1-flash"
+    assert shipped.teacher.endpoint == (
+        "https://api.commandcode.ai/provider/v1/chat/completions"
+    )
+    assert shipped.teacher.credential_env == "COMMANDCODE_API_KEY"
     assert shipped.teacher.thinking == {"type": "enabled"}
     assert shipped.teacher.temperature_first == 0.0
     assert shipped.teacher.temperature_retry == 0.7
@@ -67,7 +69,7 @@ def test_teacher_block_pinned(shipped):
 
 def test_expander_shares_endpoint_and_credential(shipped):
     # one provider, one credential for teacher + expander
-    assert shipped.expander.model_id == "ark/deepseek-v4-flash"
+    assert shipped.expander.model_id == "deepseek/deepseek-v4.1-flash"
     assert shipped.expander.endpoint == shipped.teacher.endpoint
     assert shipped.expander.credential_env == shipped.teacher.credential_env
     assert shipped.expander.thinking == {"type": "disabled"}

@@ -140,7 +140,7 @@ def validate_record(record: dict) -> None:
     if not last_calls:
         raise SerializeError("serialize.last_turn_not_finish")
     last_name = (last_calls[0].get("function") or {}).get("name")
-    if last_name not in FINISH_OPS:
+    if last_name not in FINISH_OPS and last_name != "submit_plan":
         raise SerializeError("serialize.last_turn_not_finish")
     for index, (segment, flag) in enumerate(zip(segments, train_on)):
         if flag != (segment in ("step", "final")):
@@ -183,7 +183,10 @@ def serialize(
     """
     if not episode.turns:
         raise SerializeError("serialize.empty_episode")
-    if not episode.reached_finish or _tool_name(episode.turns[-1]) not in FINISH_OPS:
+    last_name = _tool_name(episode.turns[-1])
+    if not episode.reached_finish or (
+        last_name not in FINISH_OPS and last_name != "submit_plan"
+    ):
         raise SerializeError("serialize.last_turn_not_finish")
     for index, turn in enumerate(episode.turns):
         if not turn.tool_calls:

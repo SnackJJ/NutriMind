@@ -44,11 +44,26 @@ from src.training.data_factory.concepts import (
 )
 
 __all__ = [
+    "ACTION_ERROR_CLASS",
     "V2_ACTION_OPS",
     "derive_execution",
+    "is_recovery_positive",
+    "observation_error_code",
+    "recovery_codes",
     "parse_action_text",
     "verify",
 ]
+
+# Table-driven partition of every code ``nutrienv.actions.dispatch`` /
+# ``schemas.validate_envelope`` raises. A test enumerates the installed lab
+# source so a new code cannot silently land in neither bucket (ADR-013).
+ACTION_ERROR_CLASS: dict[str, str] = {
+    "unknown_food": "semantic",
+    "implausible_quantity": "semantic",
+    "bad_index": "semantic",
+    "bad_schema": "syntax",
+    "unknown_op": "syntax",
+}
 
 # v2's own legal-op vocabulary — a mirror of NutriEnv.step's dispatch table at
 # the pinned rev. nutri-env's ``OPS`` is NOT in its ``__all__`` (ADR-012:
@@ -117,6 +132,49 @@ def parse_action_text(text: str | None) -> tuple[dict | None, str]:
                 return None, "illegal_op"
             return _normalize_action(data), "ok"
     return None, "no_json"
+
+
+def observation_error_code(observation: str | None) -> str | None:
+    """Extract an ``ActionError.code`` from a turn observation, if present."""
+    if not observation:
+        return None
+    try:
+        payload = json.loads(observation)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    if isinstance(error, dict) and isinstance(error.get("code"), str):
+        return error["code"]
+    if isinstance(error, str) and error in ACTION_ERROR_CLASS:
+        return error
+    return None
+
+
+def is_recovery_positive(result: EpisodeResult, verification) -> bool:
+    """True iff a semantic ``ActionError`` observation plus a Pass end state.
+
+    Pure: same ``(EpisodeResult, verification)`` → same bool. ``bad_schema`` /
+    ``unknown_op`` are syntax and do not count (ADR-013).
+    """
+    if getattr(verification, "status", None) != "pass":
+        return False
+    for turn in result.turns:
+        code = observation_error_code(turn.observation)
+        if code is not None and ACTION_ERROR_CLASS.get(code) == "semantic":
+            return True
+    return False
+
+
+def recovery_codes(result: EpisodeResult) -> list[str]:
+    """ActionError codes observed on the episode, in turn order."""
+    codes: list[str] = []
+    for turn in result.turns:
+        code = observation_error_code(turn.observation)
+        if code is not None:
+            codes.append(code)
+    return codes
 
 
 def derive_execution(episode: EpisodeResult) -> str:

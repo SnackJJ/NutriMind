@@ -76,7 +76,7 @@ def test_manifest_status_split_versions_and_health_hand_count(tmp_path, expander
     versions = manifest["versions"]
     records = [
         json.loads(line)
-        for line in (out / "sft" / "train.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (out / "sft" / "accepted.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert records
     meta = records[0]["meta"]
