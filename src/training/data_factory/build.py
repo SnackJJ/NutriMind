@@ -42,7 +42,7 @@ import subprocess
 import sys
 import tempfile
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from nutrienv.bench import EXAM_SPLIT_PATH, check_achievable, load_exam
 from nutrienv.bench.pipeline.freezer import freeze_tasks, task_to_item
@@ -61,6 +61,7 @@ from src.training.data_factory.gates import GateContext
 from src.training.data_factory.query_identity import UniqueQueryIndex, unique_caps
 from src.training.data_factory.roster_train import TRAIN_ROSTER
 from src.training.data_factory.rollout_fc import rollout_tool_call
+from src.training.data_factory.search_gate import judge_food
 from src.training.data_factory.serialize import SerializeError
 from src.training.data_factory.synthetic import qwen_max_fallback_expander
 
@@ -522,6 +523,64 @@ def _run_freeze_mini(
     return manifest
 
 
+# Locatability statuses that judge the pipeline rather than a food: `unavailable`
+# (the package would not rebuild) and `no_foods` (its oracle exposes no ids). They are
+# reported in the block, never averaged into the rate.
+NOT_A_FOOD_VERDICT = frozenset({"unavailable", "no_foods"})
+
+
+def _locatability_status(catalog, package: TaskPackage, task=None) -> str:
+    """How the agent's own search would reach the foods this task pins.
+
+    Reported per accepted task as `metrics.search_locatability`. This is an
+    observable, not a gate: whether an ambiguous pin should be rejected needs the
+    number first.
+
+    The verdict is the **weakest** across every pinned food — a task is only as
+    findable as its least findable food — and per food it is the weakest across the
+    forms the utterance can carry, including the brief's handle (see `search_gate`).
+
+    Foods come from the ``Task``: the live one when the caller has it, otherwise one
+    rebuilt out of the package with the same public loader a resume uses (the
+    package's oracle payload stores freezer *references*, ``ledger="s0_plus_tail"``,
+    not rows, so the ids are only readable through a loaded task).
+    """
+    if task is None:
+        try:
+            task = _task_from_package(package, catalog)
+        except (KeyError, ValueError, OSError, TypeError) as exc:
+            # A package that will not rebuild is a real defect on resume paths; the
+            # metric must not turn it into a silent data point.
+            log.warning("locatability: cannot rebuild %s: %s", package.task_id, exc)
+            return "unavailable"
+    verdicts = [
+        judge_food(food_id, catalog=catalog)
+        for food_id in _oracle_food_ids(getattr(task, "oracle", None))
+    ]
+    if not verdicts:
+        # An accepted task with no pinned food is a defect, not a findability verdict.
+        log.warning("locatability: %s pins no food to judge", package.task_id)
+        return "no_foods"
+    return max(verdicts, key=lambda verdict: verdict.ordinal).status
+
+
+def _oracle_food_ids(oracle) -> list[str]:
+    """The foods an oracle expects, in source order, deduplicated."""
+    if oracle is None:
+        return []
+    sources = list(getattr(oracle, "sub_oracles", None) or ()) or [oracle]
+    ids: list[str] = []
+    for entry in sources:
+        rows = getattr(entry, "ledger_tail", None) or getattr(entry, "ledger", None) or ()
+        if isinstance(rows, str):
+            continue
+        for row in rows:
+            food_id = row.get("food_id") if isinstance(row, Mapping) else getattr(row, "food_id", None)
+            if food_id and str(food_id) not in ids:
+                ids.append(str(food_id))
+    return ids
+
+
 def _finalize_observability(
     manifest: dict,
     *,
@@ -544,6 +603,7 @@ def _finalize_observability(
     budget_stopped: bool = False,
     unique_queries: UniqueQueryIndex | None = None,
     unique_query_budget: int | None = None,
+    search_locatability_counts: Counter[str] | None = None,
 ) -> None:
     """Fill §9.5 / §17 / §20 blocks on the run manifest (ticket 015)."""
     fail_n = manifest["counts"].get("teacher_rejected", 0)
@@ -587,6 +647,19 @@ def _finalize_observability(
         unique_queries.by_family if unique_queries is not None else {}
     )
     manifest["metrics"]["unique_query_budget"] = unique_query_budget
+    locatability = dict(sorted((search_locatability_counts or Counter()).items()))
+    manifest["metrics"]["search_locatability"] = locatability
+    # `unavailable` (the package would not rebuild) and `no_foods` (its oracle exposes
+    # no ids) are defects in the pipeline, not verdicts about a food, so neither may
+    # dilute the rate. Both stay in the block above, where they are visible.
+    judged = sum(
+        count
+        for status, count in locatability.items()
+        if status not in NOT_A_FOOD_VERDICT
+    )
+    manifest["metrics"]["search_locatability_usable_rate"] = _rate(
+        int(locatability.get("unique", 0)), judged
+    )
     manifest["metrics"]["recovery_positive"] = rec_pos
     manifest["metrics"]["recovery_fraction"] = rec_frac
     manifest["metrics"]["recovery_by_code"] = recovery_by_code or {
@@ -927,6 +1000,10 @@ def build(
         if not force and from_stage is None:
             terminal = _terminal_task_ids(out, include_packages=not run_teacher)
         accepted_records: list[dict] = []
+        # Search locatability of every pinned food (see search_gate): reported, not
+        # enforced. Whether to reject an ambiguous pin is a data decision that needs
+        # the number first.
+        search_locatability_counts: Counter[str] = Counter()
         resume_sft = out / "sft" / "accepted.jsonl"
         if not resume_sft.is_file():
             resume_sft = out / "sft" / "train.jsonl"
@@ -969,7 +1046,7 @@ def build(
                 bucket = recovery_by_code[klass]
                 bucket[code] = bucket.get(code, 0) + 1
 
-        def _serialize_cache(package, cache, intent) -> None:
+        def _serialize_cache(package, cache, intent, task=None) -> None:
             nonlocal pass_count, serialized, indeterminate_task_ids
             nonlocal teacher_completed, teacher_error, teacher_no_finish, tokens
             task_id = intent["task_id"]
@@ -1020,6 +1097,10 @@ def build(
                 manifest["counts"]["accepted"] += 1
                 serialized += 1
                 accepted_by_family[intent["family"]] += 1
+                _bump_codes(
+                    search_locatability_counts,
+                    [_locatability_status(catalog, package, task)],
+                )
                 unique_queries.add(
                     package.query, family=intent["family"], task_id=task_id
                 )
@@ -1201,7 +1282,7 @@ def build(
                     family_cfg=family_cfg,
                     teacher_complete=teacher_complete, catalog=catalog, out=out,
                 )
-            _serialize_cache(package, cache, intent)
+            _serialize_cache(package, cache, intent, task)
             if unique_query_budget and len(unique_queries) >= unique_query_budget:
                 break
 
@@ -1295,6 +1376,7 @@ def build(
             budget_stopped=budget_stopped,
             unique_queries=unique_queries,
             unique_query_budget=unique_query_budget,
+            search_locatability_counts=search_locatability_counts,
         )
         _write_manifest(out, manifest, before_replace=before_replace)
         return manifest

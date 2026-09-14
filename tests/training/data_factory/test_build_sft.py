@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import pathlib
+from typing import get_args
 
 import pytest
 
@@ -20,7 +21,12 @@ from nutrienv.world.catalog_store import load_catalog  # noqa: E402
 
 from src.training.data_factory import build as build_mod  # noqa: E402
 from src.training.data_factory import author as author_mod  # noqa: E402
-from src.training.data_factory.build import build, enumerate_intents  # noqa: E402
+from src.training.data_factory.build import (  # noqa: E402
+    NOT_A_FOOD_VERDICT,
+    build,
+    enumerate_intents,
+)
+from src.training.data_factory.search_gate import Locatability  # noqa: E402
 
 
 def sft_lines(out: pathlib.Path) -> list[str]:
@@ -136,6 +142,21 @@ def test_scripted_pass_to_train_jsonl(tmp_path, catalog, expander):
     )
     assert manifest["status"] == "complete"
     assert manifest["counts"]["accepted"] == 2
+
+    # the search-locatability observable is written on the accept path, one
+    # verdict per accepted task (an empty block here would mean the wiring is dead)
+    locatability = manifest["metrics"]["search_locatability"]
+    assert sum(locatability.values()) == manifest["counts"]["accepted"]
+    # The allowed set is derived from the verdict Literal plus the build-level defect
+    # statuses; a hardcoded list once excluded `no_terms`, which is a legal verdict.
+    assert set(locatability) <= set(get_args(Locatability)) | NOT_A_FOOD_VERDICT
+    judged = sum(
+        count for status, count in locatability.items()
+        if status not in NOT_A_FOOD_VERDICT
+    )
+    assert manifest["metrics"]["search_locatability_usable_rate"] == pytest.approx(
+        locatability.get("unique", 0) / judged
+    )
 
     lines = sft_lines(out)
     records = [json.loads(line) for line in lines]
