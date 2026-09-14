@@ -12,6 +12,8 @@ from collections.abc import Mapping, Sequence
 
 from nutrienv.bench.pipeline.sampler import spoken_display_name
 
+from src.training.data_factory.speech import _REC_ASK
+
 __all__ = [
     "CONSISTENCY_CODES",
     "foods_from_task",
@@ -31,6 +33,21 @@ CONSISTENCY_CODES = frozenset(
 
 _MEALS = ("breakfast", "brunch", "lunch", "dinner", "snack")
 _GRAMS = re.compile(r"\b\d+(?:\.\d+)?\s*g(?:rams?)?\b", re.I)
+
+
+def _log_span(query: str, family: str) -> str:
+    """The part of the utterance that describes the logged meal.
+
+    A composite names two meals: the one just eaten and the one being asked about.
+    The ask is derived from the eaten meal (breakfast asks about lunch), so on a
+    lunch intent "What's for dinner?" is *correct* — checking the whole sentence
+    against the intent's occasion rejects it. The lab splits the same way
+    (`_composite_speech_spans`) before binding; do the same here.
+    """
+    if not family.startswith("composite"):
+        return query
+    rec = _REC_ASK.search(query)
+    return query[: rec.start()] if rec else query
 
 
 def _handles(catalog: Mapping, food_id: str) -> list[str]:
@@ -122,10 +139,12 @@ def query_entity_consistency(
             return "author.foods_outside_binding"
 
     occasion = str(intent.get("occasion") or "").lower()
-    meals = [meal for meal in _MEALS if re.search(rf"\b{re.escape(meal)}\b", blob)]
+    # the occasion must be the one *eaten*, so read only the log span
+    log_blob = _log_span(query or "", family).lower()
+    meals = [meal for meal in _MEALS if re.search(rf"\b{re.escape(meal)}\b", log_blob)]
     if occasion and meals and occasion not in meals:
         return "author.intent_conflict"
-    if (intent.get("amount_path") or "") == "named_measure" and _GRAMS.search(blob):
+    if (intent.get("amount_path") or "") == "named_measure" and _GRAMS.search(log_blob):
         return "author.intent_conflict"
 
     bound_heads = [_head(catalog, food_id) for food_id in food_ids]
