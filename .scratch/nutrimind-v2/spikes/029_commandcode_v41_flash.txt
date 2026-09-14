@@ -1,0 +1,36 @@
+Command Code Provider API probe — 2026-09-13
+Base: https://api.commandcode.ai/provider/v1
+Auth: COMMANDCODE_API_KEY (Bearer)
+Docs: https://commandcode.ai/docs/provider-api
+
+GET /models → 69 models. DeepSeek ids:
+  deepseek/deepseek-v4-pro
+  deepseek/deepseek-v4-flash
+  deepseek/deepseek-v4-flash-vision-exp
+  deepseek/deepseek-v4-flash-fast
+  deepseek/deepseek-v4.1-flash   ← Batch-1 pin
+
+POST /chat/completions
+  model=deepseek-v4.1-flash          → 400 unsupported_model
+  model=deepseek/deepseek-v4.1-flash → 200
+
+Python urllib default User-Agent → Cloudflare HTTP 403 error 1010
+curl / urllib with User-Agent: NutriMind-data-factory/1.0 → 200
+
+Simple completion: content="pong"
+  message keys: content, reasoning, reasoning_details, role
+  no message.reasoning_content
+  usage.completion_tokens_details.reasoning_tokens populated
+
+thinking: {type: enabled}  → reasoning present
+thinking: {type: disabled} → reasoning still present (not actually off)
+reasoning_effort=none      → 400 expected one of low|medium|high|xhigh|max
+reasoning_effort=low       → 200, reasoning still present
+
+Native tools (search_foods): finish_reason=tool_calls
+  tool_calls = [{id, type:function, function:{name, arguments}}]
+
+Factory pin: configs/data_factory.yaml teacher+expander
+  model_id: deepseek/deepseek-v4.1-flash
+  endpoint: https://api.commandcode.ai/provider/v1/chat/completions
+  credential_env: COMMANDCODE_API_KEY

@@ -32,19 +32,19 @@ nutrienv:
 
 target: sft                      # sft | rlvr | eval | all (spec §7)
 
-teacher:                         # ADR-011 amended 2026-09-09: ark/deepseek-v4-flash
-  model_id: "ark/deepseek-v4-flash"         # on api/plan/v3; thinking enabled is the
-  endpoint: "api/plan/v3/chat/completions"  # length control (replaces reasoning_effort)
-  credential_env: "ARK_API_KEY"             # shared with the expander (one provider)
+teacher:                         # ADR-011 amended 2026-09-13: Command Code Provider API
+  model_id: "deepseek/deepseek-v4.1-flash"  # wire id from GET /provider/v1/models
+  endpoint: "https://api.commandcode.ai/provider/v1/chat/completions"
+  credential_env: "COMMANDCODE_API_KEY"     # shared with the expander (one provider)
   thinking: {type: "enabled"}
   temperature_first: 0.0         # attempt 1 (spec §16 / OQ-11)
   temperature_retry: 0.7         # attempts 2..k
   per_turn_timeout_s: 60
 
 expander:                        # same endpoint + credential as the teacher
-  model_id: "ark/deepseek-v4-flash"
-  endpoint: "api/plan/v3/chat/completions"
-  credential_env: "ARK_API_KEY"
+  model_id: "deepseek/deepseek-v4.1-flash"
+  endpoint: "https://api.commandcode.ai/provider/v1/chat/completions"
+  credential_env: "COMMANDCODE_API_KEY"
   thinking: {type: "disabled"}   # structured {query, foods} JSON; no reasoning needed
   timeout_s: 60
   parse_retries: 1               # attempts = parse_retries + 1 (spec §16)

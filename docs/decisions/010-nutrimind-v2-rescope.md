@@ -45,14 +45,16 @@ Data rollout waves are named **Batch 1 / Batch 2**, not "第一档/第二档" �
 - Two version lines to keep straight in docs and on the CV.
 
 ### Neutral
-- NutriEnv lives in the sibling repo `../nutri-env` and is consumed read-only
-  (see ADR-012).
+- NutriEnv is consumed read-only from `../nutri-env-lab` (ADR-012 amended 2026-09-11).
 - GiGPO, Pro-as-target, and mixing RAG tools into the exam student stay out of scope
-  for v2's first phase.
+  for v2's first phase. The v2 RL comparison arm is DAPO, not GiGPO (ADR-015).
+  OPD is deferred.
 
 ## Related
 
 - `docs/plans/nutrienv_student.md`, `docs/handoff/2026-09_nutrienv-student.md`
 - [ADR-009](009-grpo-reward-redesign-against-shortest-path-collapse.md),
   [ADR-011](011-batch1-sft-trajectory-short-plan-thinking-teacher.md),
-  [ADR-012](012-nutrienv-read-only-benchmark.md)
+  [ADR-012](012-nutrienv-read-only-benchmark.md),
+  [ADR-014](014-native-tool-calling-v2-protocol.md),
+  [ADR-015](015-v2-post-training-stack-trl-sft-verl-rl.md)
