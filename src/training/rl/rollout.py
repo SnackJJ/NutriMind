@@ -17,8 +17,9 @@ from nutrienv.world.catalog_store import load_catalog
 
 from src.training.data_factory.concepts import EpisodeResult, TaskPackage
 from src.training.data_factory.rollout_fc import rollout_tool_call
+from src.training.rl.prompt import prompt_for_package
 
-__all__ = ["student_rollout"]
+__all__ = ["prompt_for_package", "student_rollout"]
 
 
 def _task_from_package(task_package: TaskPackage, catalog):
@@ -54,22 +55,37 @@ def student_rollout(
     callers; the injected policy is the source of determinism in tests."""
     if k < 1:
         raise ValueError("k must be >= 1")
-    if policy_spec.get("parallel_tool_calls", False):
+    prompt = prompt_for_package(task_package)
+    if prompt["parallel_tool_calls"] or policy_spec.get("parallel_tool_calls", False):
         raise ValueError("parallel_tool_calls must be false (ADR-014)")
+    policy_spec = {**policy_spec, "prompt": prompt, "parallel_tool_calls": False}
     complete = policy_spec.get("complete")
     if complete is None:
         raise ValueError("policy_spec.complete is required (injected policy)")
     catalog = policy_spec.get("catalog") or load_catalog()
     task = _task_from_package(task_package, catalog)
+    url = policy_spec.get("url")
+    generation = policy_spec.get("generation")
+    model = policy_spec.get("model", "scripted-student")
+
+    def bound_complete(request):
+        request = {
+            **request,
+            "url": url,
+            "generation": generation,
+            "model": model,
+        }
+        return complete(request)
+
     _ = seed
     episodes: list[EpisodeResult] = []
     for _ in range(k):
         episodes.append(
             rollout_tool_call(
                 task,
-                teacher_complete=complete,
+                teacher_complete=bound_complete,
                 catalog=catalog,
-                model=policy_spec.get("model", "scripted-student"),
+                model=model,
             )
         )
     return episodes
