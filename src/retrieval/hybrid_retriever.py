@@ -200,6 +200,7 @@ class HybridRetriever:
         return self._embedding_model.encode(
             self.instruction + query,
             normalize_embeddings=True,
+            show_progress_bar=False,
         ).tolist()
 
     def _parse_chroma_results(self, results: dict) -> list[dict]:
@@ -250,7 +251,7 @@ class HybridRetriever:
             return candidates
 
         pairs = [(query, c["content"]) for c in candidates]
-        scores = self.reranker.predict(pairs)
+        scores = self.reranker.predict(pairs, show_progress_bar=False)
         for c, s in zip(candidates, scores):
             c["rerank_score"] = float(s)
         candidates.sort(key=lambda x: x["rerank_score"], reverse=True)

@@ -50,8 +50,12 @@ def parse_args() -> argparse.Namespace:
                    help="Max tokens per completion")
 
     # Training
-    p.add_argument("--batch_size", type=int, default=1)
-    p.add_argument("--grad_accum", type=int, default=4, help="Gradient accumulation steps")
+    # batch_size must equal num_generations so each step processes one full prompt group
+    # (all G rollouts together for correct GRPO advantage computation)
+    p.add_argument("--batch_size", type=int, default=16,
+                   help="Must equal num_generations for correct GRPO behavior")
+    p.add_argument("--grad_accum", type=int, default=4,
+                   help="Gradient accumulation steps (effective batch = grad_accum prompts)")
     p.add_argument("--learning_rate", type=float, default=1e-5)
     p.add_argument("--num_epochs", type=int, default=3)
     p.add_argument("--max_steps", type=int, default=-1, help="Override epochs; -1 = use epochs")
@@ -103,6 +107,15 @@ def main() -> int:
         return 1
     if not train_data_path.exists():
         log.error("Training data not found: %s\nRun: python scripts/prepare_trl_data.py", train_data_path)
+        return 1
+
+    # Validate GRPO batch configuration
+    if args.batch_size != args.num_generations:
+        log.error(
+            "batch_size (%d) must equal num_generations (%d) for correct GRPO behavior. "
+            "Each training step must process all G rollouts from one prompt together.",
+            args.batch_size, args.num_generations
+        )
         return 1
 
     # Late imports (heavy)
