@@ -10,20 +10,34 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from nutrienv.bench.pipeline.generate_one import parse_query_foods_payload
-from nutrienv.bench.pipeline.sampler import speakable_tracer_food, spoken_display_name
+from nutrienv.bench.pipeline.generate_one import (
+    GRAM_UNITS,
+    OUNCE_UNITS,
+    UNIT_SYNONYMS,
+    _WORD,
+    _speech_amount_path,
+    parse_query_foods_payload,
+)
+from nutrienv.bench.pipeline.sampler import (
+    speakable_tracer_food,
+    spoken_display_name,
+    unit_naturalness_rank,
+)
 
 __all__ = [
     "BRIEF_SYSTEM",
     "NEXT_RECOMMEND_OCCASION",
     "SemanticBrief",
+    "SpeechPin",
     "bind_speech_context",
     "build_semantic_brief",
     "complete_from_chat_client",
     "make_brief_expander",
+    "pin_speech_portion",
     "render_semantic_brief",
+    "revision_hint",
 ]
 
 BRIEF_SYSTEM = (
@@ -51,6 +65,56 @@ _AMOUNT_CUE = {
     "unspecified": "Do not name a precise quantity.",
 }
 
+# Revision instructions for a rejected first attempt, keyed by the reject's
+# reason vocabulary. Zero-LLM: the rejected reason already names the fault.
+_REVISION_HINTS = {
+    "amount_path": (
+        "Rejected: the amount word you used is not allowed. You must write "
+        "\"{portion}\" — use that exact measure word for the logged food."
+    ),
+    "unresolvable": (
+        "Rejected: the amount did not parse against the food. Write the amount as "
+        "\"{portion}\", directly in front of the food name."
+    ),
+    "steps": (
+        "Rejected: the logged-meal clause must contain one of the words \"log\", "
+        "\"ate\", \"eaten\", \"had\" — past tense, not \"logging\" or \"logged\"."
+    ),
+    "query_foods_mismatch": (
+        "Rejected: the sentence did not name the logged food closely enough. Write "
+        "the food's own name in the sentence, with its amount as \"{portion}\"."
+    ),
+    "intent_conflict": (
+        "Rejected: the sentence conflicts with the requested meal or amount. Keep "
+        "the same meal, and state the amount as \"{portion}\"."
+    ),
+    "ambiguous": "Name each food with its own distinct words; do not merge them.",
+    "omitted_food": "Mention every food you log, in the sentence.",
+}
+
+
+def revision_hint(reason: str, *, portion: str = "", query: str = "") -> str | None:
+    """Instruction for a second attempt after ``reason`` rejected the first.
+
+    ``portion`` is the pinned phrase from the rejected brief and ``query`` the
+    rejected utterance. A hint never states a placeholder in place of a real
+    phrase: an amount hint without a pinned portion is dropped rather than told to
+    the model, which would otherwise echo the placeholder back as its answer.
+    Returns None when the reason is not one a rewrite can fix, so the caller keeps
+    the plain retry behaviour.
+    """
+    if reason == "steps" and "?" not in query and "what" not in query.lower():
+        return (
+            "Rejected: state plainly what you already ate, in the past tense — the "
+            "word \"had\" or \"ate\". Do not write \"logging\" or \"logged\"."
+        )
+    template = _REVISION_HINTS.get(reason)
+    if template is None:
+        return None
+    if "{portion}" in template and not portion:
+        return None
+    return template.format(portion=portion)
+
 _OCCASION_SITUATION = {
     "breakfast": ("home kitchen", "The user is making breakfast at home."),
     "lunch": ("cafeteria", "The user is logging lunch they already ate."),
@@ -71,6 +135,21 @@ NEXT_RECOMMEND_OCCASION = {
 
 
 @dataclass(frozen=True)
+class SpeechPin:
+    """A portion commitment made in code, before any LLM call.
+
+    ``phrase`` is literal speech ("a cup", "150 g", "a bowl"); ``unit`` is the unit
+    word inside it. The brief hands the expander ``phrase`` so the uttered amount
+    cannot land outside the intent's amount path, which is checked as an exactly
+    equal class by the binder.
+    """
+
+    phrase: str
+    unit: str
+    klass: str
+
+
+@dataclass(frozen=True)
 class SemanticBrief:
     """Facts the expander may see. ``food_id`` is code-side only — not rendered."""
 
@@ -84,6 +163,93 @@ class SemanticBrief:
     amount_cue: str
     food_id: str
     intent_line: str
+    portion: str = ""
+    feedback: str = ""
+
+
+def _alternative_rank(alt):
+    return (unit_naturalness_rank(alt.key), alt.grams, alt.phrase)
+
+
+def _pin_for(food, amount_path: str) -> SpeechPin | None:
+    """The portion this food speaks under ``amount_path``, or None if it cannot.
+
+    Phrase choice mirrors the milli's tracer (top-ranked quantity-1.0 alternative),
+    plus one requirement the tracer does not make: the chosen phrase must classify
+    as ``amount_path``. That check is what stops a QNS ``serving`` word ("a bowl")
+    from being handed to a ``named_measure`` intent, which the binder rejects.
+    """
+    candidates = [alt for alt in (food.alternatives or ()) if alt.quantity == 1.0]
+    if not candidates:
+        return None
+    if amount_path == "explicit_grams":
+        ranked = sorted((a for a in candidates if a.key != "qns"), key=_alternative_rank)
+        for alt in ranked:
+            phrase = f"{alt.grams:g} g"
+            if _speech_amount_path(phrase) == amount_path:
+                return SpeechPin(phrase=phrase, unit="g", klass=amount_path)
+        return None
+    ranked = sorted((a for a in candidates if a.key != "qns"), key=_alternative_rank)
+    for alt in ranked:
+        if _speech_amount_path(alt.phrase) == amount_path:
+            return SpeechPin(
+                phrase=alt.phrase, unit=_unit_word(alt.phrase), klass=amount_path
+            )
+    if amount_path == "unspecified":
+        for alt in candidates:
+            if alt.key == "qns":
+                return SpeechPin(
+                    phrase=_QNS_SPEECH,
+                    unit=_unit_word(_QNS_SPEECH),
+                    klass=amount_path,
+                )
+    return None
+
+
+def _unit_word(phrase: str) -> str:
+    """The unit word a phrase is parsed by ("half a cup" -> "cup")."""
+    for token in _WORD.findall(phrase.lower())[::-1]:
+        if token in UNIT_SYNONYMS or token in GRAM_UNITS or token in OUNCE_UNITS:
+            return token
+    return phrase
+
+
+# FNDDS QNS words people actually say. The catalog's own phrase for the qns key is
+# "a serving", which no speaker uses; the amount path is still the same class, so
+# the natural word is the one worth asking for.
+_QNS_SPEECH = "a bowl"
+
+
+def pin_speech_portion(pool, *, amount_path: str, catalog: Mapping) -> tuple:
+    """First pool food that can speak ``amount_path``, with its code-side pin.
+
+    Returns ``(food, handle, pin)`` or ``(None, None, None)``. Scoring is the
+    milli's own ``speakable_tracer_food`` (collision-free, gram-resolvable); the
+    pin is rejected on top of that when its phrase would classify as a different
+    amount path, and the search moves to the next food.
+    """
+    for food in pool.foods:
+        pin = _pin_for(food, amount_path)
+        if pin is None:
+            continue
+        picked = speakable_tracer_food(
+            _pool_with(pool, (food,)), catalog, amount_path=amount_path
+        )
+        if picked is None:
+            continue
+        _food, phrase, spoken = picked
+        if _speech_amount_path(phrase) != amount_path:
+            continue
+        handle = spoken or spoken_display_name(catalog, food.food_id)
+        return food, handle, pin
+    return None, None, None
+
+
+def _pool_with(pool, foods):
+    """``pool`` narrowed to ``foods`` — keeps the collision check single-food."""
+    return type(pool)(
+        pool_id=pool.pool_id, family=pool.family, foods=tuple(foods)
+    )
 
 
 def build_semantic_brief(
@@ -95,13 +261,12 @@ def build_semantic_brief(
     amount_path: str,
     occasion: str = "lunch",
     scene: str = "empty",
+    feedback: str = "",
 ) -> SemanticBrief | None:
     """Pick the canonical entity in code and return a brief, or None if none bind."""
-    picked = speakable_tracer_food(pool, catalog, amount_path=amount_path)
-    if picked is None:
+    food, handle, pin = pin_speech_portion(pool, amount_path=amount_path, catalog=catalog)
+    if food is None:
         return None
-    food, _phrase, spoken = picked
-    handle = spoken or spoken_display_name(catalog, food.food_id)
     source, situation = _OCCASION_SITUATION.get(
         occasion, ("home kitchen", f"The user is talking about {occasion}.")
     )
@@ -120,11 +285,18 @@ def build_semantic_brief(
         ),
         food_id=food.food_id,
         intent_line=_FAMILY_INTENT.get(family, family),
+        portion=pin.phrase,
+        feedback=feedback,
     )
 
 
 def render_semantic_brief(brief: SemanticBrief) -> str:
-    """Prose brief. No catalog field list, no internal ids."""
+    """Prose brief. No catalog field list, no internal ids.
+
+    When the code committed a portion, the amount line names that literal phrase
+    instead of the generic class cue: the utterance may still be written freely,
+    but it cannot land outside the intent's amount path.
+    """
     rec_ask = ""
     if brief.family == "composite":
         nxt = NEXT_RECOMMEND_OCCASION.get(brief.occasion, "dinner")
@@ -132,17 +304,27 @@ def render_semantic_brief(brief: SemanticBrief) -> str:
             f" After logging, ask what to eat next with a phrase like "
             f"\"What's for {nxt}?\"."
         )
+    if brief.portion:
+        amount_line = (
+            f"State the amount for that food exactly as \"{brief.portion}\" "
+            f"(this meal's amount is fixed; do not substitute another quantity "
+            f"word). {brief.amount_cue}"
+        )
+    else:
+        amount_line = brief.amount_cue
+    revision = f" {brief.feedback}" if brief.feedback else ""
     return (
         f"{brief.situation} "
         f"Persona: {brief.persona}. "
         f"Intent: {brief.intent_line}. "
         f"Meal: {brief.occasion}. Source: {brief.source}. "
         f"Express the selected {brief.entity_handle} naturally in one utterance. "
-        f"{brief.amount_cue} "
+        f"{amount_line} "
         "Do not mention catalog fields or internal IDs. "
         "Include only a natural cue that distinguishes home preparation from "
         "restaurant food when that contrast matters."
         f"{rec_ask}"
+        f"{revision}"
     )
 
 
@@ -190,6 +372,7 @@ def make_brief_expander(
     def bind_intent(intent: Mapping):
         occasion = intent.get("occasion") or "lunch"
         scene = intent.get("scene") or "empty"
+        feedback = ""
 
         def expander(pool, *, persona, family, amount_path=None):
             expander.last_pool_ids = {food.food_id for food in pool.foods}
@@ -202,9 +385,12 @@ def make_brief_expander(
                 amount_path=path,
                 occasion=occasion,
                 scene=scene,
+                feedback=feedback,
             )
             if brief is None:
+                expander.last_portion = ""
                 return {"query": "", "foods": []}
+            expander.last_portion = brief.portion
             messages = (
                 {"role": "system", "content": BRIEF_SYSTEM},
                 {"role": "user", "content": render_semantic_brief(brief)},
@@ -218,7 +404,14 @@ def make_brief_expander(
                     return parsed
             return last
 
+        def bind_feedback(text: str | None) -> None:
+            """Carry a rejected attempt's reason into the next brief."""
+            nonlocal feedback
+            feedback = text or ""
+
+        expander.bind_feedback = bind_feedback  # type: ignore[attr-defined]
         expander.last_pool_ids = None
+        expander.last_portion = ""
         return expander
 
     def expander(pool, *, persona, family, amount_path=None):
@@ -226,6 +419,7 @@ def make_brief_expander(
 
     expander.bind_intent = bind_intent  # type: ignore[attr-defined]
     expander.last_pool_ids = None
+    expander.last_portion = ""
     return expander
 
 

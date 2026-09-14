@@ -13,6 +13,7 @@ This is a stage module: it imports nutrienv at module level (allowed by spec
 
 from __future__ import annotations
 
+import ast
 import copy
 import dataclasses
 from collections.abc import Callable, Mapping
@@ -30,7 +31,7 @@ from src.training.data_factory.consistency import (
     query_entity_consistency,
 )
 from src.training.data_factory.roster_train import TRAIN_ROSTER
-from src.training.data_factory.speech import bind_speech_context
+from src.training.data_factory.speech import bind_speech_context, revision_hint
 
 __all__ = [
     "AUTHOR_STRATEGIES",
@@ -66,6 +67,18 @@ _REC_SHELL_BY_OCCASION = {
     "dinner": "rec-dinner",
     "snack": "rec-snack",
 }
+
+# Reject reasons a second attempt could fix. Structural faults (an unknown shell,
+# an illegal step pair) are excluded: retrying them only burns calls.
+_REWRITABLE_REASONS = frozenset(
+    {
+        "amount_path",
+        "unresolvable",
+        "steps",
+        "query_foods_mismatch",
+        "intent_conflict",
+    }
+)
 
 
 def person_for_intent(intent: Mapping):
@@ -483,8 +496,10 @@ def author_task(
 ) -> tuple:
     """Author one intent. Returns ``(task, None)`` or ``(None, reject_record)``.
 
-    A single un-authorable intent never fails the run (spec §4.1) — it becomes
-    an ``rejects/author.jsonl`` line and build continues.
+    A rejected attempt is retried when the reject is one a rewrite can fix, with
+    the reason bound onto the expander so the next brief carries it. A single
+    un-authorable intent never fails the run (spec §4.1) — it becomes an
+    ``rejects/author.jsonl`` line and build continues.
     """
     strategy = AUTHOR_STRATEGIES.get(intent["family"])
     if strategy is None:
@@ -502,8 +517,13 @@ def author_task(
     attempts = 1 + max(0, int(parse_retries))
     last_reject = None
     for _ in range(attempts):
+        if last_reject is not None:
+            _bind_revision(expander, last_reject, intent)
         task, reject = strategy(intent, **kwargs)
         if task is None:
+            if _retryable_author_reject(reject) and _ < attempts - 1:
+                last_reject = reject
+                continue
             return None, reject
         foods = foods_from_task(task)
         pool_ids = getattr(expander, "last_pool_ids", None)
@@ -526,3 +546,45 @@ def author_task(
             f"query/entity consistency: {code}",
         )
     return None, last_reject
+
+
+def _bind_revision(expander, reject: Mapping, intent: Mapping) -> None:
+    """Tell the expander why the previous attempt was rejected, before retrying."""
+    bind = getattr(expander, "bind_feedback", None)
+    if bind is None:
+        return
+    codes = list(reject.get("failure_codes") or ())
+    reason = codes[0].removeprefix("author.") if codes else ""
+    bind(
+        revision_hint(
+            reason,
+            portion=str(getattr(expander, "last_portion", "") or ""),
+            query=_rejected_query(str(reject.get("reason_detail") or "")),
+        )
+    )
+
+
+def _rejected_query(detail: str) -> str:
+    """The utterance out of ``_result_or_reject``'s ``(repr(query))`` tail."""
+    if not detail.endswith(")"):
+        return ""
+    tail = detail[detail.rfind("(") + 1 : -1]
+    try:
+        return str(ast.literal_eval(tail))
+    except (ValueError, SyntaxError):
+        return tail
+
+
+def _retryable_author_reject(reject: Mapping | None) -> bool:
+    """True when a second attempt could plausibly fix ``reject``.
+
+    Only the reasons a rewrite addresses: the amount word, an unparseable amount,
+    and the log-clause verb. Anything structural (a bad shell, an illegal pair)
+    would burn calls for nothing.
+    """
+    if not reject:
+        return False
+    codes = list(reject.get("failure_codes") or ())
+    return any(
+        code.removeprefix("author.") in _REWRITABLE_REASONS for code in codes
+    )
