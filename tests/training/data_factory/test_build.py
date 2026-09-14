@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import pathlib
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -196,7 +197,32 @@ def _flaky_expander(inner, *, fail_when):
 
 def test_one_unauthorable_intent_among_good(tmp_path, catalog, expander):
     out = tmp_path / "out"
-    flaky = _flaky_expander(expander, fail_when=lambda ap: ap == "explicit_grams")
+    # fail exactly one authored intent by seed, independent of amount_path mix
+    flaky = _flaky_expander(expander, fail_when=lambda ap: False)
+    calls = {"n": 0}
+    inner = expander
+
+    inner_bind = getattr(inner, "bind_intent", None)
+
+    def bind_intent(intent):
+        bound = inner_bind(intent) if inner_bind is not None else inner
+
+        def expander(pool, *, persona, family, amount_path=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return {"query": "", "foods": []}
+            result = bound(
+                pool, persona=persona, family=family, amount_path=amount_path
+            )
+            expander.last_pool_ids = getattr(bound, "last_pool_ids", None)
+            return result
+
+        return expander
+
+    def flaky(pool, *, persona, family, amount_path=None):
+        return bind_intent({})(pool, persona=persona, family=family, amount_path=amount_path)
+
+    flaky.bind_intent = bind_intent
     manifest = build(
         tiny_config(out), expander=flaky, stop_after="gate", output_dir=out
     )
@@ -213,7 +239,6 @@ def test_one_unauthorable_intent_among_good(tmp_path, catalog, expander):
     assert reject["status"] == "dropped"
     assert reject["failure_codes"][0].startswith("author.")
     assert reject["intent"]["task_id"] == reject["task_id"]
-    assert reject["intent"]["amount_path"] == "explicit_grams"
     # the good ones still materialized
     assert len(list((out / "task_packages").glob("*.json"))) == 2
 
@@ -344,6 +369,56 @@ def test_cli_refuses_implicit_expander(tmp_path):
     result = _run_cli("--config", str(config_path), "--stop-after", "gate")
     assert result.returncode == 1
     assert "--expander" in result.stderr
+
+
+def test_cli_commandcode_expander_authors_from_brief(tmp_path, monkeypatch):
+    calls: list[dict] = []
+
+    def fake_make(_cfg):
+        def complete(request):
+            calls.append(request)
+            user = next(m["content"] for m in request["messages"] if m["role"] == "user")
+            match = re.search(r"Express the selected (.+) naturally", user)
+            handle = match.group(1) if match else "oats"
+            meal_m = re.search(r"Meal: (\w+)", user)
+            meal = meal_m.group(1) if meal_m else "lunch"
+            query = f"For {meal} I had a bowl of {handle}."
+            return {"content": json.dumps({"query": query})}
+
+        return complete
+
+    monkeypatch.setattr(
+        "src.training.data_factory.rollout.make_ark_expander_client",
+        fake_make,
+    )
+    config_path = _cli_config(tmp_path)
+    rc = build_mod.main(
+        [
+            "--config", str(config_path),
+            "--stop-after", "author",
+            "--expander", "commandcode",
+        ]
+    )
+    assert rc == 0
+    assert calls
+    blob = json.dumps(calls).lower()
+    assert "food_id" not in blob
+    assert "allergen_tags" not in blob
+    assert any("one natural user query" in m["content"].lower()
+               for req in calls for m in req["messages"] if m["role"] == "system")
+    rejects = tmp_path / "out" / "rejects" / "author.jsonl"
+    tasks = tmp_path / "out" / "tasks" / "log.jsonl"
+    assert calls and (rejects.is_file() or tasks.is_file())
+
+
+def test_cli_commandcode_expander_requires_network_guard(tmp_path):
+    result = _run_cli(
+        "--config", str(_cli_config(tmp_path)),
+        "--stop-after", "author",
+        "--expander", "commandcode",
+    )
+    assert result.returncode == 1
+    assert "NUTRIMIND_ALLOW_NETWORK" in result.stderr or "build aborted" in result.stderr
 
 
 def test_cli_rev_mismatch_exits_nonzero(tmp_path):

@@ -190,6 +190,9 @@ def _build_turns(
                 fallback_reason=None,
             )
         )
+        if name == "submit_plan":
+            reached_finish = True
+            break
     return turns, reached_finish
 
 

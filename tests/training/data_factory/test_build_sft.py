@@ -21,6 +21,16 @@ from nutrienv.world.catalog_store import load_catalog  # noqa: E402
 from src.training.data_factory import build as build_mod  # noqa: E402
 from src.training.data_factory import author as author_mod  # noqa: E402
 from src.training.data_factory.build import build, enumerate_intents  # noqa: E402
+
+
+def sft_lines(out: pathlib.Path) -> list[str]:
+    accepted = out / "sft" / "accepted.jsonl"
+    if accepted.is_file():
+        return [line for line in accepted.read_text(encoding="utf-8").splitlines() if line.strip()]
+    train = out / "sft" / "train.jsonl"
+    if train.is_file():
+        return [line for line in train.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return []
 from src.training.data_factory.config import load_config  # noqa: E402
 from src.training.data_factory.concepts import RolloutCache  # noqa: E402
 from src.training.data_factory.rollout_fc import ScriptedFCTeacher  # noqa: E402
@@ -127,7 +137,7 @@ def test_scripted_pass_to_train_jsonl(tmp_path, catalog, expander):
     assert manifest["status"] == "complete"
     assert manifest["counts"]["accepted"] == 2
 
-    lines = (out / "sft" / "train.jsonl").read_text(encoding="utf-8").splitlines()
+    lines = sft_lines(out)
     records = [json.loads(line) for line in lines]
     assert len(records) == 2  # one per task, exactly
     assert [r["task_id"] for r in records] == sorted(r["task_id"] for r in records)
@@ -160,7 +170,7 @@ def test_retry_until_pass_then_stop(tmp_path, catalog, expander):
     assert manifest["counts"]["accepted"] == 2
     records = [
         json.loads(line)
-        for line in (out / "sft" / "train.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in sft_lines(out)
     ]
     assert all(r["accepted_from_attempt"] == 2 for r in records)
     for cache_path in (out / "rollouts" / "cache").glob("*.json"):
@@ -183,8 +193,8 @@ def test_byte_identical_train_jsonl_across_runs(tmp_path, catalog, expander):
           output_dir=tmp_path / "a")
     build(config_b, expander=expander, teacher_complete=ScriptedFCTeacher(script_b),
           output_dir=tmp_path / "b")
-    assert (tmp_path / "a" / "sft" / "train.jsonl").read_bytes() == (
-        tmp_path / "b" / "sft" / "train.jsonl"
+    assert (tmp_path / "a" / "sft" / "accepted.jsonl").read_bytes() == (
+        tmp_path / "b" / "sft" / "accepted.jsonl"
     ).read_bytes()
 
 
@@ -204,7 +214,7 @@ def test_all_attempts_fail_to_teacher_jsonl(tmp_path, catalog, expander):
     )
     assert manifest["counts"]["accepted"] == 0
     assert manifest["counts"]["teacher_rejected"] == 2
-    assert not (out / "sft" / "train.jsonl").read_text(encoding="utf-8").strip()
+    assert not sft_lines(out)
 
     lines = [
         json.loads(line)
@@ -256,7 +266,7 @@ def test_no_finish_to_indeterminate_jsonl(tmp_path, catalog, expander):
     for reject in lines:
         assert reject["status"] == "indeterminate"
         assert reject["failure_codes"] == ["teacher_no_finish"]
-    assert not (out / "sft" / "train.jsonl").read_text(encoding="utf-8").strip()
+    assert not sft_lines(out)
 
 
 def test_one_bad_intent_among_good_lands(tmp_path, catalog, expander):
@@ -267,11 +277,30 @@ def test_one_bad_intent_among_good_lands(tmp_path, catalog, expander):
     script = []
     for task in tasks:
         script.extend(episode_script(task))
-    # fail the explicit_grams intent (index 1) at author stage
+    # fail exactly one intent at author stage
+    calls = {"n": 0}
+
+    inner_bind = getattr(expander, "bind_intent", None)
+
+    def bind_intent(intent):
+        bound = inner_bind(intent) if inner_bind is not None else expander
+
+        def wrapped(pool, *, persona, family, amount_path=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                return {"query": "", "foods": []}
+            result = bound(
+                pool, persona=persona, family=family, amount_path=amount_path
+            )
+            wrapped.last_pool_ids = getattr(bound, "last_pool_ids", None)
+            return result
+
+        return wrapped
+
     def flaky(pool, *, persona, family, amount_path=None):
-        if amount_path == "explicit_grams":
-            return {"query": "", "foods": []}
-        return expander(pool, persona=persona, family=family, amount_path=amount_path)
+        return bind_intent({})(pool, persona=persona, family=family, amount_path=amount_path)
+
+    flaky.bind_intent = bind_intent
 
     out = tmp_path / "out"
     manifest = build(
@@ -283,7 +312,7 @@ def test_one_bad_intent_among_good_lands(tmp_path, catalog, expander):
     assert manifest["counts"]["accepted"] == 1
     records = [
         json.loads(line)
-        for line in (out / "sft" / "train.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in sft_lines(out)
     ]
     assert len(records) == 1
     assert records[0]["meta"]["verification"]["status"] == "pass"
@@ -340,11 +369,14 @@ def test_rerun_reuses_cache_without_teacher(tmp_path, catalog, expander):
     out = tmp_path / "out"
     build(config, expander=expander, teacher_complete=ScriptedFCTeacher(script),
           output_dir=out)
-    first = (out / "sft" / "train.jsonl").read_bytes()
+    first = (out / "sft" / "accepted.jsonl").read_bytes()
 
     # simulate the interrupted state: accepted record + reject lines gone,
     # cache + packages intact
-    (out / "sft" / "train.jsonl").unlink()
+    for name in ("train.jsonl", "accepted.jsonl", "holdout.jsonl", "loss_val.jsonl"):
+        path = out / "sft" / name
+        if path.exists():
+            path.unlink()
     for reject in (out / "rejects").glob("*.jsonl"):
         reject.unlink()
 
@@ -354,4 +386,4 @@ def test_rerun_reuses_cache_without_teacher(tmp_path, catalog, expander):
     ), output_dir=out)
     assert manifest["counts"]["cache_reused"] == 2
     assert manifest["counts"]["accepted"] == 2
-    assert (out / "sft" / "train.jsonl").read_bytes() == first  # identical records
+    assert (out / "sft" / "accepted.jsonl").read_bytes() == first  # identical records

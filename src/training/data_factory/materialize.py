@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import os
 import pathlib
 import tempfile
 from datetime import datetime, timezone
@@ -229,5 +230,7 @@ def write_package(package: TaskPackage, output_dir) -> pathlib.Path | None:
     blob = json.dumps(
         package.to_dict(), indent=2, ensure_ascii=False, sort_keys=True
     ) + "\n"
-    target.write_text(blob, encoding="utf-8")
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(blob, encoding="utf-8")
+    os.replace(tmp, target)
     return target

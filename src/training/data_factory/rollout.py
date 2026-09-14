@@ -19,15 +19,16 @@ eval runner's idle-read/submit breaks: a v2 training trajectory must end in
 an explicit FINISH op (ADR-011), and the step budget is the only other
 terminator. Builds the ticket-003 ``EpisodeResult``.
 
-**(c) ark clients** — thin production ``teacher_complete`` against
-``api/plan/v3/chat/completions`` (ADR-011 amended): reads
-``message.content`` + ``message.reasoning_content`` SEPARATELY (nutri-env's
-``complete_chat`` collapses them), ``usage.completion_tokens_details.
-reasoning_tokens`` for usage. Transport retries live here; attempt-level k
-retries belong to build (ticket 011). Real calls are guarded by
-``NUTRIMIND_ALLOW_NETWORK=1``; the credential comes from the environment and
-is never logged, echoed, or cached. The expander client is the same wire
-format with ``thinking: {"type": "disabled"}``.
+**(c) chat clients** — thin production ``teacher_complete`` against the
+Command Code Provider API (ADR-011 amended 2026-09-13). Reads
+``message.content`` plus ``message.reasoning_content`` or ``message.reasoning``
+SEPARATELY (nutri-env's ``complete_chat`` collapses them),
+``usage.completion_tokens_details.reasoning_tokens`` for usage, and
+``tool_calls`` when the lab FC loop supplies ``tools``. Transport retries
+live here; attempt-level k retries belong to build. Real calls are guarded
+by ``NUTRIMIND_ALLOW_NETWORK=1``; the credential comes from the environment
+and is never logged, echoed, or cached. The expander client is the same
+wire format with ``thinking: {"type": "disabled"}``.
 
 Stage module: imports nutrienv at module level (allowed by spec §18).
 """
@@ -264,12 +265,19 @@ _TRANSPORT_RETRIES = 3
 _RETRY_BACKOFF_S = 1.0
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 _DEFAULT_ARK_BASE = "https://ark.cn-beijing.volces.com/api/plan/v3"
+# Cloudflare 1010-blocks Python's default urllib User-Agent on this host.
+_HTTP_USER_AGENT = "NutriMind-data-factory/1.0"
+_FORWARD_BODY_KEYS = ("tools", "tool_choice", "parallel_tool_calls")
 
 
 def _endpoint_model(model: str) -> str:
-    """The wire model id: the routing prefix (``ark/``) is resolved by
-    ``lookup_chat_model`` for the base class, the endpoint wants the bare id."""
-    return model.split("/", 1)[1] if "/" in model else model
+    """Strip only the historical ``ark/`` routing prefix.
+
+    Command Code wire ids keep the org slash (``deepseek/deepseek-v4.1-flash``).
+    """
+    if model.startswith("ark/"):
+        return model[len("ark/") :]
+    return model
 
 
 def _resolve_endpoint(endpoint: str, *, base_env: str = "ARK_BASE_URL") -> str:
@@ -313,7 +321,7 @@ def make_ark_chat_client(
         if os.environ.get("NUTRIMIND_ALLOW_NETWORK") != "1":
             raise RuntimeError(
                 "real network disabled: set NUTRIMIND_ALLOW_NETWORK=1 to "
-                "call the ark endpoint"
+                "call the teacher endpoint"
             )
         api_key = os.environ.get(credential_env, "")
         if not api_key:
@@ -326,6 +334,9 @@ def make_ark_chat_client(
         }
         if "temperature" in request:
             body["temperature"] = request["temperature"]
+        for key in _FORWARD_BODY_KEYS:
+            if request.get(key) is not None:
+                body[key] = request[key]
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         url = _resolve_endpoint(endpoint)
 
@@ -337,6 +348,7 @@ def make_ark_chat_client(
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {api_key}",
+                    "User-Agent": _HTTP_USER_AGENT,
                 },
                 method="POST",
             )
@@ -351,23 +363,27 @@ def make_ark_chat_client(
                     continue
                 # never include the response/request body — it carries no key,
                 # but keep error surfaces minimal and predictable
-                raise RuntimeError(f"ark request failed: HTTP {exc.code}") from None
+                raise RuntimeError(f"provider request failed: HTTP {exc.code}") from None
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 if attempt + 1 < _TRANSPORT_RETRIES:
                     last_error = f"{type(exc).__name__}"
                     time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
                     continue
                 raise RuntimeError(
-                    f"ark request failed after {_TRANSPORT_RETRIES} attempts "
+                    f"provider request failed after {_TRANSPORT_RETRIES} attempts "
                     f"({last_error})"
                 ) from None
 
         message = data["choices"][0]["message"]
         usage = data.get("usage") or {}
         details = usage.get("completion_tokens_details") or {}
+        reasoning = message.get("reasoning_content")
+        if reasoning is None:
+            reasoning = message.get("reasoning")
         return {
             "content": message.get("content") or "",
-            "reasoning_content": message.get("reasoning_content"),
+            "reasoning_content": reasoning,
+            "tool_calls": message.get("tool_calls") or [],
             "finish_reason": (data["choices"][0].get("finish_reason")),
             "usage": {
                 "prompt_tokens": usage.get("prompt_tokens"),
@@ -380,8 +396,7 @@ def make_ark_chat_client(
 
 
 def make_ark_teacher_client(teacher_config) -> Callable[[dict], Completion]:
-    """The production ``teacher_complete``: ark/deepseek-v4-flash on
-    api/plan/v3 with ``thinking`` as the length control (ADR-011 amended)."""
+    """The production ``teacher_complete`` from ``teacher:`` in the yaml."""
     return make_ark_chat_client(
         endpoint=teacher_config.endpoint,
         model=teacher_config.model_id,

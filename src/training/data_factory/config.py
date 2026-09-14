@@ -107,8 +107,8 @@ class NutriEnvPin:
 
 @dataclasses.dataclass(frozen=True)
 class TeacherConfig:
-    """Teacher call shape (ADR-011 amended 2026-09-09: ark/deepseek-v4-flash on
-    api/plan/v3, ``thinking: {"type": "enabled"}`` as the length control)."""
+    """Teacher call shape (ADR-011 amended 2026-09-13: Command Code
+    ``deepseek/deepseek-v4.1-flash``, ``thinking: {"type": "enabled"}``)."""
 
     model_id: str
     endpoint: str
