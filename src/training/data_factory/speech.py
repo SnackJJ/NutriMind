@@ -312,6 +312,10 @@ def render_semantic_brief(brief: SemanticBrief) -> str:
         )
     else:
         amount_line = brief.amount_cue
+    name_line = (
+        f"Name the food exactly \"{brief.entity_handle}\", word for word — do not "
+        f"shorten, tidy, or reorder it."
+    )
     revision = f" {brief.feedback}" if brief.feedback else ""
     return (
         f"{brief.situation} "
@@ -319,6 +323,7 @@ def render_semantic_brief(brief: SemanticBrief) -> str:
         f"Intent: {brief.intent_line}. "
         f"Meal: {brief.occasion}. Source: {brief.source}. "
         f"Express the selected {brief.entity_handle} naturally in one utterance. "
+        f"{name_line} "
         f"{amount_line} "
         "Do not mention catalog fields or internal IDs. "
         "Include only a natural cue that distinguishes home preparation from "
