@@ -1,8 +1,8 @@
 ---
 id: 014
 title: build hardening — resume / rollouts cache reuse / --from-stage / atomic writes / cost budget
-status: ready-for-agent
-depends_on: [011]
+status: CLOSED (2026-09-11)
+depends_on: [011, 025, 026]
 spec: ../spec.md
 spec_sections: ["8", "22.14", "22.15", "16", "US-14", "US-15"]
 ---
@@ -24,20 +24,20 @@ spec_sections: ["8", "22.14", "22.15", "16", "US-14", "US-15"]
 - **Cost budget:** `usd_budget`; `on_budget: warn` (log at 80%, continue) or `stop`
   (halt cleanly at 100%, write the manifest with what completed).
 
-**Blocked by:** 011.
+**Blocked by:** 011, 025, 026.
 
 **Status:** ready-for-agent
 
-- [ ] killing a run mid-task leaves the previous `sft/train.jsonl` intact and no
+- [x] killing a run mid-task leaves the previous `sft/train.jsonl` intact and no
       half-written JSON line anywhere (test via a crash injected between write and rename)
-- [ ] a second run over an unchanged cache issues zero teacher calls and reproduces the
+- [x] a second run over an unchanged cache issues zero teacher calls and reproduces the
       same `sft/train.jsonl`
-- [ ] `--from-stage serialize` re-serializes from `RolloutCache.attempts[selected_attempt]`
+- [x] `--from-stage serialize` re-serializes from `RolloutCache.attempts[selected_attempt]`
       for every cached task and issues zero teacher calls; a cache with `selected_attempt =
       null` (no Pass) stays a reject, not a spurious accept
-- [ ] `--from-stage rollout` re-runs the teacher for terminal tasks and leaves non-targeted
+- [x] `--from-stage rollout` re-runs the teacher for terminal tasks and leaves non-targeted
       stages alone
-- [ ] `on_budget: stop` halts at 100% of `usd_budget` and still writes a valid
+- [x] `on_budget: stop` halts at 100% of `usd_budget` and still writes a valid
       `run_manifest.json` with the completed counts
-- [ ] `on_budget: warn` logs at 80% and runs to completion
-- [ ] a `task_id` seen twice within one run raises (bad enumerator)
+- [x] `on_budget: warn` logs at 80% and runs to completion
+- [x] a `task_id` seen twice within one run raises (bad enumerator)

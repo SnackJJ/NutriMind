@@ -1,7 +1,7 @@
 ---
 id: 019
 title: v2 SFT loader (minimal) — train_on → token mask after apply_chat_template; v1/v2 isolation
-status: ready-for-agent
+status: SUPERSEDED by 028 (2026-09-11) — §9.2 is FC; this ticket still rejects <tool_call> as v1 and trains the text-op shape
 depends_on: [008]
 spec: ../spec.md
 spec_sections: ["9.2", "14.1", "14.2", "19.4", "22.10", "OQ-4", "OQ-5"]
@@ -26,7 +26,7 @@ loader; spec §14.2's "out of scope to build" is narrowed to the trainer.
 
 **Blocked by:** 008.
 
-**Status:** ready-for-agent
+**Status:** SUPERSEDED by 028 — do not implement this ticket. The v2 loader must accept FC records and reject the retired text-op shape.
 
 - [ ] a valid v2 record → `(input_ids, labels)` where `labels` is `-100` on system /
       observation and equals the token ids on `step` / `final` content spans;
