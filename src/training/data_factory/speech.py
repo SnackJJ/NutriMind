@@ -26,6 +26,12 @@ from nutrienv.bench.pipeline.sampler import (
     unit_naturalness_rank,
 )
 
+from src.training.data_factory.pool_filter import (
+    filter_pool,
+    is_suitable_meal_food,
+    spoken_identity,
+)
+
 __all__ = [
     "BRIEF_SYSTEM",
     "NEXT_RECOMMEND_OCCASION",
@@ -226,9 +232,13 @@ def pin_speech_portion(pool, *, amount_path: str, catalog: Mapping) -> tuple:
     Returns ``(food, handle, pin)`` or ``(None, None, None)``. Scoring is the
     milli's own ``speakable_tracer_food`` (collision-free, gram-resolvable); the
     pin is rejected on top of that when its phrase would classify as a different
-    amount path, and the search moves to the next food.
+    amount path, and the search moves to the next food. Foods a roster adult would
+    not log (infant formula, baby food) are skipped.
     """
     for food in pool.foods:
+        entry = catalog.get(food.food_id) or {}
+        if not is_suitable_meal_food(entry.get("name")):
+            continue
         pin = _pin_for(food, amount_path)
         if pin is None:
             continue
@@ -240,7 +250,11 @@ def pin_speech_portion(pool, *, amount_path: str, catalog: Mapping) -> tuple:
         _food, phrase, spoken = picked
         if _speech_amount_path(phrase) != amount_path:
             continue
-        handle = spoken or spoken_display_name(catalog, food.food_id)
+        handle = spoken_identity(
+            entry.get("name"), aliases=tuple(entry.get("aliases") or ())
+        )
+        if not handle:
+            handle = spoken or spoken_display_name(catalog, food.food_id)
         return food, handle, pin
     return None, None, None
 
@@ -315,7 +329,7 @@ def render_semantic_brief(brief: SemanticBrief) -> str:
     name_line = (
         f"Name the food exactly \"{brief.entity_handle}\", word for word — do not "
         f"shorten, tidy, or reorder it."
-    )
+    ) if brief.entity_handle else ""
     revision = f" {brief.feedback}" if brief.feedback else ""
     return (
         f"{brief.situation} "
@@ -380,6 +394,7 @@ def make_brief_expander(
         feedback = ""
 
         def expander(pool, *, persona, family, amount_path=None):
+            pool = filter_pool(pool, catalog)
             expander.last_pool_ids = {food.food_id for food in pool.foods}
             path = amount_path or "named_measure"
             brief = build_semantic_brief(
