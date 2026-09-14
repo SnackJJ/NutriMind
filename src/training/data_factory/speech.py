@@ -9,6 +9,7 @@ expander contract. The synthetic expander is unchanged and may ignore briefs.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -138,6 +139,14 @@ NEXT_RECOMMEND_OCCASION = {
     "dinner": "dinner",
     "snack": "dinner",
 }
+
+# Where the recommend ask starts in a composite utterance — the same pattern the
+# lab uses to cut the log span (`_composite_speech_spans`). A composite names two
+# meals, so anything that reads one meal out of the sentence must read this span.
+_REC_ASK = re.compile(
+    r"what(?:'s| is) for|what should i (?:eat|have)|should i have|recommend",
+    re.I,
+)
 
 
 @dataclass(frozen=True)

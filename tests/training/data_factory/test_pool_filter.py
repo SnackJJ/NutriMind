@@ -169,3 +169,73 @@ def test_filter_pool_never_empties_a_pool(catalog):
     if not only_unsuitable.foods:
         pytest.skip("this pool happens to be all-suitable")
     assert filter_pool(only_unsuitable, catalog).foods == only_unsuitable.foods
+
+
+# --------------------------------------------------------------------------- #
+# composite occasion: the eaten meal is in the log span, not the ask
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("query", "food_id"),
+    [
+        ("I had a cup of oat-squares cereal. What's for dinner?", "2708466"),
+        ("I had a cup of oat-squares cereal for lunch. What's for dinner?", "2708466"),
+        (
+            "I already ate lunch at the cafeteria — a can of minestrone soup. "
+            "What's for dinner?",
+            "2710114",  # Soup, minestrone
+        ),
+    ],
+)
+def test_lunch_intent_accepts_a_dinner_ask(catalog, query, food_id):
+    """"What's for dinner?" on a lunch intent is correct: lunch asks about dinner.
+
+    The check used to scan the whole sentence, find "dinner", and reject with
+    `author.intent_conflict` — the ask names the *next* meal by construction.
+    """
+    assert (
+        query_entity_consistency(
+            query,
+            [food_id],
+            intent={"family": "composite", "occasion": "lunch",
+                    "amount_path": "named_measure"},
+            catalog=catalog,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "For breakfast I had a cup of oat-squares cereal. What's for lunch?",
+        "For dinner I had a cup of oat-squares cereal. What's for lunch?",
+    ],
+)
+def test_wrong_meal_in_the_log_span_is_still_rejected(catalog, query):
+    """Reading only the log span must not stop the check from working."""
+    assert (
+        query_entity_consistency(
+            query,
+            ["2708466"],
+            intent={"family": "composite", "occasion": "lunch",
+                    "amount_path": "named_measure"},
+            catalog=catalog,
+        )
+        == "author.intent_conflict"
+    )
+
+
+def test_grams_in_the_ask_do_not_trip_a_named_measure_intent(catalog):
+    """"1 fl oz (2 tablespoons)" is named measure; grams in the ask are irrelevant."""
+    ok = "I had 1 fl oz of cranberry juice for breakfast. What's for lunch?"
+    assert (
+        query_entity_consistency(
+            ok, ["2709324"],  # Cranberry juice, 100%, not a blend
+            intent={"family": "composite", "occasion": "breakfast",
+                    "amount_path": "named_measure"},
+            catalog=catalog,
+        )
+        is None
+    )
