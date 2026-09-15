@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 
 import pytest
 
@@ -23,6 +24,7 @@ from src.training.data_factory.speech import (  # noqa: E402
     complete_from_chat_client,
     make_brief_expander,
     render_semantic_brief,
+    revision_hint,
 )
 from src.training.data_factory.synthetic import synth_expander  # noqa: E402
 
@@ -33,6 +35,18 @@ _DUMP_NEEDLES = (
     "food_id",
     "allergen_tags",
 )
+
+_WORDS_LINE = re.compile(r"spelled as given: (.+?)\. They are how")
+_AMOUNT_LINE = re.compile(r'exactly as "([^"]+)"')
+_MEAL_LINE = re.compile(r"Meal: (\w+)\.")
+_QUOTED = re.compile(r'"([^"]+)"')
+
+
+def _brief_words(text: str) -> list[str]:
+    """The words the rendered brief requires, read back out of its own instruction."""
+    match = _WORDS_LINE.search(text)
+    assert match, "the brief no longer lists the words the food must be named by"
+    return _QUOTED.findall(match.group(1))
 
 
 @pytest.fixture(scope="module")
@@ -197,6 +211,112 @@ def test_brief_preserves_amount_path_instruction(catalog, pool):
         )
     ).lower()
     assert "do not mention grams" in named
+
+
+def test_brief_constrains_words_not_a_phrase(catalog, pool):
+    """The food is fixed by words; the sentence around them belongs to the writer.
+
+    Copying one phrase is what made utterances read like catalog rows ("bakery white
+    toasted bread"). The words still have to be there — the agent's search is lexical —
+    but word order, articles and grammar are the model's.
+    """
+    from src.training.data_factory.search_gate import search_words
+
+    brief = build_semantic_brief(
+        pool,
+        catalog=catalog,
+        persona="everyday",
+        family="log",
+        amount_path="named_measure",
+        occasion="lunch",
+        scene="empty",
+    )
+    text = render_semantic_brief(brief)
+    assert brief.required_words == tuple(search_words(brief.entity_handle))
+    assert len(brief.required_words) >= 2, "the fixture pool carries a one-word food"
+    for word in brief.required_words:
+        assert f'"{word}"' in text, word
+    assert "word for word" not in text
+    assert "spelled as given" in text
+    assert "say it your own way" in text
+
+
+def test_author_rejects_an_utterance_that_drops_a_required_word(catalog):
+    """A sentence that names the food but omits its identifying words is not a task.
+
+    The agent would search the words it was given, miss the pinned row, and log a
+    neighbour. The words come from the pinned food in code, not from the writer, so a
+    writer cannot drop the requirement along with the word.
+    """
+    seen: dict[str, list[str]] = {}
+
+    def complete(_tag, messages):
+        text = messages[-1]["content"]
+        words = _brief_words(text)
+        seen["words"] = words
+        head = words[-1]  # a handle ends on the record's head, which the binder accepts
+        portion = _AMOUNT_LINE.search(text).group(1)
+        meal = _MEAL_LINE.search(text).group(1)
+        # Everything but the identifying words is in place: the meal matches the intent,
+        # the amount is the pinned phrase, and the food is named by a form the binder
+        # accepts (a handle ends on the record's head).
+        return json.dumps({"query": f"For {meal} I had {portion} of {head}."})
+
+    expander = make_brief_expander(
+        complete=complete, catalog=catalog
+    )
+    task, reject = author_task(
+        _log_intent(recovery_trap=None),
+        catalog=catalog,
+        expander=expander,
+        parse_retries=0,
+    )
+    assert seen["words"], "the brief listed no words for the pinned food"
+    assert task is None
+    assert reject is not None
+    assert reject["failure_codes"] == ["author.missing_identifying_words"]
+
+
+def test_author_accepts_an_utterance_that_carries_the_words_in_its_own_order(catalog):
+    """The other half of the contract: what the brief asks for is satisfiable.
+
+    The same words as the rejected attempt, said as a sentence and in a different
+    order — the gate accepts it, so the relaxation is real rather than a requirement
+    nothing can meet.
+    """
+    seen: dict[str, list[str]] = {}
+
+    def complete(_tag, messages):
+        text = messages[-1]["content"]
+        words = _brief_words(text)
+        seen["words"] = words
+        portion = _AMOUNT_LINE.search(text).group(1)
+        meal = _MEAL_LINE.search(text).group(1)
+        said = " ".join(reversed(words))  # the record's own words, the writer's order
+        return json.dumps(
+            {"query": f"For {meal} I had {portion} of {said}, with a friend."}
+        )
+
+    expander = make_brief_expander(complete=complete, catalog=catalog)
+    task, reject = author_task(
+        _log_intent(recovery_trap=None),
+        catalog=catalog,
+        expander=expander,
+        parse_retries=0,
+    )
+    assert seen["words"], "the brief listed no words for the pinned food"
+    assert reject is None, reject
+    assert task is not None
+    for word in seen["words"]:
+        assert word in task.query.lower()
+
+
+def test_brief_expander_revision_hint_names_the_missing_words(catalog):
+    """The retry is told to include the words, not merely to try again."""
+    hint = revision_hint("missing_identifying_words", portion="a bowl")
+    assert hint is not None and "every word the brief lists" in hint
+    # Without a pinned portion the hint is dropped rather than shown a placeholder.
+    assert revision_hint("missing_identifying_words") is None
 
 
 def test_synth_expander_still_bindable_through_generate_one(catalog):
