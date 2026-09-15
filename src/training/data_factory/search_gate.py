@@ -47,11 +47,17 @@ from typing import Literal
 
 from nutrienv.world.catalog import SEARCH_LIMIT
 
-from src.training.data_factory.pool_filter import spoken_identity
+from src.training.data_factory.pool_filter import (
+    ADDITION_MAX_WORDS,
+    speakable_additions,
+    spoken_identity,
+)
 
 __all__ = [
     "Locatability",
+    "SpokenFix",
     "judge_food",
+    "qualifier_complement",
     "search_locatability",
     "search_words",
 ]
@@ -189,3 +195,82 @@ def judge_food(food_id: str, *, catalog) -> LocatabilityVerdict:
         aliases=aliases,
         spoken=spoken_identity(entry.get("name"), aliases=aliases),
     )
+
+
+@dataclass(frozen=True)
+class SpokenFix:
+    """A form that reaches the pin uniquely, and what it took to get there."""
+
+    phrase: str
+    source: Literal["handle", "alias", "addition"]
+    verdict: LocatabilityVerdict
+    added: str = ""
+
+    @property
+    def changed(self) -> bool:
+        """True when the brief's phrase is not the handle the record derives alone."""
+        return self.source != "handle"
+
+
+def qualifier_complement(
+    food_id: str,
+    *,
+    catalog,
+    extra_form: str | None = None,
+    max_words: int = ADDITION_MAX_WORDS,
+) -> SpokenFix | None:
+    """How to speak this pin so the environment's search reaches it uniquely.
+
+    ``None`` means no natural form does: the record distinguishes this food only by
+    words nobody says ("NS as to fat", "skin / coating not eaten"), so the pin is not
+    a task. That is the verdict the selection rule needs — not `ambiguous`.
+
+    Three answers, cheapest first:
+
+    - ``handle``: the phrase the brief already asks for, unchanged.
+    - ``alias``: another surface form the binder accepts, unchanged.
+    - ``addition``: the handle plus a phrase from the record's own words. Only the
+      record's words can be added, because an AND query containing a word the catalog
+      does not carry matches nothing at all.
+
+    ``extra_form`` is one more form to try as it stands, for a caller holding a phrase
+    the record does not derive (the lab's own tracer phrase, when a name has no usable
+    segments). The search decides, never the shape of the string: a candidate counts
+    only when the phrase actually returns this food and nothing else.
+    """
+    entry = catalog.get(food_id)
+    if not entry:
+        return None
+    name = entry.get("name")
+    aliases = tuple(
+        str(alias) for alias in (entry.get("aliases") or ()) if str(alias).strip()
+    )
+    if extra_form:
+        aliases = (*aliases, str(extra_form))
+    handle = spoken_identity(name, aliases=tuple(entry.get("aliases") or ()))
+    handle_terms = search_words(handle)
+    handle_set = set(handle_terms)
+    if handle_terms:
+        verdict = _probe(list(handle_terms), food_id, catalog)
+        if verdict.status == "unique":
+            return SpokenFix(phrase=handle, source="handle", verdict=verdict)
+    for alias in aliases:
+        terms = search_words(alias)
+        if not terms or set(terms) <= handle_set:
+            continue
+        verdict = _probe(list(terms), food_id, catalog)
+        if verdict.status == "unique":
+            return SpokenFix(phrase=alias, source="alias", verdict=verdict)
+    for addition in speakable_additions(name):
+        terms = search_words(addition)
+        if not terms or len(terms) > max_words or set(terms) <= handle_set:
+            continue
+        verdict = _probe([*terms, *handle_terms], food_id, catalog)
+        if verdict.status == "unique":
+            return SpokenFix(
+                phrase=" ".join(part for part in (addition, handle) if part),
+                source="addition",
+                verdict=verdict,
+                added=addition,
+            )
+    return None
