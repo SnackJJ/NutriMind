@@ -154,6 +154,12 @@ def judge(catalog, food_id: str, handle: str | None):
     return record, spoken
 
 
+def _handle_alone(food_id: str, catalog) -> bool:
+    """True when the record's own handle locates the food, with no added word."""
+    fix = qualifier_complement(food_id, catalog=catalog)
+    return fix is not None and fix.source == "handle"
+
+
 def phrase_locates(catalog, food_id: str, phrase: str):
     """The verdict for one spoken phrase alone, with no other form in the judgement.
 
@@ -235,11 +241,16 @@ def complement_report(catalog, population, *, show: int) -> dict:
     statuses: Counter[str] = Counter()
     examples: dict[str, list[dict]] = {bucket: [] for bucket in _FIX_BUCKETS}
     record_only = 0
+    handle_alone = 0
     metric_residue: Counter[str] = Counter()
     for food_id, handle in population:
         metric = judge_food(food_id, catalog=catalog)
         phrase = handle or spoken_identity(_entry_forms(catalog, food_id)[0])
         spoken = phrase_locates(catalog, food_id, phrase) if phrase else metric
+        derived = qualifier_complement(food_id, catalog=catalog)
+        if derived is not None and derived.source == "handle":
+            # The record's own handle locates it: no added word is needed at all.
+            handle_alone += 1
         fix = None
         if spoken.status != "unique":
             fix = qualifier_complement(food_id, catalog=catalog)
@@ -282,6 +293,7 @@ def complement_report(catalog, population, *, show: int) -> dict:
         "pin_status_when_not_spoken": dict(sorted(statuses.items())),
         "metric_residue": dict(sorted(metric_residue.items())),
         "record_name_only": record_only,
+        "handle_alone": handle_alone,
         "examples": examples,
     }
 
@@ -355,6 +367,18 @@ def selection_report(
         verdict = (
             phrase_locates(catalog, str(live.food_id), handle) if live else None
         )
+        # Would a stricter gate — the record's own handle, no added word — still pin
+        # something in this pool? That is the cost of preferring pins that need no
+        # lexical constraint at all.
+        plain = next(
+            (
+                food
+                for food in filtered.foods
+                if _lab_accepts(filtered, food, path, catalog)
+                and _handle_alone(str(food.food_id), catalog)
+            ),
+            None,
+        )
         rows.append(
             {
                 "pool": len(filtered.foods),
@@ -362,6 +386,7 @@ def selection_report(
                 "live": str(live.food_id) if live is not None else None,
                 "live_handle": handle,
                 "live_status": verdict.status if verdict else None,
+                "plain": str(plain.food_id) if plain is not None else None,
                 "same": bool(
                     legacy is not None
                     and live is not None
@@ -386,6 +411,10 @@ def selection_report(
         counts["live pin found"] += 1 if row["live"] else 0
         counts["live pin lost to the gate"] += 0 if row["live"] else 1
         counts["live pin located uniquely"] += 1 if row["live_status"] == "unique" else 0
+        counts["pool also holds a pin needing no added word"] += (
+            1 if row["plain"] else 0
+        )
+        counts["pool has no such pin"] += 0 if row["plain"] else 1
         if row["live"]:
             counts["same food as before"] += 1 if row["same"] else 0
             counts["a different food"] += 0 if row["same"] else 1
@@ -427,6 +456,12 @@ def _print_complement(report: dict, extra: dict) -> None:
         print(
             f"  of the unfixable, {report['record_name_only']} are located by the full "
             "record name — a record, not a phrase"
+        )
+    if report.get("handle_alone") is not None:
+        share = round(100 * report["handle_alone"] / report["n"], 1) if report["n"] else 0.0
+        print(
+            f"  the record's own handle locates {report['handle_alone']} "
+            f"({share}%) of them: no added word is needed there at all"
         )
     if report.get("metric_residue"):
         residue = "  ".join(
