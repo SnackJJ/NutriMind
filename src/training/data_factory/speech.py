@@ -32,6 +32,7 @@ from src.training.data_factory.pool_filter import (
     is_suitable_meal_food,
     spoken_identity,
 )
+from src.training.data_factory.search_gate import qualifier_complement
 
 __all__ = [
     "BRIEF_SYSTEM",
@@ -236,13 +237,20 @@ _QNS_SPEECH = "a bowl"
 
 
 def pin_speech_portion(pool, *, amount_path: str, catalog: Mapping) -> tuple:
-    """First pool food that can speak ``amount_path``, with its code-side pin.
+    """First pool food that can speak ``amount_path`` **and** be found by the agent.
 
     Returns ``(food, handle, pin)`` or ``(None, None, None)``. Scoring is the
     milli's own ``speakable_tracer_food`` (collision-free, gram-resolvable); the
     pin is rejected on top of that when its phrase would classify as a different
     amount path, and the search moves to the next food. Foods a roster adult would
     not log (infant formula, baby food) are skipped.
+
+    A food also has to be locatable: something a speaker can say returns it from the
+    environment's own search, and nothing else (`search_gate.qualifier_complement`).
+    A pin whose handle buries it is not a task — the agent logs a neighbour and the
+    Scorer compares a different food — so the search moves on. The handle returned is
+    the form that was measured to locate it, which is the brief's phrase; a pool with
+    no such food authors nothing, which cost 0.4% of intents when measured.
     """
     for food in pool.foods:
         entry = catalog.get(food.food_id) or {}
@@ -259,12 +267,18 @@ def pin_speech_portion(pool, *, amount_path: str, catalog: Mapping) -> tuple:
         _food, phrase, spoken = picked
         if _speech_amount_path(phrase) != amount_path:
             continue
-        handle = spoken_identity(
-            entry.get("name"), aliases=tuple(entry.get("aliases") or ())
+        # The lab's own phrase is a last resort for a record whose name carries no
+        # usable segments; the derived handle is the normal path.
+        aliases = tuple(entry.get("aliases") or ())
+        fallback = None
+        if not spoken_identity(entry.get("name"), aliases=aliases):
+            fallback = spoken or spoken_display_name(catalog, food.food_id)
+        fix = qualifier_complement(
+            str(food.food_id), catalog=catalog, extra_form=fallback
         )
-        if not handle:
-            handle = spoken or spoken_display_name(catalog, food.food_id)
-        return food, handle, pin
+        if fix is None:
+            continue
+        return food, fix.phrase, pin
     return None, None, None
 
 

@@ -27,6 +27,7 @@ from nutrienv.world.catalog_store import load_catalog  # noqa: E402
 
 from src.training.data_factory.search_gate import (  # noqa: E402
     judge_food,
+    qualifier_complement,
     search_locatability,
     search_words,
 )
@@ -257,6 +258,87 @@ def test_judge_food_flags_an_id_the_catalog_does_not_hold(catalog):
 
 
 # --------------------------------------------------------------------------- #
+# the qualifier complement: what to ask the speaker for instead of rejecting
+# --------------------------------------------------------------------------- #
+
+
+def test_no_complement_when_the_handle_already_locates(catalog):
+    fix = qualifier_complement("2708466", catalog=catalog)  # "Cereal, oat squares"
+    assert fix is not None
+    assert fix.source == "handle" and not fix.changed and fix.added == ""
+    assert fix.phrase == "oat-squares cereal"
+    assert fix.verdict.status == "unique"
+
+
+def test_one_added_phrase_from_the_record_recovers_a_buried_pin(catalog):
+    """`Soup, New England clam chowder` is spoken as "soup", which buries it.
+
+    No English word outside the record may be added — an AND query containing one
+    matches nothing — so the complement is the record's own words, and here the
+    segment's name ("new england clam chowder") is what a speaker would say.
+    """
+    assert judge_food("2707139", catalog=catalog).status == "unreachable"
+    fix = qualifier_complement("2707139", catalog=catalog)
+    assert fix is not None and fix.source == "addition"
+    assert fix.added == "new england clam chowder"
+    assert fix.phrase == "new england clam chowder soup"
+    assert fix.changed
+    # the fix is only a fix because the search says so
+    assert search_locatability(
+        "2707139",
+        (catalog.get("2707139") or {}).get("name"),
+        catalog=catalog,
+        spoken=fix.phrase,
+    ).status == "unique"
+
+
+def test_another_alias_can_be_the_complement(catalog):
+    """`Almonds, unroasted` speaks as "almonds"; the catalog's own "raw almonds" is unique."""
+    fix = qualifier_complement("2707486", catalog=catalog)
+    assert fix is not None and fix.source == "alias"
+    assert fix.phrase == "raw almonds" and fix.added == "" and fix.changed
+
+
+def test_nothing_is_offered_when_only_the_record_locates_the_pin(catalog):
+    """`Cornmeal mush, NS as to fat` is unique only with words nobody says.
+
+    The full record name does locate it — that is exactly why this must not count as
+    a fix: the selection rule would then accept a pin whose utterance nobody utters.
+    """
+    name = (catalog.get("2708373") or {}).get("name")
+    assert search_locatability("2708373", name, catalog=catalog).status == "unique"
+    assert judge_food("2708373", catalog=catalog).status == "ambiguous"
+    assert qualifier_complement("2708373", catalog=catalog) is None
+
+
+def test_a_pin_with_nothing_to_add_has_no_complement(catalog):
+    """A one-word record has no qualifier to offer, so the pin is simply not a task."""
+    assert qualifier_complement("2706838", catalog=catalog) is None  # "Seafood salad"
+
+
+def test_every_offered_complement_actually_locates_its_food(catalog):
+    """Sampled over the catalog: a fix that does not search uniquely is not a fix."""
+    checked = offered = 0
+    for food_id in list(catalog.keys())[::401]:
+        fix = qualifier_complement(food_id, catalog=catalog)
+        checked += 1
+        if fix is None:
+            assert judge_food(food_id, catalog=catalog).status != "unique"
+            continue
+        offered += 1
+        verdict = search_locatability(
+            food_id, (catalog.get(food_id) or {}).get("name"), catalog=catalog,
+            spoken=fix.phrase,
+        )
+        assert verdict.status == "unique", (food_id, fix.phrase, verdict.status)
+    assert checked and offered, "the sample stopped exercising the fix path"
+
+
+def test_qualifier_complement_declines_an_unknown_food(catalog):
+    assert qualifier_complement("9999999", catalog=catalog) is None
+
+
+# --------------------------------------------------------------------------- #
 # aliases are judged on their own
 # --------------------------------------------------------------------------- #
 
@@ -461,7 +543,8 @@ def test_the_measurement_script_reruns_the_number():
     """A distribution whose script was never committed cannot be reproduced.
 
     Runs the real entry point on a two-seed pool draw: it must exit clean and report
-    both columns, the record-name one and the spoken one the metric is built on.
+    both columns, the record-name one and the spoken one the metric is built on, and
+    the complement report that pin selection now consumes.
     """
     import subprocess
     import sys
@@ -478,3 +561,15 @@ def test_the_measurement_script_reruns_the_number():
     assert "record name+alias" in done.stdout
     assert "spoken forms" in done.stdout
     assert "source=pools" in done.stdout
+
+    complement = subprocess.run(
+        [
+            sys.executable, str(script),
+            "--source", "pools", "--family", "log", "--seeds", "2", "--show-worst", "0",
+            "--report", "complement",
+        ],
+        capture_output=True, text=True, cwd=REPO_ROOT, timeout=600,
+    )
+    assert complement.returncode == 0, complement.stderr
+    for bucket in ("as spoken", "by addition", "not fixable"):
+        assert bucket in complement.stdout
