@@ -99,6 +99,46 @@ def test_uniquely_binding_matching_foods_is_kept():
     )
 
 
+def test_required_words_are_checked_as_tokens():
+    """Naming the food is not enough — the words the agent's search needs must be there.
+
+    The binder accepts `tomato soup`; whether the *search* reaches the pinned row is a
+    separate question, and it is the one the utterance has to satisfy.
+    """
+    query = "I bought ingredients at the market and had tomato soup for dinner."
+    kwargs = dict(intent=_INTENT, catalog=_TINY, allowed_ids={"a1", "a2", "b1"})
+    assert (
+        query_entity_consistency(
+            query, ["a2"], required_words=("tomato", "soup"), **kwargs
+        )
+        is None
+    )
+    assert (
+        query_entity_consistency(
+            query, ["a2"], required_words=("tomato", "canned"), **kwargs
+        )
+        == "author.missing_identifying_words"
+    )
+
+
+def test_a_required_word_inside_a_longer_token_does_not_count():
+    """`tomato soupspoon` contains `tomato soup` as a substring, but not as words.
+
+    A substring check passes this and hands the pipeline an utterance its own keyword
+    search cannot resolve to the row — the subword trap the constrained-generation
+    literature warns about.
+    """
+    code = query_entity_consistency(
+        "I had tomato soupspoon for dinner.",
+        ["a2"],
+        intent=_INTENT,
+        catalog=_TINY,
+        allowed_ids={"a1", "a2", "b1"},
+        required_words=("tomato", "soup"),
+    )
+    assert code == "author.missing_identifying_words"
+
+
 def _log_intent(**overrides):
     person = TRAIN_ROSTER[0]
     intent = {

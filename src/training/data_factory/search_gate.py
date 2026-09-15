@@ -56,6 +56,7 @@ from src.training.data_factory.pool_filter import (
 __all__ = [
     "Locatability",
     "SpokenFix",
+    "identifying_words",
     "judge_food",
     "qualifier_complement",
     "search_locatability",
@@ -274,3 +275,16 @@ def qualifier_complement(
                 added=addition,
             )
     return None
+
+
+def identifying_words(food_id: str, *, catalog) -> tuple[str, ...]:
+    """The words an utterance must carry for the agent's own search to reach this food.
+
+    This is the form `qualifier_complement` measured, expressed as words rather than as
+    a phrase, which is what lets the brief ask for content instead of for someone
+    else's word order: `icing yeast-type doughnut` is the requirement, "an iced yeast
+    doughnut" is the utterance. Empty when no natural form locates the food at all —
+    such a pin is not a task, and the authoring gate refuses it (see speech.py).
+    """
+    fix = qualifier_complement(food_id, catalog=catalog)
+    return tuple(search_words(fix.phrase)) if fix is not None else ()

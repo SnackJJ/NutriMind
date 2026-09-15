@@ -32,7 +32,7 @@ from src.training.data_factory.pool_filter import (
     is_suitable_meal_food,
     spoken_identity,
 )
-from src.training.data_factory.search_gate import qualifier_complement
+from src.training.data_factory.search_gate import qualifier_complement, search_words
 
 __all__ = [
     "BRIEF_SYSTEM",
@@ -51,6 +51,9 @@ __all__ = [
 BRIEF_SYSTEM = (
     "Write one natural user query, not a database record. "
     "Use the situation, time/meal, source, persona, and intent in the brief. "
+    "When the brief lists words the food must be mentioned by, every one of them has "
+    "to appear, spelled the same way — but the sentence around them is yours: use your "
+    "own word order, articles, and grammar, and never write the words as a list. "
     "Mention enough of a cue to distinguish home cooking from restaurant food "
     "when the brief asks for that. "
     "Do not list internal IDs, catalog fields, or every available attribute. "
@@ -91,6 +94,11 @@ _REVISION_HINTS = {
     "query_foods_mismatch": (
         "Rejected: the sentence did not name the logged food closely enough. Write "
         "the food's own name in the sentence, with its amount as \"{portion}\"."
+    ),
+    "missing_identifying_words": (
+        "Rejected: the sentence left out a word the food needs to be found. Include "
+        "every word the brief lists for the food, spelled exactly as given, and keep "
+        "the amount as \"{portion}\"."
     ),
     "intent_conflict": (
         "Rejected: the sentence conflicts with the requested meal or amount. Keep "
@@ -181,6 +189,7 @@ class SemanticBrief:
     intent_line: str
     portion: str = ""
     feedback: str = ""
+    required_words: tuple[str, ...] = ()
 
 
 def _alternative_rank(alt):
@@ -251,34 +260,44 @@ def pin_speech_portion(pool, *, amount_path: str, catalog: Mapping) -> tuple:
     Scorer compares a different food — so the search moves on. The handle returned is
     the form that was measured to locate it, which is the brief's phrase; a pool with
     no such food authors nothing, which cost 0.4% of intents when measured.
+
+    **Two passes.** A food the record's own handle (or one of its aliases) locates is
+    taken first, because then the brief asks for words that are already speech —
+    "reduced-fat pastrami" rather than "icing yeast-type doughnut". Only when the pool
+    holds no such food does the search fall back to one that needs a phrase from the
+    record added to it. Measured, 99.2% of pools hold a first-pass food, so the
+    fallback — and with it the whole lexical constraint — rarely fires.
     """
-    for food in pool.foods:
-        entry = catalog.get(food.food_id) or {}
-        if not is_suitable_meal_food(entry.get("name")):
-            continue
-        pin = _pin_for(food, amount_path)
-        if pin is None:
-            continue
-        picked = speakable_tracer_food(
-            _pool_with(pool, (food,)), catalog, amount_path=amount_path
-        )
-        if picked is None:
-            continue
-        _food, phrase, spoken = picked
-        if _speech_amount_path(phrase) != amount_path:
-            continue
-        # The lab's own phrase is a last resort for a record whose name carries no
-        # usable segments; the derived handle is the normal path.
-        aliases = tuple(entry.get("aliases") or ())
-        fallback = None
-        if not spoken_identity(entry.get("name"), aliases=aliases):
-            fallback = spoken or spoken_display_name(catalog, food.food_id)
-        fix = qualifier_complement(
-            str(food.food_id), catalog=catalog, extra_form=fallback
-        )
-        if fix is None:
-            continue
-        return food, fix.phrase, pin
+    for own_words_only in (True, False):
+        for food in pool.foods:
+            entry = catalog.get(food.food_id) or {}
+            if not is_suitable_meal_food(entry.get("name")):
+                continue
+            pin = _pin_for(food, amount_path)
+            if pin is None:
+                continue
+            picked = speakable_tracer_food(
+                _pool_with(pool, (food,)), catalog, amount_path=amount_path
+            )
+            if picked is None:
+                continue
+            _food, phrase, spoken = picked
+            if _speech_amount_path(phrase) != amount_path:
+                continue
+            # The lab's own phrase is a last resort for a record whose name carries no
+            # usable segments; the derived handle is the normal path.
+            aliases = tuple(entry.get("aliases") or ())
+            fallback = None
+            if not spoken_identity(entry.get("name"), aliases=aliases):
+                fallback = spoken or spoken_display_name(catalog, food.food_id)
+            fix = qualifier_complement(
+                str(food.food_id), catalog=catalog, extra_form=fallback
+            )
+            if fix is None:
+                continue
+            if own_words_only and fix.source == "addition":
+                continue
+            return food, fix.phrase, pin
     return None, None, None
 
 
@@ -324,11 +343,19 @@ def build_semantic_brief(
         intent_line=_FAMILY_INTENT.get(family, family),
         portion=pin.phrase,
         feedback=feedback,
+        required_words=tuple(search_words(handle)),
     )
 
 
 def render_semantic_brief(brief: SemanticBrief) -> str:
     """Prose brief. No catalog field list, no internal ids.
+
+    The food is constrained by **words**, not by a phrase: the utterance has to carry
+    every word in ``required_words`` because the agent's own search is lexical, but the
+    sentence around them belongs to the writer. The handle is offered as one natural
+    way to say it, not as a string to copy — copying one was what made utterances read
+    like catalog rows ("bakery white toasted bread"), and the words are what the task
+    actually needs.
 
     When the code committed a portion, the amount line names that literal phrase
     instead of the generic class cue: the utterance may still be written freely,
@@ -345,21 +372,31 @@ def render_semantic_brief(brief: SemanticBrief) -> str:
         amount_line = (
             f"State the amount for that food exactly as \"{brief.portion}\" "
             f"(this meal's amount is fixed; do not substitute another quantity "
-            f"word). {brief.amount_cue}"
+            f"word), and keep it next to the food's own words — the amount has to be "
+            f"resolvable from the sentence, so a pronoun like \"it\" in a later clause "
+            f"does not carry it. {brief.amount_cue}"
         )
     else:
         amount_line = brief.amount_cue
-    name_line = (
-        f"Name the food exactly \"{brief.entity_handle}\", word for word — do not "
-        f"shorten, tidy, or reorder it."
-    ) if brief.entity_handle else ""
+    if brief.required_words:
+        words = ", ".join(f'"{word}"' for word in brief.required_words)
+        name_line = (
+            f"All of these words have to appear in the sentence, spelled as given: "
+            f"{words}. They are how the food is identified — nothing else about the "
+            f"food will do — but the grammar, order and wording around them are yours, "
+            f"and they must read as part of a sentence, never as a list. "
+            f"\"{brief.entity_handle}\" is one way to say it; say it your own way."
+        )
+    elif brief.entity_handle:
+        name_line = f"Express the selected {brief.entity_handle} naturally."
+    else:
+        name_line = ""
     revision = f" {brief.feedback}" if brief.feedback else ""
     return (
         f"{brief.situation} "
         f"Persona: {brief.persona}. "
         f"Intent: {brief.intent_line}. "
         f"Meal: {brief.occasion}. Source: {brief.source}. "
-        f"Express the selected {brief.entity_handle} naturally in one utterance. "
         f"{name_line} "
         f"{amount_line} "
         "Do not mention catalog fields or internal IDs. "
@@ -455,6 +492,9 @@ def make_brief_expander(
         expander.bind_feedback = bind_feedback  # type: ignore[attr-defined]
         expander.last_pool_ids = None
         expander.last_portion = ""
+        # Bound per intent by `bind_speech_context`, and that bound object is what
+        # authoring inspects, so the contract flag has to travel with it.
+        expander.speaks_from_brief = True  # type: ignore[attr-defined]
         return expander
 
     def expander(pool, *, persona, family, amount_path=None):
@@ -463,6 +503,10 @@ def make_brief_expander(
     expander.bind_intent = bind_intent  # type: ignore[attr-defined]
     expander.last_pool_ids = None
     expander.last_portion = ""
+    # This writer is told which words the food has to be mentioned by, so the authoring
+    # gate may hold it to them (`author._required_words`). An offline writer that is
+    # given no word list is not held to one.
+    expander.speaks_from_brief = True  # type: ignore[attr-defined]
     return expander
 
 

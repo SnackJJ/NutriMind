@@ -29,6 +29,7 @@ from src.training.data_factory.consistency import query_entity_consistency  # no
 from src.training.data_factory.search_gate import (  # noqa: E402
     qualifier_complement,
     search_locatability,
+    search_words,
 )
 from src.training.data_factory.speech import pin_speech_portion  # noqa: E402
 
@@ -218,6 +219,53 @@ def test_pin_selection_skips_a_food_the_search_cannot_locate(catalog):
             )
             return
     pytest.skip("no sampled pool offered a food the gate has to skip")
+
+
+def test_pin_selection_prefers_a_pin_that_needs_no_added_words(catalog):
+    """A food its own handle locates is taken before one needing words added to it.
+
+    That is what keeps the brief asking for words that are already speech
+    ("reduced-fat pastrami") instead of for a phrase assembled out of the record
+    ("icing yeast-type doughnut"). The pool only falls back to the assembled phrase
+    when it holds no food the record's own words locate.
+    """
+    for seed in range(8):
+        pool = sample_pools(catalog, seed=seed, family="log", n_pools=1)[0]
+        for amount_path in ("explicit_grams", "named_measure", "unspecified"):
+            accepted = [
+                food
+                for food in pool.foods
+                if _lab_accepts(pool, food, amount_path, catalog)
+            ]
+            if len(accepted) < 2:
+                continue
+            fixes = {
+                str(food.food_id): qualifier_complement(
+                    str(food.food_id), catalog=catalog
+                )
+                for food in accepted
+            }
+            first = accepted[0]
+            first_fix = fixes[str(first.food_id)]
+            if first_fix is None or first_fix.source != "addition":
+                continue
+            if not any(
+                fix is not None and fix.source != "addition" for fix in fixes.values()
+            ):
+                continue
+            food, handle, pin = pin_speech_portion(
+                pool, amount_path=amount_path, catalog=catalog
+            )
+            assert food is not None and pin is not None
+            assert str(food.food_id) != str(first.food_id), (
+                "the first food of the pool needs added words; the search should have "
+                "moved on to one that does not"
+            )
+            chosen = qualifier_complement(str(food.food_id), catalog=catalog)
+            assert chosen is not None and chosen.source != "addition"
+            assert set(search_words(handle)) == set(chosen.verdict.terms)
+            return
+    pytest.skip("no sampled pool put an addition-only pin first")
 
 
 def test_pin_selection_returns_a_form_the_search_locates(catalog):

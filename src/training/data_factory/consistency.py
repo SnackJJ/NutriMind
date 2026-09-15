@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from nutrienv.bench.pipeline.sampler import spoken_display_name
 
 from src.training.data_factory.speech import _REC_ASK
+from src.training.data_factory.search_gate import search_words
 
 __all__ = [
     "CONSISTENCY_CODES",
@@ -28,6 +29,7 @@ CONSISTENCY_CODES = frozenset(
         "author.intent_conflict",
         "author.query_foods_mismatch",
         "author.ambiguous_entity",
+        "author.missing_identifying_words",
     }
 )
 
@@ -124,8 +126,17 @@ def query_entity_consistency(
     intent: Mapping,
     catalog: Mapping,
     allowed_ids: set[str] | None = None,
+    required_words: Sequence[str] = (),
 ) -> str | None:
-    """Return an ``author.*`` consistency code, or None if the utterance binds."""
+    """Return an ``author.*`` consistency code, or None if the utterance binds.
+
+    ``required_words`` are the words the agent's own search needs in order to reach the
+    pinned food (`search_gate.identifying_words`). They are checked **as tokens**, not
+    as substrings: a required `icing` is not satisfied by `icing`'s letters sitting
+    inside a longer word. Naming the food by a form the binder accepts is not enough on
+    its own — the utterance has to be *findable*, which is the whole reason the words
+    exist. Callers that pass none keep the binder-only contract.
+    """
     blob = (query or "").lower()
     food_ids = [str(food_id) for food_id in foods]
     family = str(intent.get("family") or "")
@@ -149,12 +160,18 @@ def query_entity_consistency(
 
     bound_heads = [_head(catalog, food_id) for food_id in food_ids]
     bound_handles = [_primary(catalog, food_id) for food_id in food_ids]
+    # Any surface form the binder accepts counts as naming the food. Findability is a
+    # separate requirement, checked in the same pass because both are about the same
+    # thing: whether this utterance can be resolved to this food at all.
+    present = set(search_words(query))
     for food_id in food_ids:
-        # any surface form the binder accepts counts as naming the food
         forms = _handles(catalog, food_id)
         if any(form and form in blob for form in forms):
             continue
         return "author.query_foods_mismatch"
+    missing = [word for word in required_words if word not in present]
+    if missing:
+        return "author.missing_identifying_words"
 
     if str(intent.get("family") or "").startswith("composite"):
         return None

@@ -16,7 +16,7 @@ from __future__ import annotations
 import ast
 import copy
 import dataclasses
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from nutrienv.bench.pipeline.generate_one import generate_one
 from nutrienv.bench.pipeline.templates import RECOMMEND_SHELLS, UPDATE_SHELLS, recommend_query
@@ -31,6 +31,7 @@ from src.training.data_factory.consistency import (
     query_entity_consistency,
 )
 from src.training.data_factory.roster_train import TRAIN_ROSTER
+from src.training.data_factory.search_gate import identifying_words
 from src.training.data_factory.speech import bind_speech_context, revision_hint
 
 __all__ = [
@@ -534,6 +535,7 @@ def author_task(
             intent=intent,
             catalog=catalog,
             allowed_ids=allowed,
+            required_words=_required_words(expander, foods, catalog),
         )
         if code is None:
             trap = intent.get("recovery_trap")
@@ -546,6 +548,24 @@ def author_task(
             f"query/entity consistency: {code}",
         )
     return None, last_reject
+
+
+def _required_words(expander, foods: Sequence[str], catalog) -> tuple[str, ...]:
+    """The words the utterance has to be findable by, derived from the pinned food.
+
+    Derived here rather than taken from the writer's own report: a model that dropped
+    a word cannot also drop the requirement that it be there. Only an expander that
+    speaks from a brief is held to this — an offline writer (`synth_expander`) is
+    given no word list, so imposing one on it would measure a contract it never had.
+    """
+    if not getattr(expander, "speaks_from_brief", False):
+        return ()
+    words: list[str] = []
+    for food_id in foods:
+        for word in identifying_words(food_id, catalog=catalog):
+            if word not in words:
+                words.append(word)
+    return tuple(words)
 
 
 def _bind_revision(expander, reject: Mapping, intent: Mapping) -> None:
