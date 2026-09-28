@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.training.rl.exam_gate import pinned_exam_blob
+from src.training.rl.exam_gate import assert_lab_at_rev, pinned_exam_blob
 
 __all__ = ["ArmConfig", "ArmError", "assert_arm", "arm_manifest"]
 
@@ -35,6 +35,7 @@ def assert_arm(config: dict, *, expected: dict | None = None) -> dict:
         raise ArmError("parallel_tool_calls must be false")
     if int(config["rollout_k"]) < 1:
         raise ArmError("rollout_k must be >= 1")
+    assert_lab_at_rev()
     live_exam = pinned_exam_blob()
     if config["exam_revision"] != live_exam:
         raise ArmError(
