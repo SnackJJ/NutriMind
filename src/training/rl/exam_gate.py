@@ -10,11 +10,14 @@ This is a stage module: it imports nutrienv at function level where needed.
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 from collections.abc import Callable, Iterable
 from typing import TypeVar
 
 T = TypeVar("T")
+
+_CONFIG = pathlib.Path(__file__).resolve().parents[3] / "configs" / "data_factory.yaml"
 
 
 class ExamGateError(RuntimeError):
@@ -34,6 +37,28 @@ def _git_output(args: list[str], *, cwd: pathlib.Path | None = None) -> str:
         raise ExamGateError(f"cannot resolve exam git blob: {exc}") from exc
 
 
+def assert_lab_at_rev(expected_rev: str | None = None) -> str:
+    """Abort unless the installed lab HEAD is ``expected_rev``; return HEAD.
+
+    ``expected_rev`` must be the full 40-hex SHA (no prefixes). ``None`` means
+    the ADR-012 pin, ``nutrienv.rev`` in ``configs/data_factory.yaml``.
+    """
+    if expected_rev is None:
+        from src.training.data_factory.config import load_config
+
+        expected_rev = load_config(_CONFIG).nutrienv_rev
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_rev):
+        raise ExamGateError(f"expected_rev {expected_rev!r} is not a full 40-hex SHA")
+    root = _lab_root()
+    head = _git_output(["git", "rev-parse", "HEAD"], cwd=root)
+    if head != expected_rev:
+        raise ExamGateError(
+            f"nutri-env-lab at {root} is at HEAD {head}, expected rev {expected_rev}; "
+            "eval aborts before any rollout"
+        )
+    return head
+
+
 def pinned_exam_blob() -> str:
     """Git blob of the exam file at the installed lab HEAD (the pin)."""
     from nutrienv.bench import EXAM_SPLIT_PATH
@@ -47,8 +72,13 @@ def exam_file_blob(path: pathlib.Path) -> str:
     return _git_output(["git", "hash-object", str(path)])
 
 
-def assert_exam_byte_identical(exam_path: pathlib.Path | str | None = None) -> None:
-    """Abort unless ``exam_path`` equals the committed v1.0 blob at the pin."""
+def assert_exam_byte_identical(
+    exam_path: pathlib.Path | str | None = None,
+    *,
+    expected_rev: str | None = None,
+) -> None:
+    """Abort unless the lab HEAD is the pin and ``exam_path`` equals its exam blob."""
+    assert_lab_at_rev(expected_rev)
     from nutrienv.bench import EXAM_SPLIT_PATH
 
     path = pathlib.Path(exam_path) if exam_path is not None else pathlib.Path(EXAM_SPLIT_PATH)
@@ -65,9 +95,10 @@ def before_eval_rollout(
     rollout: Callable[[], T],
     *,
     exam_path: pathlib.Path | str | None = None,
+    expected_rev: str | None = None,
 ) -> T:
     """Run ``rollout`` only after the exam pin check succeeds."""
-    assert_exam_byte_identical(exam_path)
+    assert_exam_byte_identical(exam_path, expected_rev=expected_rev)
     return rollout()
 
 

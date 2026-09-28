@@ -54,12 +54,13 @@ def exam_report(
     task_results: Sequence[dict],
     k: int,
     exam_path=None,
+    expected_rev: str | None = None,
 ) -> dict:
     """Build the exam report. ``task_results`` items carry ``statuses``.
 
     Raises :class:`ExamGateError` before any number if the exam is dirty.
     """
-    assert_exam_byte_identical(exam_path)
+    assert_exam_byte_identical(exam_path, expected_rev=expected_rev)
     with_reasoning = []
     tools_only = []
     for row in task_results:
