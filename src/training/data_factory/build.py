@@ -1020,6 +1020,7 @@ def _teacher_stage(
             teacher_complete=teacher_complete,
             catalog=catalog,
             model=config.teacher.model_id,
+            evaluate_hint=True,
         )
 
         # Infra errors: exponential backoff retry without consuming teacher_k

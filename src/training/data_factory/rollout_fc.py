@@ -210,8 +210,15 @@ def rollout_tool_call(
     catalog,
     parallel_tool_calls: bool = False,
     model: str = "scripted-teacher",
+    evaluate_hint: bool = False,
 ) -> EpisodeResult:
-    """Drive one episode of ``task`` through the lab FC loop."""
+    """Drive one episode of ``task`` through the lab FC loop.
+
+    ``evaluate_hint`` appends the evaluate-scoring clarification to the system
+    prompt. It is privileged teacher information for the data factory only:
+    the SFT record keeps the original prompt, and exam / RL rollouts must
+    leave it off so the policy sees exactly the lab's prompt.
+    """
     if parallel_tool_calls:
         raise ValueError("parallel_tool_calls must be false (ADR-014)")
 
@@ -225,7 +232,7 @@ def rollout_tool_call(
 
     def complete_raw(_url, payload, _api_key, **_kwargs):
         messages = list(payload.get("messages") or [])
-        if task is not None and getattr(task, "family", None) == "evaluate":
+        if evaluate_hint and task is not None and getattr(task, "family", None) == "evaluate":
             if messages and messages[0].get("role") == "system":
                 eval_guidance = (
                     "\n\nClarification for evaluate tasks:\n"
