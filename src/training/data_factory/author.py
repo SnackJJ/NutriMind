@@ -210,18 +210,50 @@ def _author_recommend(intent: Mapping, *, catalog, expander, gram_anchor=None):
     return _result_or_reject(intent, result)
 
 
+def _format_evaluate_food_phrase(food_id: str, grams: float, amount_path: str, catalog: Mapping) -> str:
+    food = catalog.get(food_id) or {}
+    name = food.get("name") or food_id
+    portions = food.get("portions") or {}
+
+    if amount_path == "explicit_grams":
+        return f"{grams:g} g of {name}"
+
+    unit_priority = ["cup", "slice", "piece", "can", "tbsp", "tsp", "fl_oz", "qns"]
+    for u in unit_priority:
+        if u in portions:
+            try:
+                base = float(portions[u])
+            except (TypeError, ValueError):
+                continue
+            if base > 0:
+                mult = grams / base
+                if abs(mult - round(mult * 4) / 4) < 1e-2 and 0.2 < mult <= 10:
+                    clean_mult = round(mult * 4) / 4
+                    u_display = "serving" if u == "qns" else u
+                    if clean_mult != 1 and not u_display.endswith("s"):
+                        u_display += "s"
+                    return f"{clean_mult:g} {u_display} of {name}"
+
+    oz = grams / 28.35
+    if abs(oz - round(oz * 2) / 2) < 0.05 and 0.5 <= oz <= 30:
+        clean_oz = round(oz * 2) / 2
+        return f"{clean_oz:g} oz of {name}"
+
+    return f"{grams:g} g of {name}"
+
+
 def _evaluate_rewriter(catalog):
-    """Deterministic rewriter: speak a code-chosen evaluate plate."""
+    """Deterministic rewriter: speak a code-chosen evaluate plate with quantities."""
 
     def rewriter(items, *, intent, occasion, amount_path=None):
         bits = []
         foods = []
+        path = amount_path or (intent.get("amount_path") if isinstance(intent, Mapping) else None) or "explicit_grams"
         for item in items:
             food_id = str(item.get("food_id") or "")
             grams = float(item.get("grams") or 0)
-            food = catalog.get(food_id) or {}
-            name = food.get("name") or food_id
-            bits.append(f"some {name}")
+            phrase = _format_evaluate_food_phrase(food_id, grams, path, catalog)
+            bits.append(phrase)
             foods.append(food_id)
         query = f"Is this {occasion} okay? I had " + " and ".join(bits) + "."
         return {"query": query, "foods": foods}
@@ -274,13 +306,15 @@ def _author_evaluate(intent: Mapping, *, catalog, expander, gram_anchor=None):
     )
     if not plate:
         return _result_or_reject(intent, result)
-    snapped = []
-    ounce = 28.35
+
+    from nutrienv.bench.pipeline.review_harness import _match_portion
+
     multiples = (0.5, 1.0, 1.5, 2.0)
+    item_candidates = []
     for item in plate:
         food_id = str(item["food_id"])
         grams = float(item["grams"])
-        candidates = {round(qty * ounce, 2) for qty in multiples}
+        candidates = set()
         portions = (catalog.get(food_id) or {}).get("portions") or {}
         for one in portions.values():
             try:
@@ -289,23 +323,68 @@ def _author_evaluate(intent: Mapping, *, catalog, expander, gram_anchor=None):
                 continue
             if base > 0:
                 for qty in multiples:
-                    candidates.add(round(qty * base, 2))
-        grams = min(candidates, key=lambda value: abs(value - grams))
-        snapped.append({"food_id": food_id, "grams": grams})
-    plate = snapped
-    result = generate_one(
-        catalog=catalog,
-        family="evaluate",
-        person=person,
-        seed=intent["seed"],
-        occasion=occasion,
-        amount_path=amount_path,
-        items=plate,
-        rewriter=rewriter,
-        tier=tier,
-        pool_size=40,
-        enable_semantic_vote=False,
-    )
+                    cand = round(qty * base, 2)
+                    if cand > 0 and _match_portion(portions, cand) != (None, None):
+                        candidates.add(cand)
+        sorted_cand = sorted(candidates, key=lambda value: abs(value - grams))
+        item_candidates.append((food_id, grams, sorted_cand))
+
+    accepted_plate = None
+    if len(item_candidates) == 1:
+        food_id, orig_grams, cands = item_candidates[0]
+        for cand in cands:
+            trial_plate = [{"food_id": food_id, "grams": cand}]
+            trial_res = generate_one(
+                catalog=catalog,
+                family="evaluate",
+                person=person,
+                seed=intent["seed"],
+                occasion=occasion,
+                amount_path=amount_path,
+                items=trial_plate,
+                rewriter=rewriter,
+                tier=tier,
+                pool_size=40,
+                enable_semantic_vote=False,
+            )
+            if trial_res.accepted is not None:
+                accepted_plate = trial_plate
+                result = trial_res
+                break
+    elif item_candidates:
+        closest_plate = [{"food_id": f_id, "grams": cands[0]} for f_id, orig_g, cands in item_candidates if cands]
+        if len(closest_plate) == len(item_candidates):
+            trial_res = generate_one(
+                catalog=catalog,
+                family="evaluate",
+                person=person,
+                seed=intent["seed"],
+                occasion=occasion,
+                amount_path=amount_path,
+                items=closest_plate,
+                rewriter=rewriter,
+                tier=tier,
+                pool_size=40,
+                enable_semantic_vote=False,
+            )
+            if trial_res.accepted is not None:
+                accepted_plate = closest_plate
+                result = trial_res
+
+    if accepted_plate is None:
+        result = generate_one(
+            catalog=catalog,
+            family="evaluate",
+            person=person,
+            seed=intent["seed"],
+            occasion=occasion,
+            amount_path=amount_path,
+            items=plate,
+            rewriter=rewriter,
+            tier=tier,
+            pool_size=40,
+            enable_semantic_vote=False,
+        )
     return _result_or_reject(intent, result)
 
 

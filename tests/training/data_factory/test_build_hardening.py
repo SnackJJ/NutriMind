@@ -247,6 +247,113 @@ def test_on_budget_warn_completes(tmp_path, expander, caplog):
     assert "80%" in caplog.text or manifest["cost"]["budget_warned"]
 
 
+def _priced(config, *, teacher, expander, currency="USD", cny_per_usd=None):
+    import dataclasses
+
+    from src.training.data_factory.config import Pricing, TokenRates
+
+    return dataclasses.replace(
+        config,
+        pricing=Pricing(
+            currency=currency,
+            cny_per_usd=cny_per_usd,
+            fx_as_of=None,
+            teacher=TokenRates(*teacher),
+            expander=TokenRates(*expander),
+        ),
+    )
+
+
+def test_token_meter_prices_each_token_type():
+    from src.training.data_factory.build import TokenMeter
+    from src.training.data_factory.config import TokenRates
+
+    meter = TokenMeter()
+    meter.add({"prompt_tokens": 1_000_000, "cached_tokens": 400_000,
+               "completion_tokens": 200_000, "reasoning_tokens": 150_000})
+    meter.add(None)
+    assert meter.total == 1_200_000
+    # 0.6M miss × 1 + 0.4M hit × 0.1 + 0.2M out × 4 = 0.6 + 0.04 + 0.8 (CNY)
+    cny = meter.est_usd(TokenRates(1.0, 0.1, 4.0), usd_per_unit=1.0)
+    assert cny == pytest.approx(1.44)
+    assert meter.est_usd(TokenRates(1.0, 0.1, 4.0), usd_per_unit=0.5) == pytest.approx(0.72)
+
+
+def test_token_meter_wrap_records_client_usage():
+    from src.training.data_factory.build import TokenMeter
+
+    meter = TokenMeter()
+    client = meter.wrap(lambda request: {
+        "content": "{}", "usage": {"prompt_tokens": 30, "completion_tokens": 7},
+    })
+    assert client({"messages": []})["content"] == "{}"
+    client({"messages": []})
+    assert meter.to_dict() == {
+        "prompt_tokens": 60, "cached_tokens": 0, "completion_tokens": 14,
+    }
+
+
+def test_manifest_cost_block_prices_teacher_and_expander(tmp_path):
+    from collections import Counter
+
+    from src.training.data_factory import build as build_mod
+
+    config = _priced(
+        sft_config(tmp_path),
+        teacher=(1.0, 0.1, 4.0), expander=(2.0, 0.2, 8.0),
+        currency="CNY", cny_per_usd=8.0,
+    )
+    teacher, expander = build_mod.TokenMeter(), build_mod.TokenMeter()
+    teacher.add({"prompt_tokens": 2_000_000, "cached_tokens": 1_000_000,
+                 "completion_tokens": 500_000})
+    expander.add({"prompt_tokens": 1_000_000, "completion_tokens": 100_000})
+    manifest = {"counts": {"rejected": {"indeterminate": 0, "gate": 0}}}
+    build_mod._finalize_observability(
+        manifest, config=config, catalog_sha="x", reject_histogram=Counter(),
+        accepted_by_family=Counter(), teacher_completed=0, teacher_error=0,
+        teacher_no_finish=0, pass_count=0, serialized=0, attempted_task_ids=0,
+        indeterminate_task_ids=0, accepted_records=[],
+        teacher_usage=teacher, expander_usage=expander,
+    )
+    cost = manifest["cost"]
+    # teacher 1×1 + 1×0.1 + 0.5×4 = 3.1 CNY; expander 1×2 + 0.1×8 = 2.8 CNY; /8
+    assert cost["by_role"]["teacher"]["est_usd"] == pytest.approx(3.1 / 8)
+    assert cost["by_role"]["expander"]["est_usd"] == pytest.approx(2.8 / 8)
+    assert cost["est_usd"] == pytest.approx(5.9 / 8)
+    assert cost["teacher_tokens"] == 2_500_000  # legacy key: prompt + completion
+    assert cost["expander_tokens"] == 1_100_000
+    assert cost["by_role"]["teacher"]["cached_tokens"] == 1_000_000
+    assert cost["pricing"] == {"currency": "CNY", "cny_per_usd": 8.0, "fx_as_of": None}
+
+
+def test_on_budget_stop_counts_expander_spend(tmp_path, expander):
+    """Expander spend alone can trip the guard before any teacher call."""
+    from src.training.data_factory.build import TokenMeter
+
+    out = tmp_path / "out"
+    config = _priced(
+        sft_config(out, teacher_k=1, target_n=2, over_generate_x=1.0),
+        teacher=(0.0, 0.0, 0.0), expander=(1.0, 1.0, 1.0),
+    )
+    import dataclasses
+
+    config = dataclasses.replace(config, usd_budget=0.5, on_budget="stop")
+    meter = TokenMeter()
+    meter.add({"prompt_tokens": 1_000_000, "completion_tokens": 0})  # $1 spent
+
+    def no_teacher(request):
+        raise AssertionError("teacher must not be called past the budget")
+
+    manifest = build(
+        config, expander=expander, teacher_complete=no_teacher, output_dir=out,
+        expander_meter=meter,
+    )
+    assert manifest["status"] == "stopped_budget"
+    assert manifest["cost"]["budget_stopped"] is True
+    assert manifest["cost"]["by_role"]["expander"]["est_usd"] == pytest.approx(1.0)
+    assert manifest["cost"]["teacher_tokens"] == 0
+
+
 def test_duplicate_task_id_raises(tmp_path):
     config = sft_config(tmp_path, teacher_k=1, target_n=1, over_generate_x=1.0)
     intents = enumerate_intents(config)

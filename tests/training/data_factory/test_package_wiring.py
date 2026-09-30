@@ -42,21 +42,19 @@ def test_package_exports_the_seam_vocabulary():
         assert name in exports, name
 
 
-def test_env_example_documents_ark():
+def test_env_example_documents_channels():
     """OQ-14: .env.example documents credentials as placeholders, no real key."""
     text = (REPO / ".env.example").read_text()
-    key = re.search(r"^ARK_API_KEY=(\S*)\s*$", text, re.MULTILINE)
-    url = re.search(r"^ARK_BASE_URL=(\S*)\s*$", text, re.MULTILINE)
+    key = re.search(r"^DEEPSEEK_API_KEY=(\S*)\s*$", text, re.MULTILINE)
     cc_key = re.search(r"^COMMANDCODE_API_KEY=(\S*)\s*$", text, re.MULTILINE)
     cc_url = re.search(r"^COMMANDCODE_BASE_URL=(\S*)\s*$", text, re.MULTILINE)
-    assert key, "ARK_API_KEY missing from .env.example"
-    assert url, "ARK_BASE_URL missing from .env.example"
+    assert key, "DEEPSEEK_API_KEY missing from .env.example"
     assert cc_key, "COMMANDCODE_API_KEY missing from .env.example"
     assert cc_url, "COMMANDCODE_BASE_URL missing from .env.example"
-    # placeholder value only — a real key must never be committed
+    assert "ARK_API_KEY" not in text
+    assert "ARK_BASE_URL" not in text
     for match in (key, cc_key):
         assert "here" in match.group(1).lower() or match.group(1) == "", match.group(1)
-    assert url.group(1).startswith("http")
     assert cc_url.group(1).startswith("http")
 
 

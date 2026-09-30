@@ -150,7 +150,6 @@ def test_health_warns_outside_band_never_fails(caplog):
             attempted_task_ids=0,
             indeterminate_task_ids=0,
             accepted_records=[],
-            tokens=0,
             recovery_positive=int(frac * 10),
             recovery_by_code={"semantic": {}, "syntax": {}},
         )

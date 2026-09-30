@@ -388,7 +388,7 @@ def test_cli_commandcode_expander_authors_from_brief(tmp_path, monkeypatch):
         return complete
 
     monkeypatch.setattr(
-        "src.training.data_factory.rollout.make_ark_expander_client",
+        "src.training.data_factory.rollout.make_expander_client",
         fake_make,
     )
     config_path = _cli_config(tmp_path)

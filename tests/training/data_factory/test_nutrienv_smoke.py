@@ -17,7 +17,7 @@ import subprocess
 import pytest
 
 # Pinned rev — keep in sync with configs/data_factory.yaml : nutrienv.rev
-NUTRIENV_PIN = "0ee68eaa6c246e8079915761c95fc986c53d4979"
+NUTRIENV_PIN = "47367d9c569d0a46cbd1c97d5f08afb3a7d573ac"
 
 nutrienv = pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 

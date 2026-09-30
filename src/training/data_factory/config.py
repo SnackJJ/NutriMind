@@ -19,6 +19,7 @@ Single-sourcing notes:
 from __future__ import annotations
 
 import dataclasses
+import datetime as dt
 import pathlib
 import re
 from typing import Any
@@ -27,11 +28,15 @@ import yaml
 
 __all__ = [
     "ConfigError",
+    "ChannelConfig",
     "DataFactoryConfig",
     "ExpanderConfig",
     "FamilyConfig",
     "NutriEnvPin",
+    "Pricing",
+    "RateCard",
     "TeacherConfig",
+    "TokenRates",
     "config_from_dict",
     "load_config",
 ]
@@ -46,6 +51,7 @@ _REV_RE = re.compile(r"^[0-9a-f]{40}$")
 _TARGETS = {"sft", "rlvr", "eval", "all"}
 _BUDGET_ACTIONS = {"warn", "stop"}
 _THINKING_TYPES = {"enabled", "disabled"}
+_CURRENCIES = {"CNY", "USD"}
 
 _TOP_LEVEL_KEYS = {
     "nutrienv",
@@ -59,12 +65,16 @@ _TOP_LEVEL_KEYS = {
     "max_intents",
     "usd_budget",
     "on_budget",
+    "pricing",
     "output_dir",
     "rubric_version",
     "reward_version",
     "catalog_path",
     "exam_split_path",
+    "commandcode",
 }
+_CHANNEL_KEYS = {"model_id", "endpoint", "credential_env"}
+_PRICING_TIER_KEYS = {"teacher", "expander"}
 _TEACHER_KEYS = {
     "model_id",
     "endpoint",
@@ -85,6 +95,17 @@ _EXPANDER_KEYS = {
 _FAMILY_KEYS = {"target_n", "teacher_k", "over_generate_x", "gram_anchor"}
 _FAMILY_OPTIONAL_KEYS = {"amount_path_weights"}
 _NUTRIENV_KEYS = {"repo", "rev", "install", "note"}
+_PRICING_KEYS = {
+    "currency",
+    "cny_per_usd",
+    "fx_as_of",
+    "teacher",
+    "expander",
+    "off_peak",
+    "peak",
+    "peak_hours_utc",
+}
+_RATE_KEYS = {"input_per_mtok", "cached_input_per_mtok", "output_per_mtok"}
 
 # spec §16: k is a per-family max-attempts value in 1..6.
 _TEACHER_K_MIN, _TEACHER_K_MAX = 1, 6
@@ -107,8 +128,8 @@ class NutriEnvPin:
 
 @dataclasses.dataclass(frozen=True)
 class TeacherConfig:
-    """Teacher call shape (ADR-011 amended 2026-09-13: Command Code
-    ``deepseek/deepseek-v4.1-flash``, ``thinking: {"type": "enabled"}``)."""
+    """Teacher call shape. Production channel is the DeepSeek official API
+    (``deepseek-flash``, ``thinking: {"type": "enabled"}``)."""
 
     model_id: str
     endpoint: str
@@ -120,9 +141,19 @@ class TeacherConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class ChannelConfig:
+    """Optional non-production channel (Command Code). Thinking and temperature
+    stay on the teacher / expander blocks; this block only swaps the wire."""
+
+    model_id: str
+    endpoint: str
+    credential_env: str
+
+
+@dataclasses.dataclass(frozen=True)
 class ExpanderConfig:
-    """Expander call shape — same endpoint + credential as the teacher (one
-    provider); ``thinking: {"type": "disabled"}`` (structured JSON output)."""
+    """Expander call shape. Production uses the same official endpoint and
+    credential as the teacher; ``thinking: {"type": "disabled"}``."""
 
     model_id: str
     endpoint: str
@@ -133,9 +164,78 @@ class ExpanderConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class TokenRates:
+    """List price per million tokens for one priced role, in ``Pricing.currency``.
+    ``input`` is the cache-miss prompt price; ``output`` covers every completion
+    token, reasoning included."""
+
+    input_per_mtok: float
+    cached_input_per_mtok: float
+    output_per_mtok: float
+
+
+@dataclasses.dataclass(frozen=True)
+class RateCard:
+    """One peak or off-peak card. ``teacher`` / ``expander`` are the same list
+    price unless a channel prices the two roles differently."""
+
+    teacher: TokenRates
+    expander: TokenRates
+
+
+@dataclasses.dataclass(frozen=True)
+class Pricing:
+    """The ``pricing:`` block. ``teacher`` / ``expander`` are the single card
+    when no peak split is configured, and the off-peak card when it is.
+
+    A run that crosses a peak boundary reprices the accumulated meter at the
+    tier in force at the check. The meter does not stamp a rate per call.
+    Chinese public holidays are not subtracted from the weekday peak windows."""
+
+    currency: str  # CNY | USD
+    cny_per_usd: float | None  # required for CNY; how many CNY one USD buys
+    fx_as_of: str | None
+    teacher: TokenRates
+    expander: TokenRates
+    off_peak: RateCard | None = None
+    peak: RateCard | None = None
+    peak_hours_utc: tuple[str, ...] = ()
+
+    @property
+    def usd_per_unit(self) -> float:
+        return 1.0 if self.currency == "USD" else 1.0 / self.cny_per_usd
+
+    def is_peak(self, when: dt.datetime) -> bool:
+        """Weekday UTC clock inside ``peak_hours_utc`` (half-open)."""
+        if self.peak is None or when.weekday() >= 5:
+            return False
+        minutes = when.hour * 60 + when.minute
+        for span in self.peak_hours_utc:
+            start, end = span.split("-")
+            sh, sm = (int(part) for part in start.split(":"))
+            eh, em = (int(part) for part in end.split(":"))
+            if sh * 60 + sm <= minutes < eh * 60 + em:
+                return True
+        return False
+
+    def rates(self, role: str, when: dt.datetime) -> TokenRates:
+        card = self.peak if self.is_peak(when) else self.off_peak
+        if card is None:
+            card_teacher, card_expander = self.teacher, self.expander
+        else:
+            card_teacher, card_expander = card.teacher, card.expander
+        if role == "teacher":
+            return card_teacher
+        if role == "expander":
+            return card_expander
+        raise KeyError(role)
+
+
+@dataclasses.dataclass(frozen=True)
 class FamilyConfig:
-    """Per-family authoring knobs (spec §7). ``target_n`` counts accepted Pass
-    ``task_id``s after intra-family ``semantic_key`` dedup (spec §10)."""
+    """Per-family authoring knobs (spec §7). ``target_n`` is the accepted-Pass
+    quota. The build draws one wave, then tops a family up until that count,
+    the per-family attempt cap, or the budget (spec §10 dedup still applies)."""
 
     target_n: int
     teacher_k: int  # max teacher attempts per task_id, 1..6 (spec §16)
@@ -158,12 +258,14 @@ class DataFactoryConfig:
     max_intents: int
     usd_budget: float
     on_budget: str
+    pricing: Pricing
     output_dir: str
     rubric_version: str
     reward_version: str
     catalog_path: str | None
     exam_split_path: str | None
     nutrienv: NutriEnvPin
+    commandcode: ChannelConfig | None = None
 
     @property
     def nutrienv_rev(self) -> str:
@@ -313,6 +415,118 @@ def _parse_expander(value: Any, source: str) -> ExpanderConfig:
     )
 
 
+def _parse_rates(value: Any, source: str, path: str) -> TokenRates:
+    block = _mapping(value, source, path)
+    _no_unknown_keys(block, _RATE_KEYS, source, path)
+    rates = {}
+    for key in sorted(_RATE_KEYS):
+        rate = _number(_required(block, key, source, path), source, f"{path}.{key}")
+        if rate < 0:
+            _err(source, f"{path}.{key}", f"must be >= 0, got {rate}")
+        rates[key] = rate
+    return TokenRates(**rates)
+
+
+def _parse_rate_card(value: Any, source: str, path: str) -> RateCard:
+    block = _mapping(value, source, path)
+    _no_unknown_keys(block, _PRICING_TIER_KEYS, source, path)
+    return RateCard(
+        teacher=_parse_rates(_required(block, "teacher", source, path), source, f"{path}.teacher"),
+        expander=_parse_rates(
+            _required(block, "expander", source, path), source, f"{path}.expander"
+        ),
+    )
+
+
+_HOUR_RE = re.compile(r"^(\d{2}):(\d{2})-(\d{2}):(\d{2})$")
+
+
+def _parse_peak_hours(value: Any, source: str, path: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not value:
+        _err(source, path, "expected a non-empty list of HH:MM-HH:MM windows")
+    hours = []
+    for index, item in enumerate(value):
+        text = _str(item, source, f"{path}[{index}]")
+        match = _HOUR_RE.match(text)
+        if match is None:
+            _err(source, f"{path}[{index}]", f"expected HH:MM-HH:MM, got {text!r}")
+        sh, sm, eh, em = (int(part) for part in match.groups())
+        if not (0 <= sh <= 23 and 0 <= eh <= 23 and 0 <= sm <= 59 and 0 <= em <= 59):
+            _err(source, f"{path}[{index}]", f"clock out of range: {text}")
+        if sh * 60 + sm >= eh * 60 + em:
+            _err(source, f"{path}[{index}]", f"window must be non-empty and not wrap: {text}")
+        hours.append(text)
+    return tuple(hours)
+
+
+def _parse_pricing(value: Any, source: str) -> Pricing:
+    path = "pricing"
+    block = _mapping(value, source, path)
+    _no_unknown_keys(block, _PRICING_KEYS, source, path)
+    currency = _str(_required(block, "currency", source, path), source, f"{path}.currency")
+    if currency not in _CURRENCIES:
+        _err(source, f"{path}.currency", f"expected one of {sorted(_CURRENCIES)}, got {currency!r}")
+    cny_per_usd = block.get("cny_per_usd")
+    if currency == "CNY":
+        cny_per_usd = _number(
+            _required(block, "cny_per_usd", source, path), source, f"{path}.cny_per_usd"
+        )
+        if cny_per_usd <= 0:
+            _err(source, f"{path}.cny_per_usd", f"must be > 0, got {cny_per_usd}")
+    elif cny_per_usd is not None:
+        _err(source, f"{path}.cny_per_usd", "only meaningful when currency is CNY")
+    flat = "teacher" in block or "expander" in block
+    tiered = "off_peak" in block or "peak" in block or "peak_hours_utc" in block
+    if tiered:
+        off_peak = _parse_rate_card(
+            _required(block, "off_peak", source, path), source, f"{path}.off_peak"
+        )
+        peak = _parse_rate_card(_required(block, "peak", source, path), source, f"{path}.peak")
+        hours = _parse_peak_hours(
+            _required(block, "peak_hours_utc", source, path), source, f"{path}.peak_hours_utc"
+        )
+        teacher, expander = off_peak.teacher, off_peak.expander
+        # asdict round-trips the off-peak card under teacher/expander as well.
+        if "teacher" in block:
+            _parse_rates(block["teacher"], source, f"{path}.teacher")
+        if "expander" in block:
+            _parse_rates(block["expander"], source, f"{path}.expander")
+    else:
+        off_peak = peak = None
+        hours = ()
+        teacher = _parse_rates(
+            _required(block, "teacher", source, path), source, f"{path}.teacher"
+        )
+        expander = _parse_rates(
+            _required(block, "expander", source, path), source, f"{path}.expander"
+        )
+    return Pricing(
+        currency=currency,
+        cny_per_usd=cny_per_usd,
+        fx_as_of=_str_or_none(block.get("fx_as_of"), source, f"{path}.fx_as_of"),
+        teacher=teacher,
+        expander=expander,
+        off_peak=off_peak,
+        peak=peak,
+        peak_hours_utc=hours,
+    )
+
+
+def _parse_channel(value: Any, source: str) -> ChannelConfig | None:
+    if value is None:
+        return None
+    path = "commandcode"
+    block = _mapping(value, source, path)
+    _no_unknown_keys(block, _CHANNEL_KEYS, source, path)
+    return ChannelConfig(
+        model_id=_str(_required(block, "model_id", source, path), source, f"{path}.model_id"),
+        endpoint=_str(_required(block, "endpoint", source, path), source, f"{path}.endpoint"),
+        credential_env=_str(
+            _required(block, "credential_env", source, path), source, f"{path}.credential_env"
+        ),
+    )
+
+
 def _parse_family(name: str, value: Any, source: str) -> FamilyConfig:
     path = f"families.{name}"
     block = _mapping(value, source, path)
@@ -403,6 +617,7 @@ def config_from_dict(data: Any, *, source: str = "<dict>") -> DataFactoryConfig:
         max_intents=max_intents,
         usd_budget=usd_budget,
         on_budget=on_budget,
+        pricing=_parse_pricing(_required(root, "pricing", source, ""), source),
         output_dir=_str(_required(root, "output_dir", source, ""), source, "output_dir"),
         rubric_version=_str(
             _required(root, "rubric_version", source, ""), source, "rubric_version"
@@ -413,6 +628,7 @@ def config_from_dict(data: Any, *, source: str = "<dict>") -> DataFactoryConfig:
         catalog_path=_str_or_none(root.get("catalog_path"), source, "catalog_path"),
         exam_split_path=_str_or_none(root.get("exam_split_path"), source, "exam_split_path"),
         nutrienv=_parse_nutrienv(_required(root, "nutrienv", source, ""), source),
+        commandcode=_parse_channel(root.get("commandcode"), source),
     )
 
 

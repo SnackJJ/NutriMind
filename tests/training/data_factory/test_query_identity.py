@@ -168,12 +168,12 @@ def test_overlay_stops_on_unique_queries_not_traces(tmp_path):
         name: fam.target_n for name, fam in load_config(YAML_PATH).families.items()
     }
     assert shipped_after == shipped_before
-    assert shipped_after["composite"] == 200
-    assert shipped_after["composite_update_log_recommend"] == 40
-    assert shipped_after["recommend"] == 71
-    assert shipped_after["evaluate"] == 55
-    assert shipped_after["log"] == 42
-    assert shipped_after["update"] == 13
+    assert shipped_after["composite"] == 70
+    assert shipped_after["composite_update_log_recommend"] == 20
+    assert shipped_after["recommend"] == 40
+    assert shipped_after["evaluate"] == 35
+    assert shipped_after["log"] == 25
+    assert shipped_after["update"] == 10
     # overlay config's family mix is a test shrink, not a yaml rewrite
     assert config.families["log"].target_n == 4
 

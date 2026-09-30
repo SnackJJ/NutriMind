@@ -178,3 +178,5 @@ A live probe (2026-09-09, ticket 002; 3 calls) established:
   (`<think>` stripping in `compute_state_key` already precedented)
 - [ADR-010](010-nutrimind-v2-rescope.md), [ADR-012](012-nutrienv-read-only-benchmark.md),
   [ADR-014](014-native-tool-calling-v2-protocol.md)
+
+2026-09-29 ARK 已移除。生产教师与 expander 改为 DeepSeek 官方 API（`deepseek-flash`）。Command Code 保留为可选通道。

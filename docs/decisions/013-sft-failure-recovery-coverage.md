@@ -117,6 +117,8 @@ recovery-positive traces.**
   that obey the same gates.
 - 15–25 % is a judgment, not a measurement; the first Batch-1 run replaces it with a number.
 
+2026-09-29 ARK 已移除。
+
 ## Alternatives considered
 
 - **A sixth family, `error-recovery`.** Rejected — a family *is* an oracle shape (spec §5,

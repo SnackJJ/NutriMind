@@ -25,6 +25,8 @@ from src.training.data_factory.build import (  # noqa: E402
     NOT_A_FOOD_VERDICT,
     build,
     enumerate_intents,
+    family_attempt_cap,
+    intent_for,
 )
 from src.training.data_factory.search_gate import Locatability  # noqa: E402
 
@@ -46,7 +48,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 CONFIG_PATH = REPO_ROOT / "configs" / "data_factory.yaml"
 
 
-def sft_config(output_dir, *, teacher_k=2, target_n=1, over_generate_x=2.0):
+def sft_config(output_dir, *, teacher_k=2, target_n=2, over_generate_x=1.0):
     """The real config, shrunk to a tiny log-only sft run."""
     base = load_config(CONFIG_PATH)
     log_cfg = dataclasses.replace(
@@ -226,7 +228,18 @@ def test_byte_identical_train_jsonl_across_runs(tmp_path, catalog, expander):
 
 def test_all_attempts_fail_to_teacher_jsonl(tmp_path, catalog, expander):
     config = sft_config(tmp_path / "out", teacher_k=2)
-    tasks = author_all(config, expander)
+    # A zero-accept family refills up to the attempt cap, so the script has to
+    # cover that many tasks, not just the first wave.
+    cap = family_attempt_cap(config, "log")
+    tasks = []
+    for index in range(cap):
+        task, reject = author_mod.author_task(
+            intent_for(config, "log", index),
+            catalog=load_catalog(),
+            expander=expander,
+        )
+        assert task is not None, reject
+        tasks.append(task)
     script = teacher_script(tasks, pass_at_attempt=99, teacher_k=2)  # never passes
     out = tmp_path / "out"
     manifest = build(
@@ -234,14 +247,15 @@ def test_all_attempts_fail_to_teacher_jsonl(tmp_path, catalog, expander):
         output_dir=out,
     )
     assert manifest["counts"]["accepted"] == 0
-    assert manifest["counts"]["teacher_rejected"] == 2
+    assert manifest["counts"]["intents"] == cap
+    assert manifest["counts"]["teacher_rejected"] == cap
     assert not sft_lines(out)
 
     lines = [
         json.loads(line)
         for line in (out / "rejects" / "teacher.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert len(lines) == 2
+    assert len(lines) == cap
     for reject in lines:
         assert reject["stage"] == "teacher"
         assert reject["status"] == "fail"
@@ -257,8 +271,9 @@ def test_all_attempts_fail_to_teacher_jsonl(tmp_path, catalog, expander):
 
 def test_no_finish_to_indeterminate_jsonl(tmp_path, catalog, expander):
     config = sft_config(tmp_path / "out", teacher_k=1)
-    tasks = author_all(config, expander)
-    # one episode per task: 12 idle reads hit the log step budget
+    cap = family_attempt_cap(config, "log")
+    # one episode per draw: 12 idle reads hit the log step budget. Zero accepts
+    # refill until the cap (two waves), so the script covers cap episodes.
     script = [
         (
             "checking.",
@@ -268,7 +283,7 @@ def test_no_finish_to_indeterminate_jsonl(tmp_path, catalog, expander):
                 "function": {"name": "get_profile", "arguments": "{}"},
             }],
         )
-        for i in range(12 * len(tasks))
+        for i in range(12 * cap)
     ]
     out = tmp_path / "out"
     manifest = build(
@@ -276,14 +291,15 @@ def test_no_finish_to_indeterminate_jsonl(tmp_path, catalog, expander):
         output_dir=out,
     )
     assert manifest["counts"]["accepted"] == 0
-    assert manifest["counts"]["teacher_indeterminate"] == 2
+    assert manifest["counts"]["intents"] == cap
+    assert manifest["counts"]["teacher_indeterminate"] == cap
     lines = [
         json.loads(line)
         for line in (out / "rejects" / "indeterminate.jsonl").read_text(
             encoding="utf-8"
         ).splitlines()
     ]
-    assert len(lines) == 2
+    assert len(lines) == cap
     for reject in lines:
         assert reject["status"] == "indeterminate"
         assert reject["failure_codes"] == ["teacher_no_finish"]

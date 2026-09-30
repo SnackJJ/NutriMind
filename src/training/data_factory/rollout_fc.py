@@ -50,7 +50,12 @@ class _StepTel:
     total_tokens: int
     latency_seconds: float
     is_valid_tool: bool
-    error: str | None
+    error: str | None = None
+    tokens_measured: bool = False
+    protocol_violation: bool = False
+    violation_reason: str | None = None
+    raw_text: str | None = None
+    refused: bool = False
 
 
 @dataclasses.dataclass
@@ -74,6 +79,8 @@ class _TaskTel:
     steps: list
     is_void: bool
     void_reason: str | None
+    protocol_violations: int = 0
+    violation_log: list | None = None
 
 
 class _RecordingEnv(NutriEnv):
@@ -217,9 +224,31 @@ def rollout_tool_call(
             env_holder.append(self)
 
     def complete_raw(_url, payload, _api_key, **_kwargs):
+        messages = list(payload.get("messages") or [])
+        if task is not None and getattr(task, "family", None) == "evaluate":
+            if messages and messages[0].get("role") == "system":
+                eval_guidance = (
+                    "\n\nClarification for evaluate tasks:\n"
+                    "- Ground the foods and amounts from search_foods/get_food portions.\n"
+                    "- Retrieve daily windows and allergies via get_profile.\n"
+                    "- Energy share (kcal) for a single meal: breakfast 25-30%, lunch 30-40%, dinner 30-40% of daily kcal.\n"
+                    "- Other nutrients (protein_g, carb_g, fat_g, fiber_g, sodium_mg) do NOT scale by meal share: "
+                    "a single meal has NO minimum floor for these nutrients, and only caps at the remaining daily maximum "
+                    "(daily_hi minus what the ledger already holds). (Fiber ceiling has +15% slack).\n"
+                    "- If the meal's energy is within its meal energy share, its nutrients do not exceed the remaining daily caps, "
+                    "and it contains no allergens: verdict is 'accept' with items=[{'food_id': ..., 'grams': ...}] "
+                    "listing the evaluated meal items.\n"
+                    "- If the meal violates kcal bounds (kcal_lo or kcal_hi), exceeds a remaining daily cap (<key>_hi), "
+                    "or contains allergens ('allergy'): verdict is 'reject' with reasons=[...], and empty items=[]."
+                )
+                if "How evaluate episodes are scored" not in messages[0]["content"]:
+                    messages[0] = {
+                        **messages[0],
+                        "content": messages[0]["content"] + eval_guidance,
+                    }
         request = {
             "model": payload.get("model"),
-            "messages": payload.get("messages"),
+            "messages": messages,
             "tools": payload.get("tools"),
             "temperature": payload.get("temperature"),
             "parallel_tool_calls": payload.get("parallel_tool_calls", False),

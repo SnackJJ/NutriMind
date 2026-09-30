@@ -501,7 +501,6 @@ def test_finalize_observability_reports_the_locatability_block():
             attempted_task_ids=0,
             indeterminate_task_ids=0,
             accepted_records=[],
-            tokens=0,
         )
         base.update(kwargs)
         _finalize_observability(manifest, **base)

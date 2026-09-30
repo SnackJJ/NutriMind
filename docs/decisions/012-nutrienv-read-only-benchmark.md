@@ -127,3 +127,5 @@ NutriMind-side — is unchanged. The concrete public/private symbol split lives 
 - `.scratch/nutrimind-v2/spec.md` (§18 public/private symbol split, §22.9 3-leg spike)
 - `docs/plans/nutrienv_student.md` (§5 Pointers), `/tmp/nutrienv-data-review.md`
   (P0-1, P1-5)
+
+2026-09-29 ARK 已移除。NutriEnv pin 改为 `47367d9c569d0a46cbd1c97d5f08afb3a7d573ac`（只读消费，未改 lab 树）。

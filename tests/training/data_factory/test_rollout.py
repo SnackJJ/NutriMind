@@ -26,8 +26,8 @@ from src.training.data_factory.materialize import RunContext  # noqa: E402
 from src.training.data_factory.rollout import (  # noqa: E402
     ScriptedTeacher,
     TeacherReActHarness,
-    make_ark_expander_client,
-    make_ark_teacher_client,
+    make_expander_client,
+    make_teacher_client,
     rollout,
 )
 
@@ -217,7 +217,7 @@ def test_extra_body_flows_into_request(log_task):
 
 
 # --------------------------------------------------------------------------- #
-# (c) the ark clients
+# (c) the chat clients
 # --------------------------------------------------------------------------- #
 
 
@@ -264,15 +264,15 @@ def captured(monkeypatch):
                     "prompt_tokens": 123,
                     "completion_tokens": 45,
                     "completion_tokens_details": {"reasoning_tokens": 67},
+                    "prompt_tokens_details": {"cached_tokens": 100},
                 },
             }
         )
 
     monkeypatch.setattr(ro.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("NUTRIMIND_ALLOW_NETWORK", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-key-never-appear")
     monkeypatch.setenv("COMMANDCODE_API_KEY", "sk-test-key-never-appear")
-    monkeypatch.setenv("ARK_API_KEY", "sk-test-key-never-appear")
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
     return box
 
 
@@ -282,7 +282,7 @@ def config():
 
 
 def test_teacher_client_keeps_content_and_reasoning_separate(captured, config):
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     completion = client(
         {
             "model": config.teacher.model_id,
@@ -298,11 +298,12 @@ def test_teacher_client_keeps_content_and_reasoning_separate(captured, config):
         "prompt_tokens": 123,
         "completion_tokens": 45,
         "reasoning_tokens": 67,
+        "cached_tokens": 100,
     }
 
 
 def test_client_request_shape_from_config(captured, config):
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     client(
         {
             "model": config.teacher.model_id,
@@ -312,7 +313,7 @@ def test_client_request_shape_from_config(captured, config):
     )
     (request,) = captured["requests"]
     assert request["url"] == config.teacher.endpoint
-    assert request["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert request["body"]["model"] == "deepseek-flash"
     assert request["body"]["thinking"] == {"type": "enabled"}  # length control
     assert request["body"]["temperature"] == 0.0
     assert request["timeout"] == config.teacher.per_turn_timeout_s
@@ -358,7 +359,7 @@ def test_client_maps_reasoning_field_and_forwards_tools(monkeypatch, config):
     monkeypatch.setattr(ro.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setenv("NUTRIMIND_ALLOW_NETWORK", "1")
     monkeypatch.setenv(config.teacher.credential_env, "sk-x")
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     tools = [{"type": "function", "function": {"name": "search_foods"}}]
     completion = client(
         {
@@ -368,7 +369,7 @@ def test_client_maps_reasoning_field_and_forwards_tools(monkeypatch, config):
             "parallel_tool_calls": False,
         }
     )
-    assert box["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert box["body"]["model"] == "deepseek-flash"
     assert box["body"]["tools"] == tools
     assert box["body"]["parallel_tool_calls"] is False
     assert completion["content"] == ""
@@ -377,37 +378,15 @@ def test_client_maps_reasoning_field_and_forwards_tools(monkeypatch, config):
     assert completion["finish_reason"] == "tool_calls"
 
 
-def test_endpoint_model_strips_ark_prefix_only():
-    assert ro._endpoint_model("ark/deepseek-v4-flash") == "deepseek-v4-flash"
-    assert ro._endpoint_model("deepseek/deepseek-v4.1-flash") == (
-        "deepseek/deepseek-v4.1-flash"
-    )
-    assert ro._endpoint_model("deepseek-v4.1-flash") == "deepseek-v4.1-flash"
-
-
-def test_endpoint_resolution_variants(monkeypatch):
-    resolve = ro._resolve_endpoint
-    path = "api/plan/v3/chat/completions"
-    expected = "https://ark.cn-beijing.volces.com/api/plan/v3/chat/completions"
-
-    # base carries host + api/plan/v3 → no duplicated segments
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/plan/v3")
-    assert resolve(path) == expected
-    # host-only base → the full path is appended
-    monkeypatch.setenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com")
-    assert resolve(path) == expected
-    # base already the full completions URL → unchanged
-    monkeypatch.setenv("ARK_BASE_URL", expected)
-    assert resolve(path) == expected
-    # unset base → the documented default plan base
-    monkeypatch.delenv("ARK_BASE_URL", raising=False)
-    assert resolve(path) == expected
-    # absolute endpoint wins outright
-    assert resolve(expected) == expected
+def test_chat_url_requires_absolute_endpoint():
+    url = "https://api.deepseek.com/chat/completions"
+    assert ro._chat_url(url) == url
+    with pytest.raises(RuntimeError, match="absolute URL"):
+        ro._chat_url("chat/completions")
 
 
 def test_expander_client_sends_thinking_disabled(captured, config):
-    client = make_ark_expander_client(config.expander)
+    client = make_expander_client(config.expander)
     client(
         {
             "model": config.expander.model_id,
@@ -416,7 +395,7 @@ def test_expander_client_sends_thinking_disabled(captured, config):
     )
     (request,) = captured["requests"]
     assert request["url"] == config.expander.endpoint
-    assert request["body"]["model"] == "deepseek/deepseek-v4.1-flash"
+    assert request["body"]["model"] == "deepseek-flash"
     assert request["body"]["thinking"] == {"type": "disabled"}
     assert request["timeout"] == config.expander.timeout_s
 
@@ -436,7 +415,7 @@ def test_client_retries_transport_errors(captured, config, monkeypatch):
         )
 
     monkeypatch.setattr(ro.urllib.request, "urlopen", flaky)
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     completion = client(
         {"model": config.teacher.model_id,
          "messages": [{"role": "user", "content": "hi"}], "temperature": 0.0}
@@ -452,7 +431,7 @@ def test_client_non_retryable_status_raises(captured, config, monkeypatch):
         )
 
     monkeypatch.setattr(ro.urllib.request, "urlopen", forbidden)
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     with pytest.raises(RuntimeError, match="HTTP 401"):
         client(
             {"model": config.teacher.model_id,
@@ -468,7 +447,7 @@ def test_network_disabled_without_guard(monkeypatch, config):
         raise AssertionError("real network call attempted without the guard")
 
     monkeypatch.setattr(ro.urllib.request, "urlopen", must_not_call)
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     with pytest.raises(RuntimeError, match="NUTRIMIND_ALLOW_NETWORK"):
         client(
             {"model": config.teacher.model_id,
@@ -478,7 +457,7 @@ def test_network_disabled_without_guard(monkeypatch, config):
 
 def test_missing_credential_raises(captured, monkeypatch, config):
     monkeypatch.delenv(config.teacher.credential_env, raising=False)
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     with pytest.raises(RuntimeError, match=f"{config.teacher.credential_env} is not set"):
         client(
             {"model": config.teacher.model_id,
@@ -489,7 +468,7 @@ def test_missing_credential_raises(captured, monkeypatch, config):
 def test_api_key_never_in_episodes_or_cache(captured, config, log_task):
     """A full production-shaped rollout: the credential must never surface in
     the episode, its turns, or the serialized episode cache."""
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     teacher = ScriptedTeacher(log_script(log_task))  # script drives; client unused
     harness = TeacherReActHarness(teacher_complete=teacher)
     episode = rollout(harness, log_task)
@@ -510,12 +489,12 @@ def test_api_key_never_in_episodes_or_cache(captured, config, log_task):
 
 @pytest.mark.skipif(
     __import__("os").environ.get("NUTRIMIND_ALLOW_NETWORK") != "1"
-    or not __import__("os").environ.get("COMMANDCODE_API_KEY"),
-    reason="live call: set NUTRIMIND_ALLOW_NETWORK=1 and COMMANDCODE_API_KEY",
+    or not __import__("os").environ.get("DEEPSEEK_API_KEY"),
+    reason="live call: set NUTRIMIND_ALLOW_NETWORK=1 and DEEPSEEK_API_KEY",
 )
 def test_live_teacher_smoke_reasoning_content():
     config = load_config(CONFIG_PATH)
-    client = make_ark_teacher_client(config.teacher)
+    client = make_teacher_client(config.teacher)
     completion = client(
         {
             "model": config.teacher.model_id,

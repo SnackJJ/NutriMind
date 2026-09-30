@@ -1,6 +1,6 @@
 """Ticket 016 — compatibility guard (Seam 5), part 2: pinned signatures.
 
-Baseline captured at nutrienv rev 0ee68eaa6c246e8079915761c95fc986c53d4979
+Baseline captured at nutrienv rev 47367d9c569d0a46cbd1c97d5f08afb3a7d573ac
 (the pin in `configs/data_factory.yaml`; the installed-rev == pin assertion
 lives in `test_nutrienv_smoke.py`, which CI runs alongside this file). An
 upstream change that breaks any borrowed signature must fail CI loudly.
@@ -56,7 +56,7 @@ from tests.training.data_factory.test_imports import (
 pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 
 # The rev the baseline below was captured from (configs/data_factory.yaml pin).
-NUTRIENV_BASELINE_REV = "0ee68eaa6c246e8079915761c95fc986c53d4979"
+NUTRIENV_BASELINE_REV = "47367d9c569d0a46cbd1c97d5f08afb3a7d573ac"
 
 # One pinned string per (module, symbol) — keys MUST equal PUBLIC_BORROWED_API
 # exactly (asserted by test_two_class_rule.py). Order mirrors that table.
@@ -103,14 +103,14 @@ EXPECTED_SIGNATURES: dict[tuple[str, str], str] = {
     ("nutrienv.world.types", "Profile"): "(user_id: 'str', allergies: 'tuple[str, ...]' = (), medications: 'tuple[str, ...]' = (), windows: 'dict[str, tuple[float, float]]' = <factory>, plan_preset: 'dict' = <factory>, version: 'int' = 1, sex: 'str | None' = None, age_y: 'int | None' = None, height_cm: 'float | None' = None, weight_kg: 'float | None' = None, activity: 'str | None' = None, phase: 'str' = 'maintain') -> None",
     ("nutrienv.world.types", "LedgerRow"): "(food_id: 'str', grams: 'float', eaten_at: 'str') -> None",
     ("nutrienv.world.types", "MAX_ITEM_GRAMS"): "<constant:float>",
-    ("nutrienv.world.catalog_store", "load_catalog"): "(path: 'Path | str | None' = None) -> 'FoodCatalog'",
-    ("nutrienv.harness", "ReActHarness"): "(*, api_key: 'str | None' = None, base_url: 'str | None' = None, model: 'str' = 'deepseek-chat', timeout: 'float' = 60.0, leak_oracle: 'bool' = False, max_steps: 'int' = 12, extra_body: 'dict | None' = None, version: 'str' = 'v0', context_limit: 'int | None' = None) -> 'None'",
+    ("nutrienv.world.catalog_store", "load_catalog"): "(path: 'Path | str | None' = None, *, demo: 'bool' = False) -> 'FoodCatalog'",
+    ("nutrienv.harness", "ReActHarness"): "(*, api_key: 'str | None' = None, base_url: 'str | None' = None, model: 'str' = 'deepseek-chat', timeout: 'float' = 60.0, leak_oracle: 'bool' = False, max_steps: 'int' = 12, extra_body: 'dict | None' = None, version: 'str' = 'v0', context_limit: 'int | None' = None, temperature: 'float' = 0.0) -> 'None'",
     ("nutrienv.harness", "ScriptHarness"): "()",
     ("nutrienv.harness.tool_call", "run_episode_tool_call"): "(task, harness_spec: 'dict[str, Any]', catalog: 'Any', step_telemetry_cls: 'Any', task_telemetry_cls: 'Any') -> 'Any'",
     ("nutrienv.harness.tools_schema", "NUTRIENV_TOOLS"): "<constant:list>",
     ("nutrienv.harness.tools_schema", "TOOL_SYSTEM_PROMPT"): "<constant:str>",
     ("nutrienv.harness.react", "react_manual"): "(version: 'str') -> 'str'",
-    ("nutrienv.harness.react", "context_messages"): "(messages: 'list[dict]', *, limit: 'int | None' = 12) -> 'list[dict]'",
+    ("nutrienv.harness.react", "context_messages"): "(messages: 'list[dict]', *, limit: 'int | None' = None) -> 'list[dict]'",
     ("nutrienv.harness.runner", "DEFAULT_MAX_STEPS"): "<constant:int>",
     ("nutrienv.harness.runner", "FAMILY_MAX_STEPS"): "<constant:dict>",
     ("nutrienv.harness.runner", "FINISH_OPS"): "<constant:frozenset>",

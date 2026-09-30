@@ -183,7 +183,7 @@ def test_no_network_without_flag(catalog, log_task, monkeypatch):
     def forbidden(_request):
         raise RuntimeError(
             "real network disabled: set NUTRIMIND_ALLOW_NETWORK=1 to "
-            "call the ark endpoint"
+            "call the teacher endpoint"
         )
 
     episode = rollout_tool_call(

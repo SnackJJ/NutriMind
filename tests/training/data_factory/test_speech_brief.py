@@ -358,14 +358,14 @@ def test_author_task_single_query_with_synth(catalog):
 )
 def test_live_brief_expander_smoke(catalog, pool):
     from src.training.data_factory.config import load_config
-    from src.training.data_factory.rollout import make_ark_expander_client
+    from src.training.data_factory.rollout import make_expander_client
 
     config = load_config(
         pathlib.Path(__file__).resolve().parents[3] / "configs" / "data_factory.yaml"
     )
     expander = make_brief_expander(
         complete=complete_from_chat_client(
-            make_ark_expander_client(config.expander)
+            make_expander_client(config.expander)
         ),
         catalog=catalog,
         parse_retries=config.expander.parse_retries,

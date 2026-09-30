@@ -97,10 +97,11 @@ _Avoid_: "Batch 1", "minimum data", "theoretical floor"
 
 **teacher**:
 The model whose Pass-filtered trajectories become SFT data —
-`deepseek/deepseek-v4.1-flash` on `https://api.commandcode.ai/provider/v1`,
+`deepseek-flash` (DeepSeek-V4.1-Flash) on `https://api.deepseek.com`,
 `thinking: {"type": "enabled"}` as the length control (ADR-011 amended
-2026-09-13). Same endpoint and `COMMANDCODE_API_KEY` as the `expander`. Same
-model as the eval comparator; the comparison is end-state Pass, not style.
+2026-09-29). Same endpoint and `DEEPSEEK_API_KEY` as the `expander`.
+Command Code is an optional channel, not the production one. Same model
+family as the eval comparator; the comparison is end-state Pass, not style.
 _Avoid_: "the expert"; do not call it "the oracle" (that is the Scorer's gold state)
 
 **Pass-filter**:

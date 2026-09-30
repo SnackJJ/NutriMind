@@ -1,5 +1,6 @@
 # NutriMind v2.0 data factory config (spec §7 — .scratch/nutrimind-v2/spec.md).
 #
+# [SUPERSEDED / 已被替代]:
 # Number provenance (the finalized design doc /tmp/nutrienv_student_data.md is lost;
 # its load-bearing numbers are preserved in spec §2.1):
 #   pinned exactly — Batch-1 ≈ 420 accepted Pass; family mix composite ~57% /
@@ -11,6 +12,40 @@
 #   provisional — over_generate_x, max_intents, usd_budget (re-pinned by tickets
 #     012/013/020 before the production run).
 #
+# 2026-09-29 用户改为学习规模 200，配比有意比考试分布（composite 57%）更均衡:
+#   composite (2-leg): 70 (35.0%)
+#   composite_update_log_recommend (3-leg): 20 (10.0%)
+#   recommend: 40 (20.0%)
+#   evaluate: 35 (17.5%)
+#   log: 25 (12.5%)
+#   update: 10 (5.0%)
+#   Total target_n = 200 accepted Pass.
+#
+# Sizing and runaway guard arithmetic:
+#   Wave 1 intents per family:
+#     composite: ceil(70 * 3.0) = 210
+#     3-leg: candidate_count(1/3, target_n=20) = min(max_intents, max(120, ceil(20 / (1/3) * 1.5)))
+#            = max(120, 90) = 120 (the 120 candidate_count floor binds at target_n=20)
+#     recommend: ceil(40 * 3.0) = 120
+#     evaluate: ceil(35 * 3.0) = 105
+#     log: ceil(25 * 3.0) = 75
+#     update: ceil(10 * 3.0) = 30
+#     Wave 1 total intents = 210 + 120 + 120 + 105 + 75 + 30 = 660.
+#   Per-family 2x attempt caps:
+#     composite: 210 * 2 = 420
+#     3-leg: 120 * 2 = 240
+#     recommend: 120 * 2 = 240
+#     evaluate: 105 * 2 = 210
+#     log: 75 * 2 = 150
+#     update: 30 * 2 = 60
+#     Sum of 2x attempt caps = 420 + 240 + 240 + 210 + 150 + 60 = 1320.
+#   max_intents = 1320 (exact sum of all per-family 2x caps so no family top-up is prematurely blocked).
+#
+# Budget:
+#   cc50 measured $0.006832 / accepted trajectory.
+#   For 200 accepted: off-peak estimate = 200 * 0.006832 = $1.37; peak estimate (2x) = $2.73.
+#   usd_budget is set to 2x peak estimate = $5.47 -> rounded to 6.0 USD with on_budget: stop.
+#
 # nutrienv_rev is single-sourced from the pin block below (ticket 023 lab pin);
 # the loader exposes it as DataFactoryConfig.nutrienv_rev. Keep the rev the
 # FIRST 40-hex string in this file — CI resolves the pin from it.
@@ -20,7 +55,7 @@
 # value. The older ../nutri-env@203d807 pin is v1 / factory-history.
 nutrienv:
   repo: "https://github.com/SnackJJ/NutriEnv"
-  rev: "0ee68eaa6c246e8079915761c95fc986c53d4979"     # nutrienv_rev
+  rev: "47367d9c569d0a46cbd1c97d5f08afb3a7d573ac"     # nutrienv_rev
   install: "uv pip install -e ../nutri-env-lab --config-settings editable_mode=strict"
   note: >
     Default (compat) editable / wheel / git+ installs drop nutrienv/env/ because
@@ -32,54 +67,88 @@ nutrienv:
 
 target: sft                      # sft | rlvr | eval | all (spec §7)
 
-teacher:                         # ADR-011 amended 2026-09-13: Command Code Provider API
-  model_id: "deepseek/deepseek-v4.1-flash"  # wire id from GET /provider/v1/models
-  endpoint: "https://api.commandcode.ai/provider/v1/chat/completions"
-  credential_env: "COMMANDCODE_API_KEY"     # shared with the expander (one provider)
+# Teacher + expander channel: DeepSeek official API (OpenAI-compatible).
+# Model id is the one GET /models returned on 2026-09-29 (`deepseek-flash` =
+# DeepSeek-V4.1-Flash). The build does NOT read .env files; export
+# DEEPSEEK_API_KEY before a live run (local source: NutriBuddy .env.local).
+#
+# Command Code is optional, selected by --teacher commandcode / --expander
+# commandcode. It answered on 2026-09-29. Thinking and temperature stay on the
+# blocks below; the commandcode: block only swaps model, endpoint, and key.
+teacher:
+  model_id: "deepseek-flash"
+  endpoint: "https://api.deepseek.com/chat/completions"
+  credential_env: "DEEPSEEK_API_KEY"
   thinking: {type: "enabled"}
-  temperature_first: 0.0         # attempt 1 (spec §16 / OQ-11)
-  temperature_retry: 0.7         # attempts 2..k
+  temperature_first: 0.0         # attempt 1 (spec §16 / OQ-11). Ignored while thinking is on.
+  temperature_retry: 0.7         # attempts 2..k. Ignored while thinking is on.
   per_turn_timeout_s: 60
 
-expander:                        # same endpoint + credential as the teacher
-  model_id: "deepseek/deepseek-v4.1-flash"
-  endpoint: "https://api.commandcode.ai/provider/v1/chat/completions"
-  credential_env: "COMMANDCODE_API_KEY"
+expander:                        # same official endpoint + credential as the teacher
+  model_id: "deepseek-flash"
+  endpoint: "https://api.deepseek.com/chat/completions"
+  credential_env: "DEEPSEEK_API_KEY"
   thinking: {type: "disabled"}   # structured {query, foods} JSON; no reasoning needed
   timeout_s: 60
   parse_retries: 1               # attempts = parse_retries + 1 (spec §16)
+
+commandcode:
+  model_id: "deepseek/deepseek-v4.1-flash"
+  endpoint: "https://api.commandcode.ai/provider/v1/chat/completions"
+  credential_env: "COMMANDCODE_API_KEY"
+
+# est_usd = Σ over teacher, expander of
+#   ((prompt - cached)·input + cached·cached_input + completion·output) / 1e6
+# where completion includes reasoning tokens. DeepSeek-V4.1-Flash list price,
+# USD per 1M tokens, read 2026-09-29 from
+# https://api-docs.deepseek.com/quick_start/pricing
+# Peak is exactly 2× off-peak. Peak hours are weekdays 01:00–04:00 and
+# 06:00–10:00 UTC. The meter does not subtract Chinese public holidays, and a
+# run that crosses a boundary reprices the accumulated total at the later tier.
+# The same card prices the optional Command Code channel; that is the DeepSeek
+# list, not a Command Code invoice.
+pricing:
+  currency: USD
+  fx_as_of: "2026-09-29"
+  peak_hours_utc: ["01:00-04:00", "06:00-10:00"]
+  off_peak:
+    teacher:  {input_per_mtok: 0.15, cached_input_per_mtok: 0.003, output_per_mtok: 0.60}
+    expander: {input_per_mtok: 0.15, cached_input_per_mtok: 0.003, output_per_mtok: 0.60}
+  peak:
+    teacher:  {input_per_mtok: 0.30, cached_input_per_mtok: 0.006, output_per_mtok: 1.20}
+    expander: {input_per_mtok: 0.30, cached_input_per_mtok: 0.006, output_per_mtok: 1.20}
 
 # N counts accepted Pass task_ids after intra-family semantic_key dedup (spec §10).
 # teacher_k = 6 is the pinned value (spec §2.1 preserves it for the 3-leg; applied
 # family-wide pending the design-doc reconstruction, ticket 021).
 families:
   composite:                     # 2-leg composites (log→recommend, update→recommend)
-    target_n: 200
+    target_n: 70
     teacher_k: 6
-    over_generate_x: 3.0         # provisional — design value lost with the doc
+    over_generate_x: 3.0
     gram_anchor: false
-  composite_update_log_recommend:  # the 3-leg (spec §22.9); inside the ~57% bucket
-    target_n: 40
+  composite_update_log_recommend:  # the 3-leg (spec §22.9)
+    target_n: 20
     teacher_k: 6
-    over_generate_x: 3.0         # provisional — ticket 013 replaces this with the
-    gram_anchor: true            # measured-rate sizing; ladder on from the start
+    over_generate_x: 3.0
+    gram_anchor: true
   recommend:
-    target_n: 71
+    target_n: 40
     teacher_k: 6
     over_generate_x: 3.0
     gram_anchor: false
   evaluate:
-    target_n: 55
+    target_n: 35
     teacher_k: 6
     over_generate_x: 3.0
     gram_anchor: false
   log:
-    target_n: 42
+    target_n: 25
     teacher_k: 6
     over_generate_x: 3.0
     gram_anchor: false
   update:
-    target_n: 13
+    target_n: 10
     teacher_k: 6
     over_generate_x: 3.0
     gram_anchor: false
@@ -87,9 +156,9 @@ families:
 max_seq_tokens: 20000            # ADR-011: 20k full-log; over → serialize.too_long
 plan_max_tokens: 80              # ~80-token hard plan truncation (ADR-011)
 tokenizer_name: null             # student tokenizer id, or null → char heuristic
-max_intents: 2000                # per-run runaway guard (provisional)
-usd_budget: 100.0                # provisional — re-pinned at production (ticket 020)
-on_budget: warn                  # warn | stop (spec §16)
+max_intents: 1320                # 2026-09-29 sum of per-family 2x attempt caps (420+240+240+210+150+60)
+usd_budget: 6.0                  # 2026-09-29 2x peak estimate on 200 target (2 * $2.73)
+on_budget: stop                  # warn | stop (spec §16)
 output_dir: data/student/        # v2 outputs only; v1 data dirs are never touched
 rubric_version: v2-r1
 reward_version: v2-r1

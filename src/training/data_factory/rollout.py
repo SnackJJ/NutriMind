@@ -1,8 +1,8 @@
-"""Teacher rollouts — instrumented ReActHarness subclass + ark/ clients (009).
+"""Teacher rollouts — instrumented ReActHarness subclass + chat clients (009).
 
 **(a) ``TeacherReActHarness``** — a ``nutrienv.harness.ReActHarness`` subclass
 whose completion comes from an injected ``teacher_complete(request) -> dict``
-(the single seam; the production implementation is the ark client below, tests
+(the single seam; the production implementation is the chat client below, tests
 inject a scripted queue). ``version="v2"``, ``context_limit=None`` (the full
 ReAct log — published protocol; the 12-message slide is an ablation). The
 base class still owns message assembly, the step-budget lines, the 6000-char
@@ -20,10 +20,12 @@ an explicit FINISH op (ADR-011), and the step budget is the only other
 terminator. Builds the ticket-003 ``EpisodeResult``.
 
 **(c) chat clients** — thin production ``teacher_complete`` against the
-Command Code Provider API (ADR-011 amended 2026-09-13). Reads
+configured OpenAI-compatible channel (DeepSeek official API; Command Code is
+an optional overlay). Reads
 ``message.content`` plus ``message.reasoning_content`` or ``message.reasoning``
 SEPARATELY (nutri-env's ``complete_chat`` collapses them),
-``usage.completion_tokens_details.reasoning_tokens`` for usage, and
+``usage.completion_tokens_details.reasoning_tokens`` and
+``usage.prompt_tokens_details.cached_tokens`` for usage, and
 ``tool_calls`` when the lab FC loop supplies ``tools``. Transport retries
 live here; attempt-level k retries belong to build. Real calls are guarded
 by ``NUTRIMIND_ALLOW_NETWORK=1``; the credential comes from the environment
@@ -57,9 +59,9 @@ from src.training.data_factory.verify import parse_action_text
 __all__ = [
     "TeacherReActHarness",
     "ScriptedTeacher",
-    "make_ark_chat_client",
-    "make_ark_teacher_client",
-    "make_ark_expander_client",
+    "make_chat_client",
+    "make_teacher_client",
+    "make_expander_client",
     "rollout",
 ]
 
@@ -258,50 +260,25 @@ def rollout(
 
 
 # --------------------------------------------------------------------------- #
-# (c) ark clients (production teacher_complete / expander)
+# (c) chat clients (production teacher_complete / expander)
 # --------------------------------------------------------------------------- #
 
-_TRANSPORT_RETRIES = 3
+_TRANSPORT_RETRIES = 5
 _RETRY_BACKOFF_S = 1.0
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
-_DEFAULT_ARK_BASE = "https://ark.cn-beijing.volces.com/api/plan/v3"
-# Cloudflare 1010-blocks Python's default urllib User-Agent on this host.
+# Cloudflare 1010-blocks Python's default urllib User-Agent on some hosts.
 _HTTP_USER_AGENT = "NutriMind-data-factory/1.0"
 _FORWARD_BODY_KEYS = ("tools", "tool_choice", "parallel_tool_calls")
 
 
-def _endpoint_model(model: str) -> str:
-    """Strip only the historical ``ark/`` routing prefix.
-
-    Command Code wire ids keep the org slash (``deepseek/deepseek-v4.1-flash``).
-    """
-    if model.startswith("ark/"):
-        return model[len("ark/") :]
-    return model
+def _chat_url(endpoint: str) -> str:
+    """The yaml endpoint is the full chat-completions URL."""
+    if not endpoint.startswith(("http://", "https://")):
+        raise RuntimeError(f"endpoint must be an absolute URL, got {endpoint!r}")
+    return endpoint
 
 
-def _resolve_endpoint(endpoint: str, *, base_env: str = "ARK_BASE_URL") -> str:
-    """Resolve the config's endpoint (often a path like ``api/plan/v3/chat/
-    completions``) against ``ARK_BASE_URL`` without duplicating segments the
-    base already carries (it may be host-only, host + api/plan/v3, or a full
-    completions URL)."""
-    if endpoint.startswith(("http://", "https://")):
-        return endpoint
-    base = os.environ.get(base_env, _DEFAULT_ARK_BASE).rstrip("/")
-    path = "/" + endpoint.lstrip("/")
-    if base.endswith(path):
-        return base
-    # drop the leading path SEGMENTS the base already carries (the base may be
-    # host-only, host + /api/plan/v3, or anything in between)
-    segments = path.split("/")
-    for i in range(1, len(segments)):
-        prefix = "/".join(segments[:i])
-        if prefix and base.endswith(prefix):
-            return base + "/" + "/".join(segments[i:])
-    return base + path
-
-
-def make_ark_chat_client(
+def make_chat_client(
     *,
     endpoint: str,
     model: str,
@@ -309,7 +286,7 @@ def make_ark_chat_client(
     thinking: dict,
     timeout_s: float,
 ) -> Callable[[dict], Completion]:
-    """A thin ``teacher_complete``-shaped client for one ark endpoint.
+    """A thin ``teacher_complete``-shaped client for one chat endpoint.
 
     Keeps ``content`` / ``reasoning_content`` separate; transport-level
     retries (HTTP 408/409/429/5xx, timeouts, connection errors) happen here —
@@ -328,7 +305,7 @@ def make_ark_chat_client(
             raise RuntimeError(f"{credential_env} is not set")
 
         body = {
-            "model": _endpoint_model(request.get("model", model)),
+            "model": request.get("model", model),
             "messages": request["messages"],
             "thinking": dict(thinking),
         }
@@ -338,7 +315,7 @@ def make_ark_chat_client(
             if request.get(key) is not None:
                 body[key] = request[key]
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        url = _resolve_endpoint(endpoint)
+        url = _chat_url(endpoint)
 
         last_error = "unreachable"
         for attempt in range(_TRANSPORT_RETRIES):
@@ -359,7 +336,7 @@ def make_ark_chat_client(
             except urllib.error.HTTPError as exc:
                 if exc.code in _RETRYABLE_STATUS and attempt + 1 < _TRANSPORT_RETRIES:
                     last_error = f"HTTP {exc.code}"
-                    time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
+                    time.sleep(_RETRY_BACKOFF_S * (2 ** attempt))
                     continue
                 # never include the response/request body — it carries no key,
                 # but keep error surfaces minimal and predictable
@@ -367,7 +344,7 @@ def make_ark_chat_client(
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 if attempt + 1 < _TRANSPORT_RETRIES:
                     last_error = f"{type(exc).__name__}"
-                    time.sleep(_RETRY_BACKOFF_S * (attempt + 1))
+                    time.sleep(_RETRY_BACKOFF_S * (2 ** attempt))
                     continue
                 raise RuntimeError(
                     f"provider request failed after {_TRANSPORT_RETRIES} attempts "
@@ -377,6 +354,7 @@ def make_ark_chat_client(
         message = data["choices"][0]["message"]
         usage = data.get("usage") or {}
         details = usage.get("completion_tokens_details") or {}
+        prompt_details = usage.get("prompt_tokens_details") or {}
         reasoning = message.get("reasoning_content")
         if reasoning is None:
             reasoning = message.get("reasoning")
@@ -389,15 +367,16 @@ def make_ark_chat_client(
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
                 "reasoning_tokens": details.get("reasoning_tokens"),
+                "cached_tokens": prompt_details.get("cached_tokens"),
             },
         }
 
     return complete
 
 
-def make_ark_teacher_client(teacher_config) -> Callable[[dict], Completion]:
+def make_teacher_client(teacher_config) -> Callable[[dict], Completion]:
     """The production ``teacher_complete`` from ``teacher:`` in the yaml."""
-    return make_ark_chat_client(
+    return make_chat_client(
         endpoint=teacher_config.endpoint,
         model=teacher_config.model_id,
         credential_env=teacher_config.credential_env,
@@ -406,10 +385,10 @@ def make_ark_teacher_client(teacher_config) -> Callable[[dict], Completion]:
     )
 
 
-def make_ark_expander_client(expander_config) -> Callable[[dict], Completion]:
-    """The expander chat client — same endpoint + credential, one provider,
-    ``thinking: {"type": "disabled"}`` (structured {query, foods} JSON)."""
-    return make_ark_chat_client(
+def make_expander_client(expander_config) -> Callable[[dict], Completion]:
+    """The expander chat client. ``thinking: {"type": "disabled"}``
+    (structured {query, foods} JSON)."""
+    return make_chat_client(
         endpoint=expander_config.endpoint,
         model=expander_config.model_id,
         credential_env=expander_config.credential_env,

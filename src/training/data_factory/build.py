@@ -21,8 +21,12 @@ config / schema / dependency error fails the whole run immediately.
 
 The ``expander`` (and from ticket 011 the ``teacher_complete``) are **injected**
 — nothing in this module constructs them (spec §7, US-19). The CLI is the
-composition root: ``--expander synthetic`` or ``--expander commandcode``
-(Command Code brief expander, ADR-011).
+composition root: ``--expander synthetic`` or ``--expander deepseek`` (live
+brief on the ``expander:`` channel). ``commandcode`` overlays the optional
+channel. Cost (spec §17) is priced per
+role and token type from the ``pricing:`` block: teacher usage comes from the
+episode turns, expander usage from a :class:`TokenMeter` the CLI wraps around
+the expander's chat client.
 
 This is a stage module: it imports nutrienv at module level (allowed by spec
 §18); the package ``__init__`` stays nutrienv-free.
@@ -41,6 +45,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from collections.abc import Callable, Mapping
 
@@ -55,7 +60,13 @@ from src.training.data_factory import gates as gates_mod
 from src.training.data_factory import materialize as mz
 from src.training.data_factory import serialize as serialize_mod
 from src.training.data_factory import verify as verify_mod
-from src.training.data_factory.config import ConfigError, DataFactoryConfig, load_config
+from src.training.data_factory.config import (
+    ConfigError,
+    DataFactoryConfig,
+    Pricing,
+    TokenRates,
+    load_config,
+)
 from src.training.data_factory.concepts import AttemptRecord, RolloutCache, TaskPackage
 from src.training.data_factory.gates import GateContext
 from src.training.data_factory.query_identity import UniqueQueryIndex, unique_caps
@@ -78,7 +89,6 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 _FROM_STAGES = (None, "author", "gate", "materialize", "rollout", "serialize")
-_USD_PER_MTOK = 0.3
 _RECOVERY_BAND = (0.15, 0.25)
 
 MANIFEST_SCHEMA_VERSION = "nutrimind-v2-runmanifest/1"
@@ -130,6 +140,54 @@ REJECT_STAGE_FILES = {
 class BuildError(Exception):
     """A config / schema / dependency error — the whole run fails immediately
     (spec §4.1). A partial ``run_manifest.json`` is written before re-raising."""
+
+
+class TokenMeter:
+    """Running token totals for one priced role (teacher or expander).
+
+    ``prompt_tokens`` includes ``cached_tokens`` (OpenAI usage semantics);
+    ``completion_tokens`` includes reasoning tokens."""
+
+    def __init__(self) -> None:
+        self.prompt_tokens = 0
+        self.cached_tokens = 0
+        self.completion_tokens = 0
+
+    def add(self, usage: Mapping | None) -> None:
+        usage = usage or {}
+        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+        self.cached_tokens += int(usage.get("cached_tokens") or 0)
+        self.completion_tokens += int(usage.get("completion_tokens") or 0)
+
+    def wrap(self, client: Callable[[dict], Mapping]) -> Callable[[dict], Mapping]:
+        """A chat client that records each completion's ``usage`` here."""
+
+        def metered(request: dict) -> Mapping:
+            completion = client(request)
+            self.add(completion.get("usage"))
+            return completion
+
+        return metered
+
+    @property
+    def total(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def est_usd(self, rates: TokenRates, usd_per_unit: float) -> float:
+        cached = min(self.cached_tokens, self.prompt_tokens)
+        cost = (
+            (self.prompt_tokens - cached) * rates.input_per_mtok
+            + cached * rates.cached_input_per_mtok
+            + self.completion_tokens * rates.output_per_mtok
+        ) / 1_000_000
+        return cost * usd_per_unit
+
+    def to_dict(self) -> dict:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "cached_tokens": self.cached_tokens,
+            "completion_tokens": self.completion_tokens,
+        }
 
 
 # Mini-exam val (ticket 017): reserved seeds, disjoint from Batch-1's 0..max_intents.
@@ -193,6 +251,110 @@ def _amount_path_for(person, index: int, family_cfg) -> tuple[str, bool]:
     return path, ounce
 
 
+def family_wave_size(config: DataFactoryConfig, family: str) -> int:
+    """How many intents the first wave draws for ``family``.
+
+    The 3-leg family uses :func:`candidate_count` (floor 120). Every other
+    family uses ``ceil(target_n * over_generate_x)``.
+    """
+    family_cfg = config.families[family]
+    if family == "composite_update_log_recommend":
+        return candidate_count(
+            1.0 / family_cfg.over_generate_x,
+            target_n=family_cfg.target_n,
+            max_candidate_limit=config.max_intents,
+        )
+    return math.ceil(family_cfg.target_n * family_cfg.over_generate_x)
+
+
+def family_attempt_cap(config: DataFactoryConfig, family: str) -> int:
+    """Per-family draw cap: two waves, and never above ``max_intents``.
+
+    One wave is the old behavior (no top-up). The second wave is the room
+    the quota refill is allowed to spend before it stops.
+    """
+    return min(config.max_intents, family_wave_size(config, family) * 2)
+
+
+def should_top_up(
+    *,
+    accepted: int,
+    target_n: int,
+    draws: int,
+    cap: int,
+    total_intents: int,
+    max_intents: int,
+    budget_stopped: bool,
+) -> bool:
+    """Whether this family should draw one more intent."""
+    if budget_stopped or accepted >= target_n:
+        return False
+    if draws >= cap or total_intents >= max_intents:
+        return False
+    return True
+
+
+def intent_for(config: DataFactoryConfig, family: str, index: int) -> dict:
+    """The intent ``enumerate_intents`` would emit at ``index`` for ``family``."""
+    if family not in FAMILY_SPECS:
+        raise BuildError(f"config families: no task-key spec for family {family!r}")
+    if family not in config.families:
+        raise BuildError(f"config families: {family!r} is not configured")
+    task_family, steps = FAMILY_SPECS[family]
+    family_cfg = config.families[family]
+    person = TRAIN_ROSTER[index % len(TRAIN_ROSTER)]
+    if family == "composite":
+        steps = author_mod.TWO_LEG_COMPOSITE_STEPS[
+            index % len(author_mod.TWO_LEG_COMPOSITE_STEPS)
+        ]
+    task_key = f"{task_family}--{'+'.join(steps)}--{person.user_id}"
+    if family in ("recommend",):
+        occasion = _OCCASIONS[index % len(_OCCASIONS)]
+    else:
+        occasion = _LOG_OCCASIONS[index % len(_LOG_OCCASIONS)]
+    amount_path, ounce = _amount_path_for(person, index, family_cfg)
+    tier = ""
+    shell = None
+    slots = None
+    if family == "evaluate":
+        tier = author_mod.EVALUATE_TIERS[index % len(author_mod.EVALUATE_TIERS)]
+    elif family == "update" or (
+        family == "composite" and steps == ("update", "recommend")
+    ):
+        shell = _UPDATE_SHELL_CYCLE[index % len(_UPDATE_SHELL_CYCLE)]
+    elif family == "recommend":
+        if person.persona == "gym":
+            shell = "rec-post-gym"
+            occasion = "dinner"
+        elif person.allergies:
+            shell = "rec-named-dish"
+            occasion = "dinner"
+        else:
+            shell = _REC_SHELL_BY_OCCASION[occasion]
+    return {
+        "schema_version": INTENT_SCHEMA_VERSION,
+        "task_id": f"{task_key}--{index:06d}",
+        "task_key": task_key,
+        "family": family,
+        "task_family": task_family,
+        "steps": list(steps),
+        "user_id": person.user_id,
+        "seed": index,
+        "occasion": occasion,
+        "scene": "empty",
+        "shell": shell,
+        "slots": slots,
+        "amount_path": amount_path,
+        "ounce_phrasing": ounce,
+        "knife": None,
+        "tier": tier,
+        "recovery_trap": (
+            "unknown_food" if family == "log" and index % 5 == 4 else None
+        ),
+        "gram_anchor": family_cfg.gram_anchor,
+    }
+
+
 def enumerate_intents(config: DataFactoryConfig) -> list[dict]:
     """Deterministic per-family intents (spec §6 step 4), sorted by task_id.
 
@@ -205,75 +367,14 @@ def enumerate_intents(config: DataFactoryConfig) -> list[dict]:
             raise BuildError(
                 f"config families: no task-key spec for family {family!r}"
             )
-        task_family, steps = FAMILY_SPECS[family]
-        family_cfg = config.families[family]
-        wanted = math.ceil(family_cfg.target_n * family_cfg.over_generate_x)
-        if family == "composite_update_log_recommend":
-            rate = 1.0 / family_cfg.over_generate_x
-            wanted = candidate_count(
-                rate,
-                target_n=family_cfg.target_n,
-                max_candidate_limit=config.max_intents,
-            )
+        wanted = family_wave_size(config, family)
         if wanted > config.max_intents:
             raise BuildError(
                 f"family {family!r} intent count {wanted} exceeds max_intents "
                 f"{config.max_intents} (runaway guard)"
             )
         for index in range(wanted):
-            person = TRAIN_ROSTER[index % len(TRAIN_ROSTER)]
-            if family == "composite":
-                steps = author_mod.TWO_LEG_COMPOSITE_STEPS[
-                    index % len(author_mod.TWO_LEG_COMPOSITE_STEPS)
-                ]
-            task_key = f"{task_family}--{'+'.join(steps)}--{person.user_id}"
-            if family in ("recommend",):
-                occasion = _OCCASIONS[index % len(_OCCASIONS)]
-            else:
-                occasion = _LOG_OCCASIONS[index % len(_LOG_OCCASIONS)]
-            amount_path, ounce = _amount_path_for(person, index, family_cfg)
-            tier = ""
-            shell = None
-            slots = None
-            if family == "evaluate":
-                tier = author_mod.EVALUATE_TIERS[index % len(author_mod.EVALUATE_TIERS)]
-            elif family == "update" or (
-                family == "composite" and steps == ("update", "recommend")
-            ):
-                shell = _UPDATE_SHELL_CYCLE[index % len(_UPDATE_SHELL_CYCLE)]
-            elif family == "recommend":
-                if person.persona == "gym":
-                    shell = "rec-post-gym"
-                    occasion = "dinner"
-                elif person.allergies:
-                    shell = "rec-named-dish"
-                    occasion = "dinner"
-                else:
-                    shell = _REC_SHELL_BY_OCCASION[occasion]
-            intents.append(
-                {
-                    "schema_version": INTENT_SCHEMA_VERSION,
-                    "task_id": f"{task_key}--{index:06d}",
-                    "task_key": task_key,
-                    "family": family,
-                    "task_family": task_family,
-                    "steps": list(steps),
-                    "user_id": person.user_id,
-                    "seed": index,
-                    "occasion": occasion,
-                    "scene": "empty",
-                    "shell": shell,
-                    "slots": slots,
-                    "amount_path": amount_path,
-                    "ounce_phrasing": ounce,
-                    "knife": None,
-                    "tier": tier,
-                    "recovery_trap": (
-                        "unknown_food" if family == "log" and index % 5 == 4 else None
-                    ),
-                    "gram_anchor": family_cfg.gram_anchor,
-                }
-            )
+            intents.append(intent_for(config, family, index))
     if len(intents) > config.max_intents:
         raise BuildError(
             f"intent count {len(intents)} exceeds max_intents "
@@ -596,7 +697,8 @@ def _finalize_observability(
     attempted_task_ids: int,
     indeterminate_task_ids: int,
     accepted_records: list[dict],
-    tokens: int,
+    teacher_usage: TokenMeter | None = None,
+    expander_usage: TokenMeter | None = None,
     recovery_positive: int = 0,
     recovery_by_code: dict | None = None,
     budget_warned: bool = False,
@@ -626,14 +728,39 @@ def _finalize_observability(
             "actual": accepted_by_family.get(name, 0),
         }
     manifest["family_mix"] = family_mix
-    usd_per_mtok = _USD_PER_MTOK
+    teacher_usage = teacher_usage or TokenMeter()
+    expander_usage = expander_usage or TokenMeter()
+    pricing = config.pricing
+    from datetime import datetime, timezone
+
+    priced_at = datetime.now(timezone.utc)
+    teacher_usd = teacher_usage.est_usd(
+        pricing.rates("teacher", priced_at), pricing.usd_per_unit
+    )
+    expander_usd = expander_usage.est_usd(
+        pricing.rates("expander", priced_at), pricing.usd_per_unit
+    )
+    pricing_block = {
+        "currency": pricing.currency,
+        "cny_per_usd": pricing.cny_per_usd,
+        "fx_as_of": pricing.fx_as_of,
+    }
+    if pricing.peak is not None:
+        pricing_block["tier"] = "peak" if pricing.is_peak(priced_at) else "off_peak"
+        pricing_block["tier_as_of"] = priced_at.isoformat(timespec="seconds")
     manifest["cost"] = {
-        "est_usd": round((tokens / 1_000_000) * usd_per_mtok, 6),
+        "est_usd": round(teacher_usd + expander_usd, 6),
         "budget_usd": config.usd_budget,
-        "teacher_tokens": tokens,
+        "teacher_tokens": teacher_usage.total,
+        "expander_tokens": expander_usage.total,
         "on_budget": config.on_budget,
         "budget_warned": budget_warned,
         "budget_stopped": budget_stopped,
+        "by_role": {
+            "teacher": {**teacher_usage.to_dict(), "est_usd": round(teacher_usd, 6)},
+            "expander": {**expander_usage.to_dict(), "est_usd": round(expander_usd, 6)},
+        },
+        "pricing": pricing_block,
     }
     accepted_n_rec = manifest["counts"].get("accepted", 0)
     rec_pos = recovery_positive
@@ -796,32 +923,141 @@ def _write_cache(path: pathlib.Path, cache: RolloutCache, *, before_replace=None
     _atomic_write(path, blob, before_replace=before_replace)
 
 
+def _is_infra_error(error: str | None) -> bool:
+    if not error:
+        return False
+    lower = error.lower()
+    return any(
+        term in lower
+        for term in (
+            "429",
+            "500",
+            "502",
+            "503",
+            "504",
+            "timeout",
+            "timed out",
+            "connection",
+            "network",
+            "toolcallinfraerror",
+            "provider request failed",
+        )
+    )
+
+
+def _extract_submission(att: AttemptRecord):
+    ep = att.episode
+    turns = getattr(ep, "turns", None) or []
+    for turn in reversed(turns):
+        op = getattr(turn, "executed_op", None) if hasattr(turn, "executed_op") else (turn.get("executed_op") if isinstance(turn, dict) else None)
+        if op and isinstance(op, dict):
+            op_name = op.get("op")
+            if op_name in ("submit_plan", "log_meal", "update_profile", "finish"):
+                return op
+    for turn in reversed(turns):
+        op = getattr(turn, "executed_op", None) if hasattr(turn, "executed_op") else (turn.get("executed_op") if isinstance(turn, dict) else None)
+        if op:
+            return op
+    return None
+
+
+def _canonical_submission(op: dict | None):
+    if not op or not isinstance(op, dict):
+        return None
+    name = op.get("op")
+    if name == "submit_plan":
+        items = tuple(sorted((str(i.get("food_id")), round(float(i.get("grams", 0)), 2)) for i in (op.get("items") or [])))
+        verdict = op.get("verdict")
+        reasons = tuple(sorted(op.get("reasons") or []))
+        return ("submit_plan", verdict, items, reasons)
+    if name == "log_meal":
+        return ("log_meal", str(op.get("food_id")), round(float(op.get("grams", 0)), 2), op.get("eaten_at"))
+    if name == "update_profile":
+        patch = op.get("patch") or {}
+        return ("update_profile", tuple(sorted((str(k), str(v)) for k, v in patch.items())))
+    return (name, tuple(sorted((str(k), str(v)) for k, v in op.items() if k != "op")))
+
+
+def _is_identical_failure(prev: AttemptRecord, curr: AttemptRecord) -> bool:
+    if prev.verification.status != "fail" or curr.verification.status != "fail":
+        return False
+    prev_codes = tuple(sorted(prev.verification.failure_codes or []))
+    curr_codes = tuple(sorted(curr.verification.failure_codes or []))
+    if not prev_codes or prev_codes != curr_codes:
+        return False
+    prev_sub = _canonical_submission(_extract_submission(prev))
+    curr_sub = _canonical_submission(_extract_submission(curr))
+    return prev_sub == curr_sub
+
+
 def _teacher_stage(
-    package, task, *, config, family_cfg, teacher_complete, catalog, out: pathlib.Path
+    package, task, *, config, family_cfg, teacher_complete, catalog, out: pathlib.Path,
+    teacher_usage: TokenMeter | None = None, expander_usage: TokenMeter | None = None,
 ) -> RolloutCache:
     """Attempts 1..k (k = family ``teacher_k``, spec §16): attempt 1 at
     ``temperature_first``, 2..k at ``temperature_retry``, stopping at the
     first Pass. Every attempt that ran is recorded; ``selected_attempt`` is
     the 0-based index of the first Pass or None."""
     cache = RolloutCache(task_id=package.task_id)
-    for n in range(1, family_cfg.teacher_k + 1):
+    attempt_num = 1
+    infra_retry_count = 0
+    max_infra_retries = 5
+
+    while attempt_num <= family_cfg.teacher_k:
+        if (
+            config.usd_budget > 0
+            and config.on_budget == "stop"
+            and teacher_usage is not None
+            and expander_usage is not None
+        ):
+            spent = teacher_usage.total + expander_usage.total
+            est = _est_usd(config.pricing, teacher_usage, expander_usage)
+            if est >= config.usd_budget and spent > 0:
+                break
+
         episode = rollout_tool_call(
             task,
             teacher_complete=teacher_complete,
             catalog=catalog,
             model=config.teacher.model_id,
         )
+
+        # Infra errors: exponential backoff retry without consuming teacher_k
+        if episode.error and _is_infra_error(episode.error):
+            infra_retry_count += 1
+            if infra_retry_count <= max_infra_retries:
+                time.sleep(1.0 * (2 ** (infra_retry_count - 1)))
+                continue
+            else:
+                verification = verify_mod.verify(package, episode)
+                cache.attempts.append(
+                    AttemptRecord(
+                        attempt_id=mz.attempt_id(package.task_id, attempt_num),
+                        episode=episode,
+                        verification=verification,
+                    )
+                )
+                break
+
         verification = verify_mod.verify(package, episode)
         cache.attempts.append(
             AttemptRecord(
-                attempt_id=mz.attempt_id(package.task_id, n),
+                attempt_id=mz.attempt_id(package.task_id, attempt_num),
                 episode=episode,
                 verification=verification,
             )
         )
         if verification.status == "pass":
-            cache.selected_attempt = n - 1
+            cache.selected_attempt = attempt_num - 1
             break
+
+        # Deterministic early stopping after 2 consecutive identical failures
+        if len(cache.attempts) >= 2:
+            if _is_identical_failure(cache.attempts[-2], cache.attempts[-1]):
+                break
+
+        attempt_num += 1
+
     _write_cache(out / "rollouts" / "cache" / f"{package.task_id}.json", cache)
     # serialize from the on-disk cache (cache-authoritative: a re-run loading
     # the same cache produces byte-identical records)
@@ -848,8 +1084,17 @@ def _pick_pass_attempt(cache: RolloutCache):
     return None
 
 
-def _est_usd(tokens: int) -> float:
-    return (tokens / 1_000_000) * _USD_PER_MTOK
+def _est_usd(pricing: Pricing, teacher: TokenMeter, expander: TokenMeter, when=None) -> float:
+    """Price the accumulated meters at the tier in force at ``when``.
+
+    A boundary crossing reprices the whole total; calls are not stamped.
+    """
+    from datetime import datetime, timezone
+
+    when = when or datetime.now(timezone.utc)
+    return teacher.est_usd(
+        pricing.rates("teacher", when), pricing.usd_per_unit
+    ) + expander.est_usd(pricing.rates("expander", when), pricing.usd_per_unit)
 
 
 def build(
@@ -866,10 +1111,12 @@ def build(
     freeze_mini: bool = False,
     before_replace=None,
     unique_query_budget: int | None = None,
+    expander_meter: TokenMeter | None = None,
 ) -> dict:
     """Run the pipeline through materialize / teacher / serialize / rlvr.
 
-    Returns the run manifest. Raises :class:`BuildError` (after writing a
+    ``expander_meter`` is the meter wrapped around a live expander's chat
+    client (None → the expander spends nothing). Returns the run manifest. Raises :class:`BuildError` (after writing a
     partial manifest) on any whole-run failure; single-task failures are
     recorded as reject lines and skipped.
     """
@@ -884,6 +1131,7 @@ def build(
     if stop_after is not None and from_stage is not None:
         raise BuildError("cannot combine --stop-after and --from-stage")
     out = pathlib.Path(output_dir if output_dir is not None else config.output_dir)
+    expander_usage = expander_meter if expander_meter is not None else TokenMeter()
     if config_path is not None:
         config_sha = hashlib.sha256(
             pathlib.Path(config_path).read_bytes()
@@ -903,7 +1151,7 @@ def build(
         "output_dir": str(out),
         "config_sha": config_sha,
         "counts": {
-            "intents": 0, "skipped_terminal": 0, "authored": 0,
+            "intents": 0, "skipped_terminal": 0, "skipped_quota_met": 0, "authored": 0,
             "gate_kept": 0, "materialized": 0,
             "rejected": {"author": 0, "gate": 0, "indeterminate": 0},
         },
@@ -942,7 +1190,7 @@ def build(
                 attempted_task_ids=0,
                 indeterminate_task_ids=0,
                 accepted_records=[],
-                tokens=0,
+                expander_usage=expander_usage,
                 unique_queries=UniqueQueryIndex(),
                 unique_query_budget=unique_query_budget,
             )
@@ -1019,10 +1267,14 @@ def build(
         )
         reject_histogram: Counter[str] = Counter()
         accepted_by_family: Counter[str] = Counter()
+        for record in accepted_records:
+            family_name = (record.get("meta") or {}).get("family")
+            if isinstance(family_name, str):
+                accepted_by_family[family_name] += 1
         teacher_completed = teacher_error = teacher_no_finish = 0
         pass_count = serialized = 0
         attempted_task_ids = indeterminate_task_ids = 0
-        tokens = 0
+        teacher_usage = TokenMeter()
         recovery_positive = 0
         recovery_by_code: dict[str, dict[str, int]] = {"semantic": {}, "syntax": {}}
         budget_warned = budget_stopped = False
@@ -1048,7 +1300,7 @@ def build(
 
         def _serialize_cache(package, cache, intent, task=None) -> None:
             nonlocal pass_count, serialized, indeterminate_task_ids
-            nonlocal teacher_completed, teacher_error, teacher_no_finish, tokens
+            nonlocal teacher_completed, teacher_error, teacher_no_finish
             task_id = intent["task_id"]
             common = {
                 "task_id": task_id,
@@ -1066,10 +1318,7 @@ def build(
                 elif status == "no_finish":
                     teacher_no_finish += 1
                 for turn in attempt.episode.turns:
-                    usage = turn.usage or {}
-                    tokens += int(usage.get("prompt_tokens") or 0) + int(
-                        usage.get("completion_tokens") or 0
-                    )
+                    teacher_usage.add(turn.usage)
             attempt = _pick_pass_attempt(cache)
             if attempt is not None:
                 pass_count += 1
@@ -1132,7 +1381,49 @@ def build(
                 )
                 _bump_codes(reject_histogram, codes)
 
-        for intent in intents:
+        queue = list(intents)
+        next_index = {
+            family: sum(1 for row in intents if row["family"] == family)
+            for family in config.families
+        }
+        draws: Counter[str] = Counter()
+        cursor = 0
+
+        def _note_attempt(intent) -> None:
+            if not run_teacher or budget_stopped or serialize_only:
+                return
+            if (
+                config.usd_budget > 0
+                and _est_usd(config.pricing, teacher_usage, expander_usage)
+                >= config.usd_budget
+            ):
+                return
+            family = intent["family"]
+            draws[family] += 1
+            cap = family_attempt_cap(config, family)
+            # next_index is how many intents are already minted. draws counts
+            # finished ones, so a draws<cap check would still enqueue past cap.
+            if next_index[family] >= cap:
+                return
+            if not should_top_up(
+                accepted=accepted_by_family[family],
+                target_n=config.families[family].target_n,
+                draws=draws[family],
+                cap=cap,
+                total_intents=manifest["counts"]["intents"],
+                max_intents=config.max_intents,
+                budget_stopped=budget_stopped,
+            ):
+                return
+            extra = intent_for(config, family, next_index[family])
+            next_index[family] += 1
+            queue.append(extra)
+            manifest["counts"]["intents"] += 1
+            _append_jsonl(out / "intents" / f"{family}.jsonl", extra)
+
+        while cursor < len(queue):
+            intent = queue[cursor]
+            cursor += 1
             task_id = intent["task_id"]
             if task_id in seen_this_run:
                 raise BuildError(
@@ -1165,6 +1456,16 @@ def build(
                 if family_cfg.gram_anchor
                 else None
             )
+            if (
+                config.usd_budget > 0
+                and config.on_budget == "stop"
+                and (teacher_usage.total + expander_usage.total) > 0
+            ):
+                est = _est_usd(config.pricing, teacher_usage, expander_usage)
+                if est >= config.usd_budget:
+                    budget_stopped = True
+                    break
+
             skip_upstream = (
                 from_stage in ("rollout", "materialize", "gate")
                 and (out / "task_packages" / f"{task_id}.json").is_file()
@@ -1197,6 +1498,7 @@ def build(
                     _append_jsonl(out / "rejects" / "author.jsonl", reject)
                     manifest["counts"]["rejected"]["author"] += 1
                     _bump_codes(reject_histogram, reject.get("failure_codes"))
+                    _note_attempt(intent)
                     continue
                 manifest["counts"]["authored"] += 1
                 _append_jsonl(
@@ -1228,6 +1530,7 @@ def build(
                     _bump_codes(reject_histogram, record.get("failure_codes"))
                     if route == "indeterminate":
                         indeterminate_task_ids += 1
+                    _note_attempt(intent)
                     continue
                 manifest["counts"]["gate_kept"] += 1
                 if not run_teacher:
@@ -1265,7 +1568,14 @@ def build(
 
             if not run_teacher:
                 continue
-            if _est_usd(tokens) >= config.usd_budget and config.on_budget == "stop" and tokens > 0:
+            family = intent["family"]
+            family_cfg = config.families[family]
+            if accepted_by_family[family] >= family_cfg.target_n:
+                manifest["counts"]["skipped_quota_met"] += 1
+                continue
+            spent = teacher_usage.total + expander_usage.total
+            est = _est_usd(config.pricing, teacher_usage, expander_usage)
+            if est >= config.usd_budget and config.on_budget == "stop" and spent > 0:
                 budget_stopped = True
                 break
             attempted_task_ids += 1
@@ -1281,12 +1591,13 @@ def build(
                     package, task, config=config,
                     family_cfg=family_cfg,
                     teacher_complete=teacher_complete, catalog=catalog, out=out,
+                    teacher_usage=teacher_usage, expander_usage=expander_usage,
                 )
             _serialize_cache(package, cache, intent, task)
             if unique_query_budget and len(unique_queries) >= unique_query_budget:
                 break
 
-            est = _est_usd(tokens)
+            est = _est_usd(config.pricing, teacher_usage, expander_usage)
             if (
                 config.usd_budget > 0
                 and est >= 0.8 * config.usd_budget
@@ -1301,6 +1612,7 @@ def build(
                 if config.on_budget == "stop":
                     budget_stopped = True
                     break
+            _note_attempt(intent)
 
         if run_teacher or serialize_only:
             by_id = {record["task_id"]: record for record in accepted_records}
@@ -1369,7 +1681,8 @@ def build(
             attempted_task_ids=attempted_task_ids,
             indeterminate_task_ids=indeterminate_task_ids,
             accepted_records=accepted_records,
-            tokens=tokens,
+            teacher_usage=teacher_usage,
+            expander_usage=expander_usage,
             recovery_positive=recovery_positive,
             recovery_by_code=recovery_by_code,
             budget_warned=budget_warned,
@@ -1415,14 +1728,16 @@ def main(argv: list[str] | None = None) -> int:
         help="re-run terminal tasks from this stage (ticket 014)",
     )
     parser.add_argument(
-        "--expander", choices=("synthetic", "commandcode", "ark"), default=None,
-        help="speech expander: synthetic (offline) or commandcode "
-        "(NUTRIMIND_ALLOW_NETWORK=1 + COMMANDCODE_API_KEY)",
+        "--expander", choices=("synthetic", "deepseek", "commandcode"), default=None,
+        help="speech expander: synthetic (offline), deepseek (yaml expander: "
+        "channel), or commandcode (optional overlay). Live calls need "
+        "NUTRIMIND_ALLOW_NETWORK=1 and the channel's credential_env",
     )
     parser.add_argument(
-        "--teacher", choices=("ark", "commandcode"), default=None,
-        help="teacher adapter for target=sft (network-guarded: "
-        "NUTRIMIND_ALLOW_NETWORK=1 + COMMANDCODE_API_KEY required at call time)",
+        "--teacher", choices=("deepseek", "commandcode"), default=None,
+        help="teacher adapter for target=sft: deepseek uses teacher:, "
+        "commandcode overlays the optional channel "
+        "(NUTRIMIND_ALLOW_NETWORK=1 + the channel credential)",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -1439,6 +1754,12 @@ def main(argv: list[str] | None = None) -> int:
         help="pilot overlay: stop after this many unique query identities "
         "(does not change production family target_n)",
     )
+    parser.add_argument(
+        "--output",
+        type=pathlib.Path,
+        default=None,
+        help="override config output_dir (e.g. data/student/v2-batch1-200)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1451,40 +1772,67 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "refusing to run without an explicit --expander: the default would "
             "silently author with synthetic speech. Use --expander synthetic "
-            "for offline runs or --expander commandcode for live speech.",
+            "for offline runs or --expander deepseek for live speech.",
             file=sys.stderr,
         )
         return 1
 
     catalog = load_catalog(config.catalog_path)
+    expander_meter = TokenMeter()
+
+    def _overlay(role_config):
+        if config.commandcode is None:
+            print(
+                "config error: --commandcode needs a commandcode: block",
+                file=sys.stderr,
+            )
+            return None
+        return dataclasses.replace(
+            role_config,
+            model_id=config.commandcode.model_id,
+            endpoint=config.commandcode.endpoint,
+            credential_env=config.commandcode.credential_env,
+        )
+
     if args.expander == "synthetic":
         from src.training.data_factory.synthetic import synth_expander
 
         expander = synth_expander(catalog)
     else:
-        from src.training.data_factory.rollout import make_ark_expander_client
+        from src.training.data_factory.rollout import make_expander_client
         from src.training.data_factory.speech import (
             complete_from_chat_client,
             make_brief_expander,
         )
 
+        expander_cfg = config.expander
+        if args.expander == "commandcode":
+            expander_cfg = _overlay(config.expander)
+            if expander_cfg is None:
+                return 1
         expander = make_brief_expander(
             complete=complete_from_chat_client(
-                make_ark_expander_client(config.expander)
+                expander_meter.wrap(make_expander_client(expander_cfg))
             ),
             catalog=catalog,
             parse_retries=config.expander.parse_retries,
         )
 
     teacher_complete = None
-    if args.teacher in ("ark", "commandcode"):
-        from src.training.data_factory.rollout import make_ark_teacher_client
+    if args.teacher in ("deepseek", "commandcode"):
+        from src.training.data_factory.rollout import make_teacher_client
 
-        teacher_complete = make_ark_teacher_client(config.teacher)
+        teacher_cfg = config.teacher
+        if args.teacher == "commandcode":
+            teacher_cfg = _overlay(config.teacher)
+            if teacher_cfg is None:
+                return 1
+        teacher_complete = make_teacher_client(teacher_cfg)
 
     try:
         manifest = build(
             config,
+            output_dir=args.output,
             expander=expander,
             teacher_complete=teacher_complete,
             stop_after=args.stop_after,
@@ -1494,6 +1842,7 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=args.dry_run,
             freeze_mini=args.freeze_mini,
             unique_query_budget=args.unique_query_budget,
+            expander_meter=expander_meter,
         )
     except BuildError as exc:
         print(f"build aborted: {exc}", file=sys.stderr)
