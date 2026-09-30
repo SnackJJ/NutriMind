@@ -12,6 +12,7 @@ import json
 from nutrienv.harness.tools_schema import NUTRIENV_TOOLS
 
 from src.training.data_factory.serialize import SerializeError, validate_record
+from src.training.rl.prompt import as_ids
 
 __all__ = ["LoadError", "tokenize_v2_record"]
 
@@ -50,6 +51,7 @@ def _reject_retired(record: dict) -> None:
 
 
 def _ids(rendered) -> list:
+    rendered = as_ids(rendered)
     if not isinstance(rendered, list):
         raise LoadError("tokenizer.apply_chat_template(..., tokenize=True) must return ids")
     return rendered
@@ -71,11 +73,9 @@ def tokenize_v2_record(record: dict, tokenizer, *, tools=None) -> dict:
     schema = NUTRIENV_TOOLS if tools is None else tools
     messages = record["messages"]
     train_on = record["train_on"]
-    full = tokenizer.apply_chat_template(
+    full = _ids(tokenizer.apply_chat_template(
         messages, tools=schema, tokenize=True, add_generation_prompt=False
-    )
-    if not isinstance(full, list):
-        raise LoadError("tokenizer.apply_chat_template(..., tokenize=True) must return ids")
+    ))
     labels = [-100] * len(full)
     # Only trained turns are rendered as prefixes. Each prefix keeps the system
     # + Task turns (validate_record: train_on[0:2] is False), which templates

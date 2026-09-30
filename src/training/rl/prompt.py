@@ -24,15 +24,26 @@ def prompt_for_package(task_package: TaskPackage) -> dict:
     }
 
 
+def as_ids(rendered):
+    """Token ids from ``apply_chat_template(..., tokenize=True)``.
+
+    transformers 4.x returns a list; 5.x returns a BatchEncoding unless
+    ``return_dict=False`` is passed.
+    """
+    if hasattr(rendered, "keys") and "input_ids" in rendered:
+        return list(rendered["input_ids"])
+    return rendered
+
+
 def tokenize_prompt(payload: dict, tokenizer) -> list:
     """Tokenize the shared payload with the student chat template + tools."""
     messages = [
         {"role": "system", "content": payload["system"]},
         {"role": "user", "content": payload["task"]},
     ]
-    return tokenizer.apply_chat_template(
+    return as_ids(tokenizer.apply_chat_template(
         messages,
         tools=payload["tools"],
         tokenize=True,
         add_generation_prompt=True,
-    )
+    ))

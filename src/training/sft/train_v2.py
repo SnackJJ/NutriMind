@@ -27,7 +27,7 @@ import types
 
 import yaml
 
-from src.training.rl.prompt import prompt_for_package, tokenize_prompt
+from src.training.rl.prompt import as_ids, prompt_for_package, tokenize_prompt
 from src.training.sft.v2_loader import tokenize_v2_record
 
 __all__ = ["encode_records", "for_template", "prompt_identity", "main"]
@@ -73,14 +73,14 @@ def prompt_identity(record: dict, tokenizer, train_ids: list) -> dict:
         {"role": "system", "content": payload["system"]},
         {"role": "user", "content": payload["task"]},
     ]
-    context = tokenizer.apply_chat_template(
+    context = as_ids(tokenizer.apply_chat_template(
         messages, tools=payload["tools"], tokenize=True, add_generation_prompt=False
-    )
+    ))
     eval_ids = tokenize_prompt(payload, tokenizer)
-    thinking = tokenizer.apply_chat_template(
+    thinking = as_ids(tokenizer.apply_chat_template(
         messages, tools=payload["tools"], tokenize=True,
         add_generation_prompt=True, enable_thinking=True,
-    )
+    ))
 
     def is_prefix(ids):
         return train_ids[: len(ids)] == ids
