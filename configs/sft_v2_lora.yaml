@@ -1,0 +1,69 @@
+# NutriMind v2 SFT — Qwen3.5-2B + LoRA on TRL SFTTrainer (ADR-015).
+#
+# Records: v2 native-FC SFT records (ADR-014, serialize.py / spec §9.2), split
+# 7:2:1 by ticket 020. holdout.jsonl is the go/no-go set (pilot issue 005) and is
+# never read here; loss_val.jsonl is loss-only (loss is not a go/no-go input).
+#
+# Rendering: the student tokenizer's chat template with the lab NUTRIENV_TOOLS,
+# the same call src.training.rl.prompt.tokenize_prompt makes for eval. Labels
+# come from each record's train_on (v2_loader): every assistant turn — its
+# <think> plan (truncated teacher reasoning_content) + <tool_call> + <|im_end|>.
+# system / Task / tool turns are -100.
+#
+# Runtime: Qwen3.5 (model_type qwen3_5, hybrid Gated-DeltaNet + full attention)
+# needs transformers >= 5.2.0 to load weights. The CPU --dry-run only needs the
+# tokenizer and works on the installed 4.57.6.
+
+model:
+  id: "Qwen/Qwen3.5-2B"              # post-trained (non-thinking by default); HF arch Qwen3_5ForConditionalGeneration
+  dtype: "bfloat16"
+  attn_implementation: "sdpa"        # the 6 full-attention layers; linear-attention layers use fla if installed
+
+data:
+  train: "data/student/sft/train.jsonl"
+  loss_val: "data/student/sft/loss_val.jsonl"
+  # ADR-011: full-log 20k, whole trajectory, never slid. Records longer than this
+  # (in student tokens) are DROPPED and counted, not truncated. 20480 >= serialize's
+  # max_seq_tokens=20000 (a ~4 chars/token estimate) so the cap is the ADR's.
+  # Peak VRAM is dominated by the 248k-vocab logits (~2.5 MB/token fp32 loss path):
+  # ~50 GB at 20k -> A800-80GB; a 24 GB card needs max_length ~6k or a chunked loss.
+  max_length: 20480
+
+lora:                                # peft.LoraConfig kwargs
+  r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:                    # Qwen3.5 text stack (vision tower not loaded)
+    - q_proj                         # full-attention layers (every 4th)
+    - k_proj
+    - v_proj
+    - o_proj
+    - in_proj_qkv                    # Gated-DeltaNet layers
+    - in_proj_z
+    - out_proj
+    - gate_proj                      # MLP, all layers
+    - up_proj
+    - down_proj
+
+sft:                                 # trl.SFTConfig kwargs (output_dir set below)
+  num_train_epochs: 3
+  learning_rate: 1.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_steps: 5                    # ~5% of ~110 optimizer steps (294 train / 8 x 3)
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  per_device_train_batch_size: 1     # no packing: Gated-DeltaNet state would cross records
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8
+  bf16: true
+  gradient_checkpointing: true
+  gradient_checkpointing_kwargs: {use_reentrant: false}
+  packing: false
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  logging_steps: 5
+  seed: 42
+  report_to: "none"
+
+output_dir: "data/student/models/sft_v2_lora"   # gitignored (data/)

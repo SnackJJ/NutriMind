@@ -49,6 +49,12 @@ def _reject_retired(record: dict) -> None:
             )
 
 
+def _ids(rendered) -> list:
+    if not isinstance(rendered, list):
+        raise LoadError("tokenizer.apply_chat_template(..., tokenize=True) must return ids")
+    return rendered
+
+
 def tokenize_v2_record(record: dict, tokenizer, *, tools=None) -> dict:
     """Tokenize one §9.2 FC record. Labels follow ``train_on``.
 
@@ -71,24 +77,20 @@ def tokenize_v2_record(record: dict, tokenizer, *, tools=None) -> dict:
     if not isinstance(full, list):
         raise LoadError("tokenizer.apply_chat_template(..., tokenize=True) must return ids")
     labels = [-100] * len(full)
-    prev = tokenizer.apply_chat_template(
-        [], tools=schema, tokenize=True, add_generation_prompt=False
-    )
-    if not isinstance(prev, list):
-        raise LoadError("tokenizer.apply_chat_template(..., tokenize=True) must return ids")
+    # Only trained turns are rendered as prefixes. Each prefix keeps the system
+    # + Task turns (validate_record: train_on[0:2] is False), which templates
+    # such as Qwen3.5's require ("No messages" / "No user query" otherwise).
     for index, flag in enumerate(train_on):
-        current = tokenizer.apply_chat_template(
-            messages[: index + 1],
-            tools=schema,
-            tokenize=True,
-            add_generation_prompt=False,
-        )
-        if not isinstance(current, list):
-            raise LoadError("tokenizer.apply_chat_template(..., tokenize=True) must return ids")
-        start, end = len(prev), len(current)
-        if flag and start < end:
+        if not flag:
+            continue
+        start = len(_ids(tokenizer.apply_chat_template(
+            messages[:index], tools=schema, tokenize=True, add_generation_prompt=False
+        )))
+        end = len(_ids(tokenizer.apply_chat_template(
+            messages[: index + 1], tools=schema, tokenize=True, add_generation_prompt=False
+        )))
+        if start < end:
             labels[start:end] = full[start:end]
-        prev = current
     if len(full) != len(labels):
         raise LoadError("input_ids / labels length mismatch")
     return {"input_ids": full, "labels": labels, "tools": schema}
