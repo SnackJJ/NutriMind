@@ -72,5 +72,6 @@ sft:                                 # trl.SFTConfig kwargs (output_dir set belo
   logging_steps: 5
   seed: 42
   report_to: "none"
+  use_liger_kernel: true
 
 output_dir: "data/student/models/sft_v2_lora_b12"   # gitignored (data/)
