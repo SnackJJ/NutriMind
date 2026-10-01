@@ -2,10 +2,12 @@
 
     python -m src.training.sft.train_v2 --config configs/sft_v2_lora.yaml [--dry-run]
 
-Records are v2 native-FC SFT records (ADR-014). Each is rendered with the
-student chat template + lab ``NUTRIENV_TOOLS`` through ``tokenize_v2_record``
-(labels from ``train_on``: assistant turns only). Every record must pass the
-train/eval identity check against ``tokenize_prompt`` before anything trains.
+Records are v2 native-FC SFT records (ADR-014). Each is first replayed through
+the lab FC loop (``eval_context``) so its context is what the official eval
+sends, then rendered with the student chat template + lab ``NUTRIENV_TOOLS``
+through ``tokenize_v2_record`` (labels from ``train_on``: assistant turns
+only). Every record must pass the train/eval identity check (every turn's
+request is a token prefix) before anything trains.
 Records longer than ``data.max_length`` are dropped and counted (ADR-011:
 full-log, never slid).
 
@@ -27,12 +29,17 @@ import types
 
 import yaml
 
+from src.training.data_factory.concepts import TaskPackage
+from src.training.data_factory.rollout_fc import rollout_tool_call
 from src.training.rl.prompt import as_ids, prompt_for_package, tokenize_prompt
+from src.training.rl.rollout import _task_from_package
 from src.training.sft.v2_loader import tokenize_v2_record
 
-__all__ = ["encode_records", "for_template", "prompt_identity", "main"]
+__all__ = ["ReplayError", "encode_records", "eval_context", "for_template", "load_tasks",
+           "prompt_identity", "main"]
 
 _TASK_PREFIX = "Task:\n"
+_OBSERVATION_SEP = "\nObservation:\n"   # nutrienv.harness.tool_call._observation_turn
 
 
 def read_jsonl(path) -> list[dict]:
@@ -55,19 +62,105 @@ def for_template(record: dict) -> dict:
     return record
 
 
+class ReplayError(ValueError):
+    """The record's last turn does not end the episode in the lab loop."""
+
+
+def eval_context(record: dict, task, reset_observation: str, catalog) -> dict:
+    """``record`` as the lab FC loop (the official eval) presents it.
+
+    The data factory stores every tool call the teacher emitted and bare
+    observations; the loop executes only the first call per turn, keeps only
+    that call in the history, opens with a ``Step budget`` + reset-observation
+    user turn and wraps each tool reply the same way. Replaying the recorded
+    turns through the loop (``rollout_tool_call``) and keeping the messages it
+    builds makes training see exactly those requests.
+
+    Observation text stays the live episode's (``reset_observation`` from the
+    rollout cache, tool replies from the record): the task package was written
+    with ``sort_keys``, so the replay's dict order differs from the official
+    split's. Each replayed observation must equal the live one as JSON.
+    """
+    turns = [m for m in record["messages"] if m["role"] == "assistant"]
+    live = [reset_observation] + [m["content"] for m in record["messages"]
+                                  if m["role"] == "tool"]
+    requests = []
+
+    def replay(request):
+        requests.append(copy.deepcopy(request["messages"]))
+        turn = turns[len(requests) - 1]
+        return {"content": turn.get("content"),
+                "reasoning_content": turn.get("reasoning_content"),
+                "tool_calls": turn["tool_calls"][:1]}
+
+    episode = rollout_tool_call(task, teacher_complete=replay, catalog=catalog)
+    task_id = record.get("task_id")
+    if len(requests) < len(turns) or (episode.error and len(requests) == len(turns)):
+        raise SystemExit(f"{task_id}: replay ran {len(requests)}/{len(turns)} turns "
+                         f"({episode.error})")
+    final = turns[-1]
+    messages = requests[len(turns) - 1] + [{"role": "assistant", "content": final.get("content"),
+                                "reasoning_content": final.get("reasoning_content"),
+                                "tool_calls": final["tool_calls"][:1]}]
+    observed = [m for m in messages[2:] if m["role"] in ("user", "tool")]
+    if len(observed) != len(live):
+        raise SystemExit(f"{task_id}: replay has {len(observed)} observations, "
+                         f"live episode {len(live)}")
+    for message, text in zip(observed, live):
+        head, sep, body = message["content"].partition(_OBSERVATION_SEP)
+        if not sep or json.loads(body) != json.loads(text):
+            raise SystemExit(f"{task_id}: replayed observation differs from the live one")
+        message["content"] = head + sep + text
+    if len(requests) > len(turns):
+        # rollout_fc._build_turns stops at the first submit_plan even when Env
+        # refuses it; the loop went on, so the record ends on a refused hand-in.
+        raise ReplayError(f"{task_id}: final hand-in refused by Env")
+
+    segments = []
+    for index, message in enumerate(messages):
+        role = message["role"]
+        if index < 2:
+            segments.append(("system", "task")[index])
+        elif role == "assistant":
+            segments.append("final" if index == len(messages) - 1 else "step")
+        else:
+            segments.append("tool" if role == "tool" else "observation")
+    return {**record, "messages": messages, "segments": segments,
+            "train_on": [s in ("step", "final") for s in segments]}
+
+
+def load_tasks(records: list[dict], batch_dir, catalog) -> list[tuple]:
+    """(Task, live reset observation) per record. ``task_package_ref`` is
+    batch-relative; the reset observation is the accepted attempt's in
+    ``rollouts/cache/<task_id>.json`` (``accepted_from_attempt`` is 1-based)."""
+    batch_dir = pathlib.Path(batch_dir)
+    loaded = []
+    for record in records:
+        package = TaskPackage.from_dict(json.loads(
+            (batch_dir / record["task_package_ref"]).read_text(encoding="utf-8")))
+        cache = json.loads((batch_dir / "rollouts" / "cache" / f"{record['task_id']}.json")
+                           .read_text(encoding="utf-8"))
+        episode = cache["attempts"][record["accepted_from_attempt"] - 1]["episode"]
+        loaded.append((_task_from_package(package, catalog), episode["reset_observation"]))
+    return loaded
+
+
 def prompt_identity(record: dict, tokenizer, train_ids: list) -> dict:
     """Train/eval prompt identity for one record.
 
     ``context``: the system + tools + Task render of ``tokenize_prompt`` (for
     this record's query) is an id-identical prefix of the training ids.
-    ``generation_prompt``: all of ``tokenize_prompt`` (with its assistant
-    header) is a prefix too. ``generation_prompt_thinking``: same with
-    ``enable_thinking=True`` (the header a with-reasoning eval must send).
+    ``turns``: for every assistant turn, the messages before it rendered with
+    the generation header are a prefix too (after ``eval_context`` those are
+    the loop's requests). The header is the thinking one (``enable_thinking``,
+    what a with-reasoning eval sends) for a turn with a plan, and the closed
+    empty-think one for a turn without: there the record's empty think
+    tokenizes its two newlines as one token, which the open thinking header
+    (ending in one newline) splits.
     """
     task = record["messages"][1].get("content") or ""
     if not task.startswith(_TASK_PREFIX):
-        return {"context": False, "generation_prompt": False,
-                "generation_prompt_thinking": False}
+        return {"context": False, "turns": False}
     payload = prompt_for_package(types.SimpleNamespace(query=task[len(_TASK_PREFIX):]))
     messages = [
         {"role": "system", "content": payload["system"]},
@@ -77,19 +170,20 @@ def prompt_identity(record: dict, tokenizer, train_ids: list) -> dict:
         messages, tools=payload["tools"], tokenize=True, add_generation_prompt=False
     ))
     eval_ids = tokenize_prompt(payload, tokenizer)
-    thinking = as_ids(tokenizer.apply_chat_template(
-        messages, tools=payload["tools"], tokenize=True,
-        add_generation_prompt=True, enable_thinking=True,
-    ))
 
     def is_prefix(ids):
         return train_ids[: len(ids)] == ids
 
-    return {
-        "context": is_prefix(context) and eval_ids[: len(context)] == context,
-        "generation_prompt": is_prefix(eval_ids),
-        "generation_prompt_thinking": is_prefix(thinking),
-    }
+    history = for_template(record)["messages"]
+    turns = all(
+        is_prefix(as_ids(tokenizer.apply_chat_template(
+            history[:index], tools=payload["tools"], tokenize=True,
+            add_generation_prompt=True, enable_thinking=bool(message.get("reasoning_content")),
+        )))
+        for index, message in enumerate(history) if message["role"] == "assistant"
+    )
+    return {"context": is_prefix(context) and eval_ids[: len(context)] == context,
+            "turns": turns}
 
 
 def _distribution(values: list) -> dict:
@@ -109,7 +203,7 @@ def encode_records(records: list[dict], tokenizer, *, max_length: int) -> tuple[
     """(examples, stats). Examples carry ``input_ids`` + ``labels`` only."""
     examples, lengths, over = [], [], []
     trained = total = 0
-    identity = {"context": 0, "generation_prompt": 0, "generation_prompt_thinking": 0}
+    identity = {"context": 0, "turns": 0}
     for record in records:
         out = tokenize_v2_record(for_template(record), tokenizer)
         ids, labels = out["input_ids"], out["labels"]
@@ -226,17 +320,33 @@ def main(argv=None) -> int:
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or config["model"]["id"])
     max_length = config["data"]["max_length"]
 
+    from nutrienv.world.catalog_store import load_catalog
+
+    catalog = load_catalog()
     records, examples, splits = {}, {}, {}
     for name in ("train", "loss_val"):
         records[name] = read_jsonl(config["data"][name])
-        examples[name], splits[name] = encode_records(
-            records[name], tokenizer, max_length=max_length
-        )
+        # <batch>/sft/<split>.jsonl; task_package_ref is relative to <batch>
+        batch_dir = pathlib.Path(config["data"][name]).parents[1]
+        replayed, refused = [], []
+        for record, (task, reset) in zip(records[name],
+                                         load_tasks(records[name], batch_dir, catalog)):
+            try:
+                replayed.append(eval_context(record, task, reset, catalog))
+            except ReplayError:
+                refused.append(record.get("task_id"))
+        examples[name], splits[name] = encode_records(replayed, tokenizer,
+                                                      max_length=max_length)
+        splits[name].update(n_records=len(records[name]),
+                            n_refused_hand_in=len(refused),
+                            refused_hand_in_task_ids=refused)
     report = run_manifest(args.config, config, splits, records)
     print(json.dumps({k: report[k] for k in ("data", "nutrienv_rev_records",
                                               "nutrienv_rev_installed")}, indent=2))
 
-    broken = {name: s["n_records"] - s["identity"]["context"] for name, s in splits.items()}
+    broken = {name: s["n_records"] - s["n_refused_hand_in"]
+                    - min(s["identity"]["context"], s["identity"]["turns"])
+              for name, s in splits.items()}
     if any(broken.values()):
         raise SystemExit(f"train/eval prompt identity broken (records per split): {broken}")
     if not examples["train"]:

@@ -121,16 +121,24 @@ def test_prompt_identity_against_tokenize_prompt():
     record = make_record()
     ids = tok.apply_chat_template(for_template(record)["messages"],
                                   tools=_tools(), tokenize=True)
-    identity = prompt_identity(record, tok, ids)
-    assert identity["context"] is True
-    # default (non-thinking) header closes an empty think; the record has a plan
-    assert identity["generation_prompt"] is False
-    assert identity["generation_prompt_thinking"] is True
+    assert prompt_identity(record, tok, ids) == {"context": True, "turns": True}
 
     drifted = make_record(system=TOOL_SYSTEM_PROMPT + " drift")
     drifted_ids = tok.apply_chat_template(for_template(drifted)["messages"],
                                           tools=_tools(), tokenize=True)
     assert prompt_identity(drifted, tok, drifted_ids)["context"] is False
+
+
+def test_turn_identity_uses_the_empty_think_header_for_a_planless_turn():
+    tok = QwenLikeTokenizer()
+    record = make_record(n_logs=2)
+    record["messages"][4]["reasoning_content"] = None
+    ids = tok.apply_chat_template(for_template(record)["messages"],
+                                  tools=_tools(), tokenize=True)
+    assert prompt_identity(record, tok, ids)["turns"] is True
+    assert prompt_identity(record, tok, ids[:-1] + [0])["turns"] is True
+    # a history that is not the training prefix of a later turn
+    assert prompt_identity(record, tok, ids[:40] + [0] + ids[41:])["turns"] is False
 
 
 def _tools():
@@ -158,6 +166,9 @@ def toy_auto_tokenizer(monkeypatch):
 
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
                         staticmethod(lambda *_a, **_k: QwenLikeTokenizer()))
+    # main() replays records through the lab loop; the toy records have no task package
+    monkeypatch.setattr(train_v2, "load_tasks", lambda records, *_a: [(None, None)] * len(records))
+    monkeypatch.setattr(train_v2, "eval_context", lambda record, *_a: record)
 
 
 def test_dry_run_passes_and_writes_nothing(tmp_path, toy_auto_tokenizer, capsys):
@@ -166,7 +177,7 @@ def test_dry_run_passes_and_writes_nothing(tmp_path, toy_auto_tokenizer, capsys)
     assert train_v2.main(["--config", str(config_path), "--dry-run"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["data"]["train"]["n_kept"] == 2
-    assert report["data"]["train"]["identity"]["context"] == 2
+    assert report["data"]["train"]["identity"] == {"context": 2, "turns": 2}
     assert report["nutrienv_rev_records"] == ["0" * 40]
     assert not (tmp_path / "out").exists()
 
@@ -176,3 +187,99 @@ def test_dry_run_refuses_a_broken_identity(tmp_path, toy_auto_tokenizer):
                              [make_record("c")])
     with pytest.raises(SystemExit, match="identity"):
         train_v2.main(["--config", str(config_path), "--dry-run"])
+
+
+# --------------------------------------------------------------------------- #
+# eval_context: replay through the real lab FC loop (pinned NutriEnv catalog)
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture(scope="module")
+def exam():
+    from nutrienv.bench import EXAM_SPLIT_PATH, load_split
+    from nutrienv.world.catalog_store import load_catalog
+
+    catalog = load_catalog()
+    return {t.id: t for t in load_split(EXAM_SPLIT_PATH, catalog=catalog)}, catalog
+
+
+def _live_record(task, catalog, actions):
+    """A factory-shaped record: every turn keeps an extra (never executed)
+    parallel call, tool replies are bare observations, no opening observation."""
+    from nutrienv.env import NutriEnv
+
+    env = NutriEnv()
+    reset = json.dumps(env.reset(task.s0), default=str)
+    messages = [{"role": "system", "content": TOOL_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Task:\n{task.query}"}]
+    for index, (name, args) in enumerate(actions):
+        calls = [_call(name, args, f"call_{index}"), _call("get_ledger", {}, f"extra_{index}")]
+        messages.append({"role": "assistant", "content": None,
+                         "reasoning_content": f"PLAN-{index}", "tool_calls": calls})
+        if index < len(actions) - 1:
+            result = env.step({"op": name, **args})
+            obs = result["observation"] if result.get("ok") else {"error": result.get("error")}
+            messages.append({"role": "tool", "tool_call_id": f"call_{index}",
+                             "content": json.dumps(obs, default=str)[:6000]})
+    segments = ["system", "task"] + ["step" if m["role"] == "assistant" else "tool"
+                                     for m in messages[2:]]
+    segments[-1] = "final"
+    record = {"task_id": task.id, "messages": messages, "segments": segments,
+              "train_on": [s in ("step", "final") for s in segments]}
+    return record, reset
+
+
+def test_eval_context_matches_the_lab_loop(exam):
+    from nutrienv.harness.runner import FAMILY_MAX_STEPS
+
+    tasks, catalog = exam
+    task = tasks["adr20-log-5001"]
+    record, reset = _live_record(task, catalog, [("get_profile", {}), ("get_ledger", {}),
+                                                 ("done", {})])
+    out = train_v2.eval_context(record, task, reset, catalog)
+    budget = FAMILY_MAX_STEPS[task.family]
+    roles = [m["role"] for m in out["messages"]]
+    assert roles == ["system", "user", "user", "assistant", "tool", "assistant", "tool",
+                     "assistant"]
+    assert out["messages"][2]["content"] == (
+        f"Step budget: {budget} action(s) remaining.\nObservation:\n{reset}")
+    assert out["messages"][4]["content"] == (
+        f"Step budget: {budget - 1} action(s) remaining.\nObservation:\n"
+        + record["messages"][3]["content"])
+    assert out["messages"][6]["content"].startswith(f"Step budget: {budget - 2} action(s)")
+    assert all(len(m["tool_calls"]) == 1 for m in out["messages"] if m["role"] == "assistant")
+    assert out["segments"] == ["system", "task", "observation", "step", "tool", "step", "tool",
+                               "final"]
+    assert out["train_on"] == [s in ("step", "final") for s in out["segments"]]
+    assert len(record["messages"][2]["tool_calls"]) == 2  # input untouched
+    _, stats = encode_records([out], QwenLikeTokenizer(), max_length=10**6)
+    assert stats["identity"] == {"context": 1, "turns": 1}
+    assert "extra_" not in json.dumps(out)
+
+
+def test_eval_context_keeps_the_live_dict_order(exam):
+    tasks, catalog = exam
+    task = tasks["adr20-log-5001"]
+    record, reset = _live_record(task, catalog, [("get_profile", {}), ("done", {})])
+    shuffled = json.dumps(json.loads(reset), sort_keys=True)
+    out = train_v2.eval_context(record, task, shuffled, catalog)
+    assert out["messages"][2]["content"].endswith(shuffled)
+
+
+def test_eval_context_refuses_a_drifted_observation(exam):
+    tasks, catalog = exam
+    task = tasks["adr20-log-5001"]
+    record, reset = _live_record(task, catalog, [("get_profile", {}), ("done", {})])
+    record["messages"][3]["content"] = json.dumps({"op": "get_profile", "profile": {}})
+    with pytest.raises(SystemExit, match="differs"):
+        train_v2.eval_context(record, task, reset, catalog)
+
+
+def test_eval_context_flags_a_refused_final_hand_in(exam):
+    tasks, catalog = exam
+    task = tasks["adr20-eval-5010"]
+    record, reset = _live_record(task, catalog, [
+        ("get_profile", {}),
+        ("submit_plan", {"items": [], "verdict": "accept", "reasons": ["x"]}),
+    ])
+    with pytest.raises(train_v2.ReplayError, match="refused"):
+        train_v2.eval_context(record, task, reset, catalog)
