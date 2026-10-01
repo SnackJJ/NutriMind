@@ -242,7 +242,7 @@ def _reconstruct_task(task_package: TaskPackage, episode: EpisodeResult):
 def _lineage(task_package: TaskPackage, episode: EpisodeResult, rebuilt) -> list:
     """env_mismatch evidence: everything that must hold for the episode to
     belong to this package (same world, same person, s0 ledger is a prefix of
-    the end ledger, same query)."""
+    the end ledger up to the rows the episode amended, same query)."""
     problems: list = []
     end = episode.end_state
     if task_package.query != episode.task.query:
@@ -259,7 +259,18 @@ def _lineage(task_package: TaskPackage, episode: EpisodeResult, rebuilt) -> list
         )
     expected_prefix = tuple(rebuilt.s0.ledger)
     actual_prefix = tuple(end.ledger)[: len(expected_prefix)]
-    if expected_prefix != actual_prefix:
+    # amend_meal rewrites a row in place (ADR 0029 §3.4): the rows the episode
+    # amended are exempt, every other s0 row must still be there unchanged.
+    amended = {
+        turn.executed_op.get("index")
+        for turn in episode.turns
+        if (turn.executed_op or {}).get("op") == "amend_meal"
+    }
+    if len(actual_prefix) != len(expected_prefix) or any(
+        want != got
+        for index, (want, got) in enumerate(zip(expected_prefix, actual_prefix))
+        if index not in amended
+    ):
         problems.append(
             {
                 "check": "s0_ledger_prefix",

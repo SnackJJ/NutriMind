@@ -45,9 +45,16 @@ def config():
     return dataclasses.replace(config, families=families)
 
 
-def _author(config, catalog, family, index):
+@pytest.fixture(scope="module")
+def expander(catalog):
+    from src.training.data_factory.synthetic import synth_expander
+
+    return synth_expander(catalog)
+
+
+def _author(config, catalog, family, index, expander=None):
     intent = B.intent_for(config, family, index)
-    return A.author_task(intent, catalog=catalog, expander=None)
+    return A.author_task(intent, catalog=catalog, expander=expander)
 
 
 @pytest.mark.parametrize("family", ARCHETYPE_STRATEGIES)
@@ -113,3 +120,74 @@ def test_food_set_gate(exam, ctx, catalog, config):
         task, s0=dataclasses.replace(task.s0, allowed_food_ids=G.task_food_set(menu)))
     result = G.run(leaked, ctx)
     assert not result.keep and result.failure_code == G.FOOD_SET
+
+
+# --------------------------------------------------------------------------- #
+# end to end: a reference episode through the real lab loop must verify Pass
+# (catches verifier assumptions a new shape breaks before any teacher spend)
+# --------------------------------------------------------------------------- #
+
+def _call(index, name, args):
+    import json
+
+    return {"id": f"call_{index}", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+def _reference_actions(task):
+    from nutrienv.bench.realize import scored_oracles
+    from nutrienv.bench.validator import fitting_plan
+
+    subs = scored_oracles(task.oracle)
+    actions = []
+    if task.family == "evaluate":
+        oracle = subs[0]
+        if oracle.last_verdict == "accept":
+            actions.append(("submit_plan", {"items": list(oracle.evaluated_plan),
+                                            "verdict": "accept"}))
+        else:
+            actions.append(("submit_plan", {"items": [], "verdict": "reject",
+                                            "reasons": sorted(oracle.last_reasons)}))
+        return actions
+    before = list(task.s0.ledger)
+    for sub in subs:
+        if sub.ledger and len(sub.ledger) == len(before) and list(sub.ledger) != before:
+            for index, (old, new) in enumerate(zip(before, sub.ledger)):
+                if old != new:
+                    actions.append(("amend_meal", {"index": index, "food_id": new.food_id,
+                                                   "grams": new.grams,
+                                                   "eaten_at": new.eaten_at}))
+    recommend = subs[-1]
+    plan = fitting_plan(task.s0.catalog, dict(recommend.plan_windows),
+                        task.s0.profile.allergies,
+                        allowed_food_ids=recommend.allowed_food_ids)
+    actions.append(("submit_plan", {"items": plan}))
+    return actions
+
+
+@pytest.mark.parametrize("family", ARCHETYPES)
+def test_reference_episode_verifies_pass(config, catalog, ctx, expander, family):
+    from src.training.data_factory import materialize as mz
+    from src.training.data_factory import verify as V
+    from src.training.data_factory.rollout_fc import ScriptedFCTeacher, rollout_tool_call
+    from tests.training.data_factory.test_materialize import make_ctx
+
+    checked = 0
+    for index in range(8):
+        intent = B.intent_for(config, family, index)
+        task, _ = A.author_task(intent, catalog=catalog, expander=expander)
+        if task is None or not G.run(task, ctx).keep:
+            continue
+        package = mz.materialize(task, make_ctx(catalog, steps=tuple(intent["steps"]),
+                                                seed=intent["seed"]))
+        teacher = ScriptedFCTeacher([
+            ("reference", [_call(i, name, args)])
+            for i, (name, args) in enumerate(_reference_actions(task))
+        ])
+        episode = rollout_tool_call(task, teacher_complete=teacher, catalog=catalog)
+        result = V.verify(package, episode)
+        assert result.status == "pass", (family, task.query, result)
+        checked += 1
+        if checked == 2:
+            break
+    assert checked == 2
