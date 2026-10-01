@@ -2,7 +2,7 @@
 
 - **Status**: accepted — **protocol half superseded by [ADR-014](014-native-tool-calling-v2-protocol.md)**
 - **Date**: 2026-09-08
-- **Amended**: 2026-09-09 — teacher endpoint `deepseek/` direct → `ark/deepseek-v4-flash` (`api/plan/v3`); 2026-09-11 — text-op shape superseded by native tool calling (ADR-014); 2026-09-13 — teacher + expander → Command Code Provider API `deepseek/deepseek-v4.1-flash`; see the Amendment log
+- **Amended**: 2026-09-09 — teacher endpoint `deepseek/` direct → `ark/deepseek-v4-flash` (`api/plan/v3`); 2026-09-11 — text-op shape superseded by native tool calling (ADR-014); 2026-09-13 — teacher + expander → Command Code Provider API `deepseek/deepseek-v4.1-flash`; 2026-10-01 — hand-in turn plan budget 300 tokens; see the Amendment log
 - **Deciders**: zeqing
 - **Supersedes**: reverses the non-thinking default in `docs/plans/nutrienv_student.md:37`
 
@@ -88,6 +88,26 @@ trimming, 24k) is a **Batch-2 escalation**, taken only if the B3 diagnostic show
   only flips which one is the default.
 
 ## Amendment log
+
+### 2026-10-01 — the hand-in turn keeps a 300-token plan
+
+Batch-1 SFT (`docs/research/2026-10-01_sft-batch1.md`) did not move Evaluate
+(base 4/24 vs SFT 2/24 on the eight v1.1 Evaluate items, three runs each). 20 of
+the 27 batch-1 Evaluate records end their final plan at the 320-character cap
+(`plan_truncation: chars4`), typically cut between computing the meal's
+nutrients and comparing them with the windows: the student sees "compute, then accept" and
+never the comparison that decides the verdict.
+
+Decision: the hand-in turn (the record's last assistant turn — `submit_plan` or
+a finish op) takes `final_plan_max_tokens` (300 in batch 2); every other turn
+keeps `plan_max_tokens` (80). The plan still comes only from the teacher's
+`reasoning_content`, truncated the same way, and the privileged evaluate hint
+stays out of the record (it is in the teacher's system prompt, never the
+plan's source text). Records carry both budgets in `meta`. Batch 1 is
+unchanged (`final_plan_max_tokens` defaults to `plan_max_tokens`).
+
+Cost: the hand-in turn is one of ~10 turns, so trained tokens grow by a few
+percent; the 20k full-log cap is unaffected.
 
 ### 2026-09-13 — teacher + expander: Command Code Provider API (`deepseek/deepseek-v4.1-flash`)
 

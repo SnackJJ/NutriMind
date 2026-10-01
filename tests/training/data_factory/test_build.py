@@ -436,3 +436,30 @@ def test_cli_rev_mismatch_exits_nonzero(tmp_path):
         (tmp_path / "out" / "run_manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["status"] == "aborted"
+
+
+def test_evaluate_intents_carry_reject_knives_and_their_own_seeds():
+    import dataclasses
+
+    from src.training.data_factory import build as B
+    from src.training.data_factory.config import load_config
+
+    config = load_config("configs/data_factory.yaml")
+    families = dict(config.families)
+    families["evaluate_hypo"] = families["evaluate"]
+    config = dataclasses.replace(config, families=families)
+    evals = [B.intent_for(config, "evaluate", i) for i in range(200)]
+    knives = [intent["knife"] for intent in evals]
+    assert 0.35 < sum(k is not None for k in knives) / len(knives) < 0.65
+    assert {"allergy", "over_slot", "under_slot"} <= set(knives)
+    roster = {p.user_id: p for p in B.TRAIN_ROSTER}
+    assert all(roster[i["user_id"]].allergies
+               for i in evals if i["knife"] == "allergy")
+    hypo = [B.intent_for(config, "evaluate_hypo", i) for i in range(200)]
+    assert {i["shell"] for i in hypo} == {"eval-hypo"}
+    assert not {i["seed"] for i in hypo} & {i["seed"] for i in evals}
+
+    shifted = dataclasses.replace(config, seed_offset=10_000)
+    again = B.intent_for(shifted, "evaluate", 0)
+    assert again["seed"] == 10_000 and again["task_id"].endswith("--010000")
+    assert B.intent_for(config, "evaluate", 0)["task_id"].endswith("--000000")

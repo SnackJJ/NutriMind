@@ -104,6 +104,13 @@ FAMILY_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     "update": ("update", ("update",)),
     "recommend": ("recommend", ("recommend",)),
     "evaluate": ("evaluate", ("evaluate",)),
+    # NutriEnv ADR 0029 archetypes (archetypes.py / evaluate_hypo). The leading
+    # step keeps their task_key apart from the plain family's.
+    "evaluate_hypo": ("evaluate", ("hypo", "evaluate")),
+    "recommend_inventory": ("recommend", ("inventory", "recommend")),
+    "recommend_menu": ("recommend", ("menu", "recommend")),
+    "composite_amend_recommend": ("composite", ("amend", "recommend")),
+    "composite_refuse_recommend": ("composite", ("refuse", "recommend")),
     "composite": ("composite", ("log", "recommend")),
     "composite_update_log_recommend": ("composite", ("update", "log", "recommend")),
 }
@@ -251,6 +258,33 @@ def _amount_path_for(person, index: int, family_cfg) -> tuple[str, bool]:
     return path, ounce
 
 
+# Families that share a lab family and an intent index would otherwise author
+# the same pool (evaluate_hypo vs evaluate); each gets its own seed range.
+_FAMILY_SEED_BASE = {
+    "evaluate_hypo": 500_000,
+    "recommend_inventory": 510_000,
+    "recommend_menu": 520_000,
+    "composite_amend_recommend": 530_000,
+    "composite_refuse_recommend": 540_000,
+}
+
+# NutriEnv ADR 0017 Evaluate-unfit knives. ``swap`` stays out, as in the lab's
+# own batch mill (legacy_run_batch._BATCH_KNIVES).
+_REJECT_KNIVES = ("over_slot", "under_slot")
+
+
+def _evaluate_knife(person, index: int) -> str | None:
+    """About half the evaluate intents get a knife (a reject gold); an allergic
+    person's reject is an allergy trap half the time (ADR 0024/0029: allergy
+    rejects are a required share, not a rare draw)."""
+    rng = random.Random(f"knife:{index}:{person.user_id}")
+    if rng.random() < 0.5:
+        return None
+    if person.allergies and rng.random() < 0.5:
+        return "allergy"
+    return rng.choice(_REJECT_KNIVES)
+
+
 def family_wave_size(config: DataFactoryConfig, family: str) -> int:
     """How many intents the first wave draws for ``family``.
 
@@ -303,6 +337,7 @@ def intent_for(config: DataFactoryConfig, family: str, index: int) -> dict:
     task_family, steps = FAMILY_SPECS[family]
     family_cfg = config.families[family]
     person = TRAIN_ROSTER[index % len(TRAIN_ROSTER)]
+    seed = config.seed_offset + _FAMILY_SEED_BASE.get(family, 0) + index
     if family == "composite":
         steps = author_mod.TWO_LEG_COMPOSITE_STEPS[
             index % len(author_mod.TWO_LEG_COMPOSITE_STEPS)
@@ -316,8 +351,12 @@ def intent_for(config: DataFactoryConfig, family: str, index: int) -> dict:
     tier = ""
     shell = None
     slots = None
-    if family == "evaluate":
+    knife = None
+    if family in ("evaluate", "evaluate_hypo"):
         tier = author_mod.EVALUATE_TIERS[index % len(author_mod.EVALUATE_TIERS)]
+        knife = _evaluate_knife(person, seed)
+        if family == "evaluate_hypo":
+            shell = "eval-hypo"
     elif family == "update" or (
         family == "composite" and steps == ("update", "recommend")
     ):
@@ -333,20 +372,20 @@ def intent_for(config: DataFactoryConfig, family: str, index: int) -> dict:
             shell = _REC_SHELL_BY_OCCASION[occasion]
     return {
         "schema_version": INTENT_SCHEMA_VERSION,
-        "task_id": f"{task_key}--{index:06d}",
+        "task_id": f"{task_key}--{seed:06d}",
         "task_key": task_key,
         "family": family,
         "task_family": task_family,
         "steps": list(steps),
         "user_id": person.user_id,
-        "seed": index,
+        "seed": seed,
         "occasion": occasion,
         "scene": "empty",
         "shell": shell,
         "slots": slots,
         "amount_path": amount_path,
         "ounce_phrasing": ounce,
-        "knife": None,
+        "knife": knife,
         "tier": tier,
         "recovery_trap": (
             "unknown_food" if family == "log" and index % 5 == 4 else None
@@ -1208,7 +1247,7 @@ def build(
                     rate, target_n=three.target_n, max_candidate_limit=config.max_intents
                 ),
                 "estimated_unique_accepted_rate": rate,
-                "seed_start": 0,
+                "seed_start": config.seed_offset,
             }
         by_family: dict[str, list[dict]] = {}
         for intent in intents:

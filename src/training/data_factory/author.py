@@ -30,6 +30,7 @@ from src.training.data_factory.consistency import (
     foods_from_task,
     query_entity_consistency,
 )
+from src.training.data_factory.archetypes import ARCHETYPE_STRATEGIES
 from src.training.data_factory.roster_train import TRAIN_ROSTER
 from src.training.data_factory.search_gate import identifying_words
 from src.training.data_factory.speech import bind_speech_context, revision_hint
@@ -242,8 +243,24 @@ def _format_evaluate_food_phrase(food_id: str, grams: float, amount_path: str, c
     return f"{grams:g} g of {name}"
 
 
-def _evaluate_rewriter(catalog):
-    """Deterministic rewriter: speak a code-chosen evaluate plate with quantities."""
+# Counterfactual evaluate speech (NutriEnv ADR 0029 §3.5): the meal is not
+# eaten and must not be logged. Written from the ADR's description, not from
+# exam items; gates.near_duplicate_query keeps it off the exam's wording.
+_HYPO_TEMPLATES = (
+    "Say I went with {meal} for {occasion} later — would that be within my targets? "
+    "It's just an idea, so keep my log as it is.",
+    "Before I decide: how does {meal} look as my {occasion}? I haven't touched it yet, "
+    "so nothing goes in the diary.",
+    "Thinking out loud — {meal} for {occasion}. Good choice or not? Don't record it, "
+    "I'm only weighing it up.",
+)
+
+
+def _evaluate_rewriter(catalog, style: str | None = None, seed: int = 0):
+    """Deterministic rewriter: speak a code-chosen evaluate plate with quantities.
+
+    ``style="eval-hypo"`` speaks it as a not-yet-eaten what-if.
+    """
 
     def rewriter(items, *, intent, occasion, amount_path=None):
         bits = []
@@ -255,7 +272,11 @@ def _evaluate_rewriter(catalog):
             phrase = _format_evaluate_food_phrase(food_id, grams, path, catalog)
             bits.append(phrase)
             foods.append(food_id)
-        query = f"Is this {occasion} okay? I had " + " and ".join(bits) + "."
+        if style == "eval-hypo":
+            template = _HYPO_TEMPLATES[seed % len(_HYPO_TEMPLATES)]
+            query = template.format(meal=" and ".join(bits), occasion=occasion)
+        else:
+            query = f"Is this {occasion} okay? I had " + " and ".join(bits) + "."
         return {"query": query, "foods": foods}
 
     return rewriter
@@ -275,7 +296,10 @@ def _author_evaluate(intent: Mapping, *, catalog, expander, gram_anchor=None):
     person = person_for_intent(intent)
     occasion = intent["occasion"] if intent["occasion"] != "snack" else "lunch"
     amount_path = intent["amount_path"] or "explicit_grams"
-    rewriter = _evaluate_rewriter(catalog)
+    rewriter = _evaluate_rewriter(catalog, intent.get("shell"), intent["seed"])
+    # ADR 0017 knife (reject gold). Every plate below, including the fit
+    # fallback, goes through the same knife.
+    knife = intent.get("knife")
     result = generate_one(
         catalog=catalog,
         family="evaluate",
@@ -288,6 +312,7 @@ def _author_evaluate(intent: Mapping, *, catalog, expander, gram_anchor=None):
         rewriter=rewriter,
         tier=tier,
         enable_semantic_vote=False,
+        knife=knife,
     )
     if result.accepted is not None:
         return result.accepted, None
@@ -346,6 +371,7 @@ def _author_evaluate(intent: Mapping, *, catalog, expander, gram_anchor=None):
                 tier=tier,
                 pool_size=40,
                 enable_semantic_vote=False,
+                knife=knife,
             )
             if trial_res.accepted is not None:
                 accepted_plate = trial_plate
@@ -366,6 +392,7 @@ def _author_evaluate(intent: Mapping, *, catalog, expander, gram_anchor=None):
                 tier=tier,
                 pool_size=40,
                 enable_semantic_vote=False,
+                knife=knife,
             )
             if trial_res.accepted is not None:
                 accepted_plate = closest_plate
@@ -384,6 +411,7 @@ def _author_evaluate(intent: Mapping, *, catalog, expander, gram_anchor=None):
             tier=tier,
             pool_size=40,
             enable_semantic_vote=False,
+            knife=knife,
         )
     return _result_or_reject(intent, result)
 
@@ -560,6 +588,8 @@ AUTHOR_STRATEGIES: dict[str, Callable[..., tuple]] = {
     "update": _author_update,
     "recommend": _author_recommend,
     "evaluate": _author_evaluate,
+    "evaluate_hypo": _author_evaluate,
+    **ARCHETYPE_STRATEGIES,
     "composite": _author_two_leg,
     "composite_update_log_recommend": _author_three_leg,
 }

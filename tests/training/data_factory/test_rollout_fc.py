@@ -202,3 +202,20 @@ def test_parallel_tool_calls_rejected(catalog, log_task):
             catalog=catalog,
             parallel_tool_calls=True,
         )
+
+
+def test_refused_hand_in_does_not_end_the_recorded_episode(catalog):
+    """Env refuses a malformed submit_plan and the lab loop asks for another
+    turn; the record must keep that turn (it used to stop at the refusal)."""
+    task = fx.make_recommend_task(catalog, fx.first_person(), seed=31)
+    teacher = ScriptedFCTeacher([
+        ("hand in with a reason on accept",
+         [_call("submit_plan", {"items": [], "verdict": "accept", "reasons": ["x"]},
+                call_id="call_1")]),
+        ("that was refused, stop", [_call("done", {}, call_id="call_2")]),
+    ])
+    episode = rollout_tool_call(task, teacher_complete=teacher, catalog=catalog)
+    assert [t.executed_op and t.executed_op["op"] for t in episode.turns] == [
+        "submit_plan", None]
+    assert json.loads(episode.turns[0].observation).keys() == {"error"}
+    assert episode.reached_finish is True

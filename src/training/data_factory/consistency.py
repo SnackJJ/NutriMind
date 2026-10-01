@@ -140,7 +140,10 @@ def query_entity_consistency(
     blob = (query or "").lower()
     food_ids = [str(food_id) for food_id in foods]
     family = str(intent.get("family") or "")
-    if family in ("update", "recommend", "evaluate"):
+    # The archetype families bind every food in code (archetypes.py).
+    if family in ("update", "recommend", "evaluate", "evaluate_hypo",
+                  "recommend_inventory", "recommend_menu",
+                  "composite_amend_recommend", "composite_refuse_recommend"):
         return None
 
     for food_id in food_ids:

@@ -448,3 +448,22 @@ def test_validate_v1_marker_rejected(pass_artifacts, config):
     asst["reasoning_content"] = "<think>x</think>" + (asst.get("reasoning_content") or "")
     with pytest.raises(SerializeError, match="serialize.v1_marker"):
         sz.validate_record(record)
+
+
+def test_hand_in_turn_takes_the_final_plan_budget(pass_artifacts, config):
+    package, episode, verification = pass_artifacts
+    budgeted = dataclasses.replace(config, plan_max_tokens=2, final_plan_max_tokens=5)
+    long_plan = "one two three four five six seven"
+    padded = dataclasses.replace(
+        episode,
+        turns=[dataclasses.replace(turn, reasoning_content=long_plan)
+               for turn in episode.turns],
+    )
+    record = sz.serialize(
+        package, padded, verification, config=budgeted, tokenizer=WordTokenizer()
+    )
+    plans = [m["reasoning_content"] for m in record["messages"] if m["role"] == "assistant"]
+    assert len(plans) >= 2
+    assert plans[:-1] == ["one two"] * (len(plans) - 1)
+    assert plans[-1] == "one two three four five"
+    assert record["meta"]["final_plan_max_tokens"] == 5

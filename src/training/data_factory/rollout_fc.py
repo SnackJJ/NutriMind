@@ -197,7 +197,13 @@ def _build_turns(
                 fallback_reason=None,
             )
         )
-        if name == "submit_plan":
+        # A hand-in ends the episode only when Env accepted it (lab
+        # runner.LOOP_VERSION l2); a refused one is {"error": ...} in
+        # _RecordingEnv's log and the loop asks for another turn.
+        # ``action`` is what Env stepped (a malformed call steps a fallback).
+        if action.get("op") == "submit_plan" and not (
+            isinstance(obs, dict) and set(obs) == {"error"}
+        ):
             reached_finish = True
             break
     return turns, reached_finish

@@ -213,10 +213,11 @@ def serialize(
         plan = _sanitize_plan(turn.reasoning_content or "")
         if not plan:
             turns_without_plan += 1
-        plan = _truncate_plan(
-            plan, plan_max_tokens=config.plan_max_tokens, tokenizer=tokenizer
-        )
         is_final = index == last_index
+        budget = config.plan_max_tokens
+        if is_final and getattr(config, "final_plan_max_tokens", None):
+            budget = config.final_plan_max_tokens  # the hand-in: carries the verdict
+        plan = _truncate_plan(plan, plan_max_tokens=budget, tokenizer=tokenizer)
         messages.append({
             "role": "assistant",
             "content": None,
@@ -286,6 +287,9 @@ def serialize(
             "n_steps": len(episode.turns),
             "n_turns_without_plan": turns_without_plan,
             "plan_truncation": "token" if tokenizer is not None else "chars4",
+            "plan_max_tokens": config.plan_max_tokens,
+            "final_plan_max_tokens": (getattr(config, "final_plan_max_tokens", None)
+                                      or config.plan_max_tokens),
         },
     }
 

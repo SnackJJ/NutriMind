@@ -61,6 +61,8 @@ _TOP_LEVEL_KEYS = {
     "families",
     "max_seq_tokens",
     "plan_max_tokens",
+    "final_plan_max_tokens",
+    "seed_offset",
     "tokenizer_name",
     "max_intents",
     "usd_budget",
@@ -266,6 +268,12 @@ class DataFactoryConfig:
     exam_split_path: str | None
     nutrienv: NutriEnvPin
     commandcode: ChannelConfig | None = None
+    # The hand-in turn's plan budget (ADR-011 amendment): the turn whose
+    # reasoning carries the verdict. None = plan_max_tokens, as batch 1.
+    final_plan_max_tokens: int | None = None
+    # Added to every intent seed (and task_id), so a later batch draws new
+    # pools instead of re-authoring an earlier batch's tasks.
+    seed_offset: int = 0
 
     @property
     def nutrienv_rev(self) -> str:
@@ -596,6 +604,14 @@ def config_from_dict(data: Any, *, source: str = "<dict>") -> DataFactoryConfig:
     )
     if plan_max_tokens <= 0:
         _err(source, "plan_max_tokens", f"must be > 0, got {plan_max_tokens}")
+    final_plan_max_tokens = root.get("final_plan_max_tokens")
+    if final_plan_max_tokens is not None:
+        final_plan_max_tokens = _int(final_plan_max_tokens, source, "final_plan_max_tokens")
+        if final_plan_max_tokens <= 0:
+            _err(source, "final_plan_max_tokens", f"must be > 0, got {final_plan_max_tokens}")
+    seed_offset = _int(root.get("seed_offset", 0), source, "seed_offset")
+    if seed_offset < 0:
+        _err(source, "seed_offset", f"must be >= 0, got {seed_offset}")
     max_intents = _int(_required(root, "max_intents", source, ""), source, "max_intents")
     if max_intents <= 0:
         _err(source, "max_intents", f"must be > 0, got {max_intents}")
@@ -629,6 +645,8 @@ def config_from_dict(data: Any, *, source: str = "<dict>") -> DataFactoryConfig:
         exam_split_path=_str_or_none(root.get("exam_split_path"), source, "exam_split_path"),
         nutrienv=_parse_nutrienv(_required(root, "nutrienv", source, ""), source),
         commandcode=_parse_channel(root.get("commandcode"), source),
+        final_plan_max_tokens=final_plan_max_tokens,
+        seed_offset=seed_offset,
     )
 
 

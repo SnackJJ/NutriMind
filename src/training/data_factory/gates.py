@@ -12,6 +12,11 @@ Gate order (spec §11, first failure wins):
 3. ``gate.slot_value_overlaps_exam``  — update-leg slot values (added allergens,
    changed weight / goal) reused from an exam update item. The profile-diff is
    empty for every non-update shape, so the check naturally no-ops there.
+3a. ``gate.near_duplicate_query``     — word-trigram Jaccard with an exam query
+   at or above ``NEAR_DUP_JACCARD`` (verbatim is only the extreme case).
+3b. ``gate.food_set_overlaps_exam``   — the task's food set (closed inventory,
+   else every bound food) overlaps an exam item's: Jaccard at or above
+   ``FOOD_SET_JACCARD`` for sets of 3+, or the identical set in the same family.
 4. ``gate.stage_a``                   — ``stage_a_code_gate(task)`` non-empty.
 5. ``gate.draft_invalid``             — ``validate_draft(task)`` non-empty, minus
    the 3-leg composite false-positive allow-list (spec §22.9: the frozen exam
@@ -38,6 +43,7 @@ from .concepts import GateResult
 
 __all__ = [
     "GateContext",
+    "task_food_set",
     "normalize_query",
     "run",
     "GATE_ORDER",
@@ -50,7 +56,16 @@ STAGE_A = "gate.stage_a"
 DRAFT = "gate.draft_invalid"
 UNACHIEVABLE = "gate.unachievable"
 
-GATE_ORDER = (VERBATIM, SEMANTIC, SLOT, STAGE_A, DRAFT, UNACHIEVABLE)
+NEAR_DUP = "gate.near_duplicate_query"
+FOOD_SET = "gate.food_set_overlaps_exam"
+
+GATE_ORDER = (VERBATIM, SEMANTIC, SLOT, NEAR_DUP, FOOD_SET, STAGE_A, DRAFT, UNACHIEVABLE)
+
+# Exam-leak thresholds (batch 2). Training queries share shells with each
+# other, never with the exam: batch 1's 200 accepted queries peak well below
+# these (max trigram Jaccard 0.21 vs the v1.1 exam, measured 2026-10-01).
+NEAR_DUP_JACCARD = 0.4
+FOOD_SET_JACCARD = 0.5
 
 # spec §22.9 gate policy for the 3-leg shape: validate_draft may return exactly
 # this known false-positive (the frozen exam item adr24-comp-8255 trips it too).
@@ -104,6 +119,27 @@ def _profile_diff_slot_values(task) -> set[str]:
     return values
 
 
+def _trigrams(query: str) -> frozenset[tuple[str, ...]]:
+    words = re.findall(r"[a-z0-9']+", query.casefold())
+    return frozenset(zip(words, words[1:], words[2:]))
+
+
+def _jaccard(a: frozenset, b: frozenset) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def task_food_set(task) -> frozenset[str]:
+    """The foods an item is built on: its closed inventory when it has one,
+    else every food its oracle binds (and the S0 ledger's)."""
+    allowed = getattr(task.s0, "allowed_food_ids", None)
+    if allowed:
+        return frozenset(allowed)
+    from .consistency import foods_from_task
+
+    ledger = [row.food_id for row in getattr(task.s0, "ledger", None) or ()]
+    return frozenset([*foods_from_task(task), *ledger])
+
+
 @dataclasses.dataclass(frozen=True)
 class GateContext:
     """Precomputed exam-corpus facts — built once, threaded through ``run``.
@@ -115,6 +151,8 @@ class GateContext:
     normalized_exam_queries: frozenset[str]
     exam_semantic_keys: frozenset[tuple]
     exam_update_slot_values: frozenset[str]
+    exam_query_trigrams: tuple[frozenset, ...] = ()
+    exam_food_sets: tuple[tuple[str, frozenset], ...] = ()  # (family, foods)
 
     @classmethod
     def from_exam(cls, exam_tasks: Iterable) -> "GateContext":
@@ -127,6 +165,8 @@ class GateContext:
             exam_update_slot_values=frozenset(
                 value for t in tasks for value in _profile_diff_slot_values(t)
             ),
+            exam_query_trigrams=tuple(_trigrams(t.query) for t in tasks),
+            exam_food_sets=tuple((t.family, task_food_set(t)) for t in tasks),
         )
 
 
@@ -158,6 +198,34 @@ def run(task, ctx: GateContext) -> GateResult:
             failure_code=SLOT,
             reason_detail=f"update slot values overlap the exam: {sorted(overlap)}",
         )
+
+    # 3a — near-duplicate query (word trigrams)
+    grams = _trigrams(task.query)
+    nearest = max((_jaccard(grams, other) for other in ctx.exam_query_trigrams), default=0.0)
+    if nearest >= NEAR_DUP_JACCARD:
+        return GateResult(
+            keep=False,
+            failure_code=NEAR_DUP,
+            reason_detail=f"query trigram Jaccard {nearest:.2f} with an exam query",
+        )
+
+    # 3b — food-set overlap with an exam item
+    foods = task_food_set(task)
+    for family, exam_foods in ctx.exam_food_sets:
+        if len(foods) >= 3 and len(exam_foods) >= 3:
+            overlap = _jaccard(foods, exam_foods)
+            if overlap >= FOOD_SET_JACCARD:
+                return GateResult(
+                    keep=False,
+                    failure_code=FOOD_SET,
+                    reason_detail=f"food-set Jaccard {overlap:.2f} with an exam item",
+                )
+        elif foods and foods == exam_foods and family == task.family:
+            return GateResult(
+                keep=False,
+                failure_code=FOOD_SET,
+                reason_detail=f"same {family} food set as an exam item: {sorted(foods)}",
+            )
 
     # 4 — stage A code gate
     stage_a_reasons = stage_a_code_gate(task)
