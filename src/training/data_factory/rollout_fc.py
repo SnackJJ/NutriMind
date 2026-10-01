@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import threading
 import time
 from collections.abc import Callable
 
@@ -102,18 +103,47 @@ class _RecordingEnv(NutriEnv):
         return result
 
 
+# The lab loop reads ``post_chat_completion_raw`` / ``NutriEnv`` as module
+# globals. Patching them per episode is not thread-safe (build runs teacher
+# episodes on a pool), so the module carries dispatchers while any episode is
+# live, and each thread's episode is found through a thread-local.
+_LOCAL = threading.local()
+_INSTALL = threading.Lock()
+_installed = {"users": 0, "raw": None, "env": None}
+
+
+def _dispatch_raw(*args, **kwargs):
+    complete_raw = getattr(_LOCAL, "complete_raw", None)
+    if complete_raw is None:  # a non-injected caller in this process
+        return _installed["raw"](*args, **kwargs)
+    return complete_raw(*args, **kwargs)
+
+
+def _dispatch_env(*args, **kwargs):
+    env_cls = getattr(_LOCAL, "env_cls", None)
+    return (env_cls or _installed["env"])(*args, **kwargs)
+
+
 @contextlib.contextmanager
 def _inject_lab(*, complete_raw, env_cls):
     import nutrienv.harness.tool_call as lab
 
-    orig_raw, orig_env = lab.post_chat_completion_raw, lab.NutriEnv
-    lab.post_chat_completion_raw = complete_raw
-    lab.NutriEnv = env_cls
+    with _INSTALL:
+        if _installed["users"] == 0:
+            _installed["raw"], _installed["env"] = lab.post_chat_completion_raw, lab.NutriEnv
+            lab.post_chat_completion_raw, lab.NutriEnv = _dispatch_raw, _dispatch_env
+        _installed["users"] += 1
+    previous = (getattr(_LOCAL, "complete_raw", None), getattr(_LOCAL, "env_cls", None))
+    _LOCAL.complete_raw, _LOCAL.env_cls = complete_raw, env_cls
     try:
         yield
     finally:
-        lab.post_chat_completion_raw = orig_raw
-        lab.NutriEnv = orig_env
+        _LOCAL.complete_raw, _LOCAL.env_cls = previous
+        with _INSTALL:
+            _installed["users"] -= 1
+            if _installed["users"] == 0:
+                lab.post_chat_completion_raw = _installed["raw"]
+                lab.NutriEnv = _installed["env"]
 
 
 def _as_openai_body(completion: Completion) -> dict:

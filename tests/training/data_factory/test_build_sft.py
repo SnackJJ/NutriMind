@@ -424,3 +424,44 @@ def test_rerun_reuses_cache_without_teacher(tmp_path, catalog, expander):
     assert manifest["counts"]["cache_reused"] == 2
     assert manifest["counts"]["accepted"] == 2
     assert (out / "sft" / "accepted.jsonl").read_bytes() == first  # identical records
+
+
+# --------------------------------------------------------------------------- #
+# concurrent teacher stage: same records and counts as one-at-a-time
+# --------------------------------------------------------------------------- #
+
+
+def test_teacher_workers_match_the_sequential_run(tmp_path, catalog, expander):
+    """A stateless per-task teacher (keyed by the Task query, turn by turn):
+    every other task fails every attempt, so top-ups fire; a 4-worker build must
+    write byte-identical records and identical counts to a 1-worker build."""
+    config = sft_config(tmp_path / "seq", teacher_k=2, target_n=4, over_generate_x=1.5)
+    by_query = {}
+    for index, intent in enumerate(enumerate_intents(config) + [
+        intent_for(config, "log", i) for i in range(6, 12)
+    ]):
+        task, _ = author_mod.author_task(intent, catalog=catalog, expander=expander)
+        if task is not None:
+            by_query[task.query] = episode_script(
+                task, grams_scale=1.5 if index % 2 else 1.0)
+
+    def teacher(request):
+        messages = request["messages"]
+        task = next(m["content"] for m in messages if m["role"] == "user")
+        script = by_query[task.removeprefix("Task:\n")]
+        turn = sum(m["role"] == "assistant" for m in messages)
+        reasoning, calls = script[turn]
+        return {"content": None, "reasoning_content": reasoning, "tool_calls": calls,
+                "finish_reason": "tool_calls",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "reasoning_tokens": 1}}
+
+    runs = {}
+    for workers in (1, 4):
+        out = tmp_path / f"w{workers}"
+        manifest = build(dataclasses.replace(config, output_dir=str(out)),
+                         expander=expander, teacher_complete=teacher,
+                         teacher_workers=workers)
+        runs[workers] = (sft_lines(out), manifest["counts"])
+    assert runs[1][0] and runs[4][0] == runs[1][0]
+    assert runs[4][1] == runs[1][1]
+    assert runs[1][1]["teacher_rejected"] > 0  # the failing half exercised top-up

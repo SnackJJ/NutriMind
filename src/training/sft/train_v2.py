@@ -35,7 +35,7 @@ from src.training.rl.prompt import as_ids, prompt_for_package, tokenize_prompt
 from src.training.rl.rollout import _task_from_package
 from src.training.sft.v2_loader import tokenize_v2_record
 
-__all__ = ["ReplayError", "encode_records", "eval_context", "for_template", "load_tasks",
+__all__ = ["ReplayError", "data_paths", "encode_records", "eval_context", "for_template", "load_tasks",
            "prompt_identity", "main"]
 
 _TASK_PREFIX = "Task:\n"
@@ -230,6 +230,12 @@ def encode_records(records: list[dict], tokenizer, *, max_length: int) -> tuple[
     return examples, stats
 
 
+def data_paths(config: dict, name: str) -> list[str]:
+    """``data.<name>``: one jsonl path, or a list of them (several batches)."""
+    paths = config["data"][name]
+    return [paths] if isinstance(paths, str) else list(paths)
+
+
 def _sha256(path) -> str:
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 
@@ -259,7 +265,8 @@ def run_manifest(config_path, config: dict, splits: dict, records: dict) -> dict
         "config_sha256": _sha256(config_path),
         "config": config,
         "data": {
-            name: {"path": config["data"][name], "sha256": _sha256(config["data"][name]),
+            name: {"path": config["data"][name],
+                   "sha256": [_sha256(path) for path in data_paths(config, name)],
                    **splits[name]}
             for name in splits
         },
@@ -325,16 +332,17 @@ def main(argv=None) -> int:
     catalog = load_catalog()
     records, examples, splits = {}, {}, {}
     for name in ("train", "loss_val"):
-        records[name] = read_jsonl(config["data"][name])
-        # <batch>/sft/<split>.jsonl; task_package_ref is relative to <batch>
-        batch_dir = pathlib.Path(config["data"][name]).parents[1]
-        replayed, refused = [], []
-        for record, (task, reset) in zip(records[name],
-                                         load_tasks(records[name], batch_dir, catalog)):
-            try:
-                replayed.append(eval_context(record, task, reset, catalog))
-            except ReplayError:
-                refused.append(record.get("task_id"))
+        records[name], replayed, refused = [], [], []
+        for path in data_paths(config, name):
+            rows = read_jsonl(path)
+            records[name].extend(rows)
+            # <batch>/sft/<split>.jsonl; task_package_ref is relative to <batch>
+            batch_dir = pathlib.Path(path).parents[1]
+            for record, (task, reset) in zip(rows, load_tasks(rows, batch_dir, catalog)):
+                try:
+                    replayed.append(eval_context(record, task, reset, catalog))
+                except ReplayError:
+                    refused.append(record.get("task_id"))
         examples[name], splits[name] = encode_records(replayed, tokenizer,
                                                       max_length=max_length)
         splits[name].update(n_records=len(records[name]),

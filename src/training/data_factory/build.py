@@ -46,8 +46,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import collections
 from collections import Counter
 from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from nutrienv.bench import EXAM_SPLIT_PATH, check_achievable, load_exam
 from nutrienv.bench.pipeline.freezer import freeze_tasks, task_to_item
@@ -1152,8 +1154,11 @@ def build(
     before_replace=None,
     unique_query_budget: int | None = None,
     expander_meter: TokenMeter | None = None,
+    teacher_workers: int = 1,
 ) -> dict:
     """Run the pipeline through materialize / teacher / serialize / rlvr.
+
+    ``teacher_workers`` > 1 runs that many teacher episodes at once.
 
     ``expander_meter`` is the meter wrapped around a live expander's chat
     client (None → the expander spends nothing). Returns the run manifest. Raises :class:`BuildError` (after writing a
@@ -1421,6 +1426,53 @@ def build(
                 )
                 _bump_codes(reject_histogram, codes)
 
+        # Teacher episodes run on a pool of ``teacher_workers`` threads (each
+        # one only does network I/O and writes its own cache file); every
+        # piece of bookkeeping stays on this thread, in submission order.
+        # teacher_workers == 1 runs each episode inline, as before.
+        pool = (
+            ThreadPoolExecutor(max_workers=teacher_workers)
+            if run_teacher and teacher_workers > 1 else None
+        )
+        inflight: collections.deque = collections.deque()
+        inflight_by_family: Counter[str] = Counter()
+
+        def _submit(fn, *args, **kwargs) -> Future:
+            if pool is not None:
+                return pool.submit(fn, *args, **kwargs)
+            future: Future = Future()
+            future.set_result(fn(*args, **kwargs))
+            return future
+
+        def _finish(intent, package, task, cache) -> bool:
+            """Record one finished task; True when the run must stop."""
+            nonlocal budget_warned, budget_stopped
+            _serialize_cache(package, cache, intent, task)
+            if unique_query_budget and len(unique_queries) >= unique_query_budget:
+                return True
+            est = _est_usd(config.pricing, teacher_usage, expander_usage)
+            if (
+                config.usd_budget > 0
+                and est >= 0.8 * config.usd_budget
+                and not budget_warned
+            ):
+                log.warning(
+                    "cost reached 80%% of usd_budget (est_usd=%s budget=%s)",
+                    est, config.usd_budget,
+                )
+                budget_warned = True
+            if config.usd_budget > 0 and est >= config.usd_budget:
+                if config.on_budget == "stop":
+                    budget_stopped = True
+                    return True
+            _note_attempt(intent)
+            return False
+
+        def _drain_one() -> bool:
+            intent, package, task, future = inflight.popleft()
+            inflight_by_family[intent["family"]] -= 1
+            return _finish(intent, package, task, future.result())
+
         queue = list(intents)
         next_index = {
             family: sum(1 for row in intents if row["family"] == family)
@@ -1461,7 +1513,12 @@ def build(
             manifest["counts"]["intents"] += 1
             _append_jsonl(out / "intents" / f"{family}.jsonl", extra)
 
-        while cursor < len(queue):
+        stop = False
+        while cursor < len(queue) or inflight:
+            if cursor >= len(queue):
+                if _drain_one():  # may top up the queue
+                    break
+                continue
             intent = queue[cursor]
             cursor += 1
             task_id = intent["task_id"]
@@ -1610,6 +1667,16 @@ def build(
                 continue
             family = intent["family"]
             family_cfg = config.families[family]
+            # In-flight episodes count toward the quota until they land.
+            while (
+                inflight_by_family[family]
+                and accepted_by_family[family] + inflight_by_family[family]
+                >= family_cfg.target_n
+                and not stop
+            ):
+                stop = _drain_one()
+            if stop:
+                break
             if accepted_by_family[family] >= family_cfg.target_n:
                 manifest["counts"]["skipped_quota_met"] += 1
                 continue
@@ -1624,35 +1691,28 @@ def build(
             if cache_path.is_file() and not rerun_teacher:
                 cache = _load_cache(cache_path)
                 manifest["counts"]["cache_reused"] += 1
-            else:
-                if task is None:
-                    task = _task_from_package(package, catalog)
-                cache = _teacher_stage(
-                    package, task, config=config,
-                    family_cfg=family_cfg,
-                    teacher_complete=teacher_complete, catalog=catalog, out=out,
-                    teacher_usage=teacher_usage, expander_usage=expander_usage,
-                )
-            _serialize_cache(package, cache, intent, task)
-            if unique_query_budget and len(unique_queries) >= unique_query_budget:
+                if _finish(intent, package, task, cache):
+                    break
+                continue
+            if task is None:
+                task = _task_from_package(package, catalog)
+            inflight.append((intent, package, task, _submit(
+                _teacher_stage, package, task, config=config,
+                family_cfg=family_cfg,
+                teacher_complete=teacher_complete, catalog=catalog, out=out,
+                teacher_usage=teacher_usage, expander_usage=expander_usage,
+            )))
+            inflight_by_family[family] += 1
+            while len(inflight) >= teacher_workers and not stop:
+                stop = _drain_one()
+            if stop:
                 break
 
-            est = _est_usd(config.pricing, teacher_usage, expander_usage)
-            if (
-                config.usd_budget > 0
-                and est >= 0.8 * config.usd_budget
-                and not budget_warned
-            ):
-                log.warning(
-                    "cost reached 80%% of usd_budget (est_usd=%s budget=%s)",
-                    est, config.usd_budget,
-                )
-                budget_warned = True
-            if config.usd_budget > 0 and est >= config.usd_budget:
-                if config.on_budget == "stop":
-                    budget_stopped = True
-                    break
-            _note_attempt(intent)
+        # Episodes already paid for are always recorded, even after a stop.
+        while inflight:
+            _drain_one()
+        if pool is not None:
+            pool.shutdown()
 
         if run_teacher or serialize_only:
             by_id = {record["task_id"]: record for record in accepted_records}
@@ -1795,6 +1855,10 @@ def main(argv: list[str] | None = None) -> int:
         "(does not change production family target_n)",
     )
     parser.add_argument(
+        "--teacher-workers", type=int, default=1,
+        help="teacher episodes run at once (default 1: one after another)",
+    )
+    parser.add_argument(
         "--output",
         type=pathlib.Path,
         default=None,
@@ -1883,6 +1947,7 @@ def main(argv: list[str] | None = None) -> int:
             freeze_mini=args.freeze_mini,
             unique_query_budget=args.unique_query_budget,
             expander_meter=expander_meter,
+            teacher_workers=args.teacher_workers,
         )
     except BuildError as exc:
         print(f"build aborted: {exc}", file=sys.stderr)

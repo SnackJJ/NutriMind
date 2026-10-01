@@ -219,3 +219,43 @@ def test_refused_hand_in_does_not_end_the_recorded_episode(catalog):
         "submit_plan", None]
     assert json.loads(episode.turns[0].observation).keys() == {"error"}
     assert episode.reached_finish is True
+
+
+def test_concurrent_rollouts_do_not_cross_talk(catalog):
+    """build runs teacher episodes on a thread pool: each episode must see only
+    its own teacher and its own Env, and the lab module must be restored."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    import nutrienv.harness.tool_call as lab
+
+    original = (lab.post_chat_completion_raw, lab.NutriEnv)
+    tasks = []
+    for seed in range(30, 80):
+        try:
+            tasks.append(fx.make_log_task(catalog, fx.first_person(), seed=seed))
+        except AssertionError:  # that seed authors no log task
+            continue
+        if len(tasks) == 6:
+            break
+    gate = threading.Barrier(len(tasks))
+
+    def run(task):
+        script = log_script(task)
+        teacher = ScriptedFCTeacher(script)
+
+        def slow(request):
+            if not teacher.requests:
+                gate.wait(timeout=10)  # every episode is live at once
+            return teacher(request)
+
+        episode = rollout_tool_call(task, teacher_complete=slow, catalog=catalog)
+        return task, episode, len(script)
+
+    with ThreadPoolExecutor(len(tasks)) as pool:
+        results = list(pool.map(run, tasks))
+    for task, episode, n_turns in results:
+        assert episode.error is None and episode.reached_finish
+        assert len(episode.turns) == n_turns
+        assert Scorer().score(episode.end_state, task.oracle)["passed"]
+    assert (lab.post_chat_completion_raw, lab.NutriEnv) == original

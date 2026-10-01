@@ -283,3 +283,16 @@ def test_eval_context_flags_a_refused_final_hand_in(exam):
     ])
     with pytest.raises(train_v2.ReplayError, match="refused"):
         train_v2.eval_context(record, task, reset, catalog)
+
+
+def test_dry_run_concatenates_several_train_batches(tmp_path, toy_auto_tokenizer, capsys):
+    config_path = _write_run(tmp_path, [make_record("a")], [make_record("c")])
+    second = tmp_path / "train2.jsonl"
+    second.write_text(json.dumps(make_record("b", n_logs=2)) + "\n", encoding="utf-8")
+    config = json.loads(config_path.read_text())
+    config["data"]["train"] = [config["data"]["train"], str(second)]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    assert train_v2.main(["--config", str(config_path), "--dry-run"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["data"]["train"]["n_kept"] == 2
+    assert len(report["data"]["train"]["sha256"]) == 2
