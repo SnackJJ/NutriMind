@@ -66,6 +66,21 @@ class ReplayError(ValueError):
     """The record's last turn does not end the episode in the lab loop."""
 
 
+def _normalize_obs(val):
+    if isinstance(val, dict):
+        return {k: _normalize_obs(v) for k, v in val.items()}
+    if isinstance(val, list):
+        items = [_normalize_obs(x) for x in val]
+        if all(isinstance(x, str) for x in items):
+            return sorted(items)
+        return items
+    return val
+
+
+def _observations_equal(a: dict, b: dict) -> bool:
+    return _normalize_obs(a) == _normalize_obs(b)
+
+
 def eval_context(record: dict, task, reset_observation: str, catalog) -> dict:
     """``record`` as the lab FC loop (the official eval) presents it.
 
@@ -108,7 +123,7 @@ def eval_context(record: dict, task, reset_observation: str, catalog) -> dict:
                          f"live episode {len(live)}")
     for message, text in zip(observed, live):
         head, sep, body = message["content"].partition(_OBSERVATION_SEP)
-        if not sep or json.loads(body) != json.loads(text):
+        if not sep or not _observations_equal(json.loads(body), json.loads(text)):
             raise SystemExit(f"{task_id}: replayed observation differs from the live one")
         message["content"] = head + sep + text
     if len(requests) > len(turns):

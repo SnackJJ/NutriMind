@@ -100,7 +100,7 @@ TRAIN_ROSTER: tuple[RosterPerson, ...] = (
     # coincidences with exam maintain/cut weights (all <= 90 kg).
     RosterPerson("train-noor", "male", 25, 181.0, 84.0, "active", "muscle", (), "gym", "high_protein"),
     RosterPerson("train-omar", "female", 31, 170.0, 69.0, "very_active", "muscle", (), "gym", "high_protein"),
-    RosterPerson("train-pia", "male", 38, 187.0, 96.0, "active", "muscle", ("milk", "egg"), "gym", "high_protein"),
+    RosterPerson("train-pia", "male", 38, 187.0, 96.0, "active", "muscle", ("egg", "milk"), "gym", "high_protein"),
     RosterPerson("train-quinn", "male", 22, 178.0, 75.0, "very_active", "muscle", ("peanut",), "gym", "high_protein"),
     # ---- cut (3) — phase "cut" (kcal window at EER-300), light/moderate/
     # active PALs. Integer weights off the exam weight set with 2x/1/2x also
