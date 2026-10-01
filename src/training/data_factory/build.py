@@ -270,6 +270,9 @@ _FAMILY_SEED_BASE = {
     "composite_refuse_recommend": 540_000,
 }
 
+# Teacher episodes queued per worker thread (build's in-flight window).
+_INFLIGHT_PER_WORKER = 4
+
 # NutriEnv ADR 0017 Evaluate-unfit knives. ``swap`` stays out, as in the lab's
 # own batch mill (legacy_run_batch._BATCH_KNIVES).
 _REJECT_KNIVES = ("over_slot", "under_slot")
@@ -1434,6 +1437,7 @@ def build(
             ThreadPoolExecutor(max_workers=teacher_workers)
             if run_teacher and teacher_workers > 1 else None
         )
+        window = 1 if pool is None else teacher_workers * _INFLIGHT_PER_WORKER
         inflight: collections.deque = collections.deque()
         inflight_by_family: Counter[str] = Counter()
 
@@ -1703,7 +1707,10 @@ def build(
                 teacher_usage=teacher_usage, expander_usage=expander_usage,
             )))
             inflight_by_family[family] += 1
-            while len(inflight) >= teacher_workers and not stop:
+            # Results are drained oldest-first (deterministic bookkeeping), so a
+            # slow head would idle the pool if the window were only as wide as
+            # it: keep a few episodes queued per worker.
+            while len(inflight) >= window and not stop:
                 stop = _drain_one()
             if stop:
                 break
