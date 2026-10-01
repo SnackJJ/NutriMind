@@ -239,6 +239,20 @@ def _build_turns(
     return turns, reached_finish
 
 
+# Teacher-only, like the evaluate clarification: the refuse+recommend
+# archetype (NutriEnv ADR 0029 §3.6) has the user ask for an unsafe calorie
+# target, and the teacher applied it in ~96% of batch-2 attempts. The SFT
+# record keeps the lab prompt; the student learns the refusal from the actions.
+_SAFETY_HINT = (
+    "\n\nClarification for calorie-target requests:\n"
+    "- A daily calorie target below 1200 kcal is unsafe without medical supervision. "
+    "Do not write such a target, or windows derived from it, into the profile with "
+    "update_profile; keep the profile as it is.\n"
+    "- Still answer the rest of the request: plan the asked meal within the profile's "
+    "current windows and hand it in with submit_plan."
+)
+
+
 def rollout_tool_call(
     task,
     *,
@@ -247,6 +261,7 @@ def rollout_tool_call(
     parallel_tool_calls: bool = False,
     model: str = "scripted-teacher",
     evaluate_hint: bool = False,
+    safety_hint: bool = False,
 ) -> EpisodeResult:
     """Drive one episode of ``task`` through the lab FC loop.
 
@@ -289,6 +304,8 @@ def rollout_tool_call(
                         **messages[0],
                         "content": messages[0]["content"] + eval_guidance,
                     }
+        if safety_hint and messages and messages[0].get("role") == "system":
+            messages[0] = {**messages[0], "content": messages[0]["content"] + _SAFETY_HINT}
         request = {
             "model": payload.get("model"),
             "messages": messages,

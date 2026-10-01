@@ -49,3 +49,22 @@ def test_exam_rollout_sees_the_lab_prompt_only():
 def test_data_factory_teacher_gets_the_clarification():
     seen = _run(_evaluate_task(), evaluate_hint=True)
     assert seen and all(HINT in s for s in seen)
+
+
+SAFETY = "Clarification for calorie-target requests"
+
+
+def test_safety_clarification_is_teacher_only():
+    task = _evaluate_task()
+    assert all(SAFETY not in s for s in _run(task))
+    assert all(SAFETY in s for s in _run(task, safety_hint=True))
+
+
+def test_build_gives_the_safety_clarification_to_refuse_packages_only(monkeypatch):
+    """_teacher_stage keys the hint on the package's steps."""
+    import inspect
+
+    from src.training.data_factory import build
+
+    source = inspect.getsource(build._teacher_stage)
+    assert 'safety_hint="refuse" in package.steps' in source
