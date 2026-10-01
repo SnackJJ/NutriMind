@@ -591,6 +591,7 @@ AUTHOR_STRATEGIES: dict[str, Callable[..., tuple]] = {
     "evaluate_hypo": _author_evaluate,
     **ARCHETYPE_STRATEGIES,
     "composite": _author_two_leg,
+    "composite_update_recommend": _author_two_leg,
     "composite_update_log_recommend": _author_three_leg,
 }
 

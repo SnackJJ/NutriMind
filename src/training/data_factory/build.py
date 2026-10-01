@@ -113,6 +113,9 @@ FAMILY_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     "recommend_menu": ("recommend", ("menu", "recommend")),
     "composite_amend_recommend": ("composite", ("amend", "recommend")),
     "composite_refuse_recommend": ("composite", ("refuse", "recommend")),
+    # update→recommend on its own quota: in `composite` the task_id-sorted queue
+    # reaches every log→recommend first, so its quota never gets here.
+    "composite_update_recommend": ("composite", ("update", "recommend")),
     "composite": ("composite", ("log", "recommend")),
     "composite_update_log_recommend": ("composite", ("update", "log", "recommend")),
 }
@@ -268,6 +271,7 @@ _FAMILY_SEED_BASE = {
     "recommend_menu": 520_000,
     "composite_amend_recommend": 530_000,
     "composite_refuse_recommend": 540_000,
+    "composite_update_recommend": 550_000,
 }
 
 # Teacher episodes queued per worker thread (build's in-flight window).
@@ -363,7 +367,8 @@ def intent_for(config: DataFactoryConfig, family: str, index: int) -> dict:
         if family == "evaluate_hypo":
             shell = "eval-hypo"
     elif family == "update" or (
-        family == "composite" and steps == ("update", "recommend")
+        family in ("composite", "composite_update_recommend")
+        and steps == ("update", "recommend")
     ):
         shell = _UPDATE_SHELL_CYCLE[index % len(_UPDATE_SHELL_CYCLE)]
     elif family == "recommend":

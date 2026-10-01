@@ -191,3 +191,17 @@ def test_reference_episode_verifies_pass(config, catalog, ctx, expander, family)
         if checked == 2:
             break
     assert checked == 2
+
+
+def test_update_recommend_family_authors_on_its_own_quota(catalog, ctx, expander):
+    config = load_config("configs/data_factory.yaml")
+    families = dict(config.families)
+    families["composite_update_recommend"] = families["composite"]
+    config = dataclasses.replace(config, families=families)
+    kept = 0
+    for index in range(6):
+        intent = B.intent_for(config, "composite_update_recommend", index)
+        assert tuple(intent["steps"]) == ("update", "recommend") and intent["shell"]
+        task, _ = A.author_task(intent, catalog=catalog, expander=expander)
+        kept += task is not None and G.run(task, ctx).keep
+    assert kept >= 3
