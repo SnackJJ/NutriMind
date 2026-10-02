@@ -1,0 +1,21 @@
+# Throughput variant of the A800 pilot; algorithm and data settings are unchanged.
+defaults:
+  - grpo_v2_a800
+  - _self_
+
+actor_rollout_ref:
+  ref:
+    fsdp_config:
+      param_offload: false
+  rollout:
+    max_num_seqs: 64
+    enforce_eager: false
+    enable_prefix_caching: true
+    max_num_batched_tokens: 16384
+    agent:
+      num_workers: 4
+
+trainer:
+  experiment_name: a800-fast
+  default_local_dir: data/rl_runs/grpo_v2_a800_fast
+  rollout_data_dir: data/rl_runs/grpo_v2_a800_fast/rollouts

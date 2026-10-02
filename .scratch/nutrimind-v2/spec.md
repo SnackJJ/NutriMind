@@ -4,11 +4,26 @@ Status: draft for review · not for implementation
 Tracker: local Markdown (`docs/agents/issue-tracker.md`)
 Domain vocabulary: `CONTEXT.md` (repo root) — used verbatim below
 Governing ADRs: [ADR-010](../../docs/decisions/010-nutrimind-v2-rescope.md),
-[ADR-011](../../docs/decisions/011-batch1-sft-trajectory-short-plan-thinking-teacher.md),
-[ADR-012](../../docs/decisions/012-nutrienv-read-only-benchmark.md) (amended 2026-09-08)
-Design doc: `/tmp/nutrienv_student_data.md` (pending move to
-`docs/plans/nutrimind_v2_data_factory.md`)
+[ADR-011](../../docs/decisions/011-batch1-sft-trajectory-short-plan-thinking-teacher.md)
+(protocol half superseded by ADR-014),
+[ADR-012](../../docs/decisions/012-nutrienv-read-only-benchmark.md) (amended 2026-09-11),
+[ADR-014](../../docs/decisions/014-native-tool-calling-v2-protocol.md)
+Design doc: `docs/plans/nutrimind_v2_data_factory.md` — the `/tmp` original is lost;
+reconstructed by ticket 021 from §2.1 + the ADRs + ticket 002
 Open decision/prototype tickets: `.scratch/nutrimind-v2/issues/001`, `002`
+
+> **Protocol (2026-09-11, ADR-014):** native **tool calling**. Teacher collection, SFT
+> records, RLVR prompts, and eval all use the lab schema (`NUTRIENV_TOOLS` /
+> `TOOL_SYSTEM_PROMPT`), assistant `tool_calls`, and `role=tool` observations.
+> `parallel_tool_calls=false`. The plan is truncated `reasoning_content` on the
+> assistant turn, not a text prefix in front of JSON. Pin: `../nutri-env-lab` at
+> `0ee68eaa6c246e8079915761c95fc986c53d4979`. Ticket 009 (`TeacherReActHarness`) stays
+> CLOSED as history; new factory tickets replace the teacher path **before ticket 020**.
+> Sibling RL spec: `.scratch/nutrimind-rl/spec.md`.
+> **Speech / query-budget pilot (2026-09-12):** `.scratch/nutrimind-pilot/spec.md`.
+> Batch-1 ≈ 420 accepted Pass remains this spec's production target. The 100 / 200 / 0
+> unique-query counts are a separate overlay and do not change the family mix or the
+> production factory config.
 
 This spec turns the finalized design into a verifiable local project spec. It pins the
 **build** boundary, the canonical **TaskPackage**, the SFT and RLVR flows that derive
@@ -43,7 +58,8 @@ v1/v2 project boundary.
 - A two-layer rubric: a small **hard contract** fixed before bulk generation, and a
   **soft rubric** that is diagnostic-only in v2.0.
 - **Batch 1** ≈ 420 accepted **Pass** SFT traces at the design-doc §7 family mix, from
-  off-exam tasks on the same world / `catalog_sha` / `Scorer` / ReAct-v2 as the exam.
+  off-exam tasks on the same world / `catalog_sha` / `Scorer` / native tool-calling
+  harness as the exam (ADR-014).
 - A frozen **mini-exam val** (30 fresh `TRAIN_ROSTER` tasks, oracle-verified, not
   teacher-rolled).
 - Two injected external dependencies (**expander**, **teacher**), never implicitly
@@ -56,10 +72,10 @@ v1/v2 project boundary.
 
 ### 2.1 Design provenance (copied here — do not depend on `/tmp`)
 
-Key numbers below come from the finalized design doc, currently at
-`/tmp/nutrienv_student_data.md` (a temporary file; pending move to
-`docs/plans/nutrimind_v2_data_factory.md`). Recorded here so this spec is
-self-sufficient:
+Key numbers below come from the finalized design doc that was at
+`/tmp/nutrienv_student_data.md` and is now **lost** (ticket 021 reconstructs it at
+`docs/plans/nutrimind_v2_data_factory.md` from this section + the ADRs + ticket 002).
+Recorded here so this spec is self-sufficient regardless:
 
 - Batch-1 overall target ≈ **420 accepted Pass traces** (design §7 table column
   "Pass traces"; total row "~420"). Family mix: composite ~57 % / recommend ~17 % /
@@ -67,9 +83,12 @@ self-sufficient:
 - `composite update+log→recommend` (3-leg) family target = **40**, teacher **k = 6**.
   **N = 40 is an accepted-Pass count, not a candidate count.** Nothing in the code or an
   existing spec contradicts this; do not reinterpret it.
-- Teacher = `deepseek/deepseek-v4-flash` direct, thinking on, `reasoning_effort=low`
-  (ADR-011). Expander = `ark/deepseek-v4-flash`. `max_seq_length` 20k, `context_limit=None`
-  train + eval.
+- Teacher = `deepseek/deepseek-v4.1-flash` on the Command Code Provider API
+  (`https://api.commandcode.ai/provider/v1/chat/completions`),
+  `thinking: {"type": "enabled"}` as the length control (ADR-011 **amended
+  2026-09-13**). Expander = the same model with `thinking: {"type": "disabled"}`.
+  One provider, one credential (`COMMANDCODE_API_KEY`) for both.
+  `max_seq_length` 20k, `context_limit=None` train + eval.
 - The design doc's §5 still sketches the 3-leg assembly via **private** helpers
   (`_update_from_template` / `_bind_log_foods`) and a `compose3.py`. That is the
   pre-spec draft. **This spec and ADR-012 (amended) require public symbols only**; the
@@ -174,8 +193,10 @@ external dataset file and the package is not self-contained. Ticket 002 resolves
 `teacher rollout` → score with the tri-state **verifier** → `serialize`. `author` for
 shapes `generate_one` supports directly calls `generate_one`; for 3-leg
 `update+log→recommend` it composes **public** `nutrienv` symbols (ticket 002 spike).
-Teacher rollout is a `nutrienv.harness.ReActHarness` subclass whose completion is the
-injected `teacher_complete`, capturing `reasoning_content` per turn.
+Teacher rollout reuses the lab native tool-calling episode loop
+(`run_episode_tool_call` + `NUTRIENV_TOOLS`) with completion injected as
+`teacher_complete`, capturing `reasoning_content` and `tool_calls` per turn
+(ADR-014). Ticket 009's `ReActHarness` subclass is history, not the production path.
 
 ## 5. User Stories
 
@@ -291,8 +312,8 @@ injected `teacher_complete`, capturing `reasoning_content` per turn.
 
 - **`configs/data_factory.yaml`** (new). Keys (names indicative, shapes fixed):
   `nutrienv_rev`, `catalog_path`, `exam_split_path`, `target` (`sft`|`rlvr`|`eval`|`all`),
-  `teacher` (`{model_id, reasoning_effort, temperature_first, temperature_retry,
-  per_turn_timeout_s}`), `expander` (`{model_id, timeout_s, parse_retries}`),
+  `teacher` (`{model_id, thinking, temperature_first, temperature_retry,
+  per_turn_timeout_s}`), `expander` (`{model_id, thinking, timeout_s, parse_retries}`),
   `families` (per family `{target_n, teacher_k, over_generate_x, amount_path_weights?,
   gram_anchor: bool}`), `max_seq_tokens` (20000), `plan_max_tokens` (~80),
   `tokenizer_name` (student tokenizer id or `null`), `max_intents`, `usd_budget`,
@@ -306,9 +327,10 @@ injected `teacher_complete`, capturing `reasoning_content` per turn.
 - **Injected `teacher_complete`**: `callable(model_id: str, messages: Sequence[Mapping])
   -> {"content": str, "reasoning_content": str | None, "finish_reason": str,
   "usage": {"prompt_tokens": int, "completion_tokens": int, "reasoning_tokens": int}}`.
-- **Environment**: `DEEPSEEK_API_KEY` (teacher; in `.env.example`), `ARK_API_KEY` +
-  `ARK_BASE_URL` (expander; **not** in `.env.example` — add). Real network calls only in
-  production wiring; a guard requires `NUTRIMIND_ALLOW_NETWORK=1`.
+- **Environment**: `ARK_API_KEY` + `ARK_BASE_URL` — one credential for **both** the
+  teacher and the expander (ADR-011 amended: `ark/deepseek-v4-flash` on `api/plan/v3`).
+  Add both to `.env.example`. Real network calls only in production wiring; a guard
+  requires `NUTRIMIND_ALLOW_NETWORK=1`.
 - **Dependency**: `pyproject.toml` must add `nutrienv` as an editable path dependency
   pinned to an exact git rev. Ticket 001.
 
@@ -438,26 +460,24 @@ Field readiness against the current code:
   "accepted_from_attempt": 1,
   "task_package_ref": "task_packages/log--log--train-ada--000042.json",
   "messages": [
-    {"role": "system",    "content": "<react_manual('v2') text>"},
-    {"role": "user",      "content": "Task:\nFor lunch I had a bowl of oatmeal and a banana."},
-    {"role": "user",      "content": "Step budget: 12 action(s) remaining, including this turn.\nObservation:\n{...}"},
-    {"role": "assistant", "content": "Plan: find oatmeal and banana in the catalog, then log both to today-lunch.\n{\"op\": \"search_foods\", \"q\": \"oatmeal\"}"},
-    {"role": "user",      "content": "Step budget: 11 ...\nObservation:\n{...}"},
-    {"role": "assistant", "content": "Plan: oatmeal is 2708110; read its portion table.\n{\"op\": \"get_food\", \"food_id\": \"2708110\"}"},
-    {"role": "user",      "content": "Step budget: 10 ...\nObservation:\n{...}"},
-    {"role": "assistant", "content": "Plan: log oatmeal 235 g and banana 118 g to today-lunch, then finish.\n{\"op\": \"log_meal\", \"food_id\": \"2708110\", \"grams\": 235, \"eaten_at\": \"today-lunch\"}"},
-    {"role": "user",      "content": "Step budget: 9 ...\nObservation:\n{...}"},
-    {"role": "assistant", "content": "Plan: banana next.\n{\"op\": \"log_meal\", \"food_id\": \"2709158\", \"grams\": 118, \"eaten_at\": \"today-lunch\"}"},
-    {"role": "user",      "content": "Step budget: 8 ...\nObservation:\n{...}"},
-    {"role": "assistant", "content": "Plan: both rows in the ledger; hand in.\n{\"op\": \"finish\"}"}
+    {"role": "system", "content": "<TOOL_SYSTEM_PROMPT>"},
+    {"role": "user", "content": "Task:\nFor lunch I had a bowl of oatmeal and a banana."},
+    {"role": "assistant", "content": null, "reasoning_content": "Find oatmeal and banana, then log both to today-lunch.",
+     "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search_foods", "arguments": "{\"q\": \"oatmeal\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "{...}"},
+    {"role": "assistant", "content": null, "reasoning_content": "oatmeal is 2708110; read its portion table.",
+     "tool_calls": [{"id": "call_2", "type": "function", "function": {"name": "get_food", "arguments": "{\"food_id\": \"2708110\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_2", "content": "{...}"},
+    {"role": "assistant", "content": null, "reasoning_content": "both rows in the ledger; hand in.",
+     "tool_calls": [{"id": "call_n", "type": "function", "function": {"name": "finish", "arguments": "{}"}}]}
   ],
-  "segments": ["system", "task", "observation", "step", "observation", "step", "observation", "step", "observation", "step", "observation", "final"],
-  "train_on":  [false,    false,  false,        true,   false,        true,   false,        true,   false,        true,   false,        true],
+  "segments": ["system", "task", "step", "tool", "step", "tool", "final"],
+  "train_on":  [false,    false,  true,   false,  true,   false,  true],
   "meta": {
     "family": "log", "steps": ["log"], "tier": "", "persona": "everyday", "batch": 1,
     "seed": 42,
-    "teacher": "deepseek/deepseek-v4-flash",
-    "teacher_params": {"reasoning_effort": "low", "temperature_first": 0.0, "temperature_retry": 0.7},
+    "teacher": "ark/deepseek-v4-flash",
+    "teacher_params": {"thinking": {"type": "enabled"}, "temperature_first": 0.0, "temperature_retry": 0.7},
     "expander": "ark/deepseek-v4-flash",
     "verification": {"status": "pass", "reward": 1.0, "failure_codes": [], "evidence": []},
     "oracle_version": "nutrienv-203d807",
@@ -474,41 +494,44 @@ Field readiness against the current code:
 ```
 
 Rules:
-- `messages`: OpenAI-shaped. `system` first, exactly once. Then the `Task:` user turn.
-  Then strictly alternating `user` (observation) / `assistant` (plan + op). The last
-  message is an `assistant` turn whose op is in `nutrienv.harness.runner.FINISH_OPS`.
-- `segments`: parallel to `messages`, one of `system` | `task` | `observation` | `step`
-  | `final`. `step` and `final` are assistant turns; `final` is the last.
+- `messages`: OpenAI-shaped native tool calling (ADR-014). `system` first, exactly once
+  (`TOOL_SYSTEM_PROMPT`). Then the `Task:` user turn. Then assistant turns with
+  `tool_calls` (one call per turn; `parallel_tool_calls=false`) alternating with
+  `role=tool` observations keyed by `tool_call_id`. The last message is an assistant
+  turn whose tool name is in `nutrienv.harness.runner.FINISH_OPS`.
+- `segments`: parallel to `messages`, one of `system` | `task` | `step` | `tool` |
+  `final`. `step` and `final` are assistant turns; `tool` is a tool-role observation;
+  `final` is the last.
 - `train_on`: parallel to `messages`, per-message bool. **The v2 loader must use this
   array**, not re-derive from role. For Batch 1, `train_on[i]` is true exactly where
-  `segments[i] ∈ {step, final}`. A future ablation (e.g. mask the plan, keep only the
-  op) would change the data — a per-segment sub-split of the assistant content — not the
-  loader.
-- **No token-level `loss_mask` is stored.** The v2 loader applies the v2 chat template,
-  tokenizes, and for each message with `train_on[i]` true sets `labels` on that
-  message's content token span; everything else `-100`. The tokenizer id and chat
-  template are the **v2 loader's** configuration, not the record's. This is the explicit
-  reversal of the earlier draft.
-- `assistant.content` = `f"{plan}\n{op_json}"`. `plan` is the teacher `reasoning_content`
-  for that turn, truncated to `plan_max_tokens` (token-exact with the injected student
-  tokenizer if `tokenizer_name` is set, else a `~4 chars/token` char heuristic; recorded
-  in `meta.plan_truncation`). `op_json` is the compact JSON of the action actually
-  executed against `NutriEnv` for that turn (recorded as `executed_op` in the episode).
-  If v2's own parse of `raw_action_text` does not yield that exact op (i.e. the harness
-  substituted a fallback), the episode is `indeterminate` / `teacher_invalid_op` (§11–12)
-  and is never serialized. The record does not depend on `nutrienv.harness.react._parse_action`'s
-  internal behaviour.
+  `segments[i] ∈ {step, final}`. A future ablation (e.g. tools-only, drop
+  `reasoning_content`) changes the data, not the loader.
+- **No token-level `loss_mask` is stored.** The v2 loader applies the student chat
+  template (including the `tools` schema), tokenizes, and for each message with
+  `train_on[i]` true sets `labels` on that assistant turn's trained span (including
+  rendered `tool_calls` and the truncated `reasoning_content`); everything else
+  `-100`. Tokenizer and chat template are the loader's configuration, not the
+  record's.
+- `reasoning_content` on each assistant turn is the teacher reasoning for that turn,
+  truncated to `plan_max_tokens` (token-exact with the injected student tokenizer if
+  `tokenizer_name` is set, else a `~4 chars/token` heuristic; recorded in
+  `meta.plan_truncation`). The executed tool name + arguments must match
+  `TurnMeta.executed_op` (what `NutriEnv.step` received). A turn with no `tool_calls`,
+  or a harness fallback, is `indeterminate` / `teacher_invalid_op` (§11–12) and is
+  never serialized.
 - `meta.tier` is `""` for `log`/`recommend`/`update`/`composite`, or one of
   `nutrienv.bench.quality_gates.EVALUATE_TIERS`
   (`single`/`pair`/`triple`/`long`/`explicit_grams`/`synonym`) for `evaluate`. It is
   **not** the batch number and **not** v1's T1–T4.
-- `observations` are copied verbatim from the episode (already capped by
-  `ReActHarness.act` at 6000 chars each).
+- Tool observations are copied from the episode (capped at 6000 chars, same cap as
+  the lab harness).
 
 The v2 loader rejects a record that: lacks `schema_version` / `segments` / `train_on`;
 has `len(messages) != len(segments) != len(train_on)`; has `segments[-1] != "final"`;
-has a `system`/`observation` message with `train_on = true`; has any `<tool_call>` /
-`<think>` / `<|im_start|>` marker in an `assistant.content` (that is a v1 record).
+has a `system`/`tool` message with `train_on = true`; has an assistant turn without
+`tool_calls`; stores the retired text-op shape (`assistant.content` is a `plan\n{"op":
+…}` blob and `tool_calls` is absent); or is a v1 record (Qwen XML `<tool_call>` /
+`<think>` / `<|im_start|>` in `assistant.content` as the action channel).
 
 ### 9.3 RLVR task export — `rlvr/<task_id>.json` (schema pinned; not built here)
 
@@ -517,7 +540,7 @@ has a `system`/`observation` message with `train_on = true`; has any `<tool_call
   "schema_version": "nutrimind-v2-rlvr/1",
   "task_id": "...",
   "task_package_ref": "task_packages/<task_id>.json",
-  "prompt": { "system": "<react_manual('v2')>", "task": "Task:\n<query>" },
+  "prompt": { "system": "<TOOL_SYSTEM_PROMPT>", "tools": "<NUTRIENV_TOOLS>", "task": "Task:\n<query>" },
   "environment": { "...": "same env reconstruction block as the TaskPackage" },
   "verifier": { "kind": "nutrienv.bench.scorer.Scorer", "oracle": { "...": "oracle payload" }, "oracle_version": "nutrienv-203d807" },
   "reward": { "adapter": "binary", "reward_version": "v2-r1", "map": { "pass": 1.0, "fail": 0.0, "indeterminate": null } },
@@ -888,9 +911,13 @@ implementation:
   target vs actual; `cost`; `versions`.
 - Every accepted / reject record carries the `meta` version block (§9.2).
 - `task_packages/<task_id>.json` — the canonical task, replayable by nutri-env tooling.
-- `rollouts/cache/<task_id>.json` — the full teacher episode: messages sent per step,
+- `rollouts/cache/<task_id>.json` — a `RolloutCache`: `{task_id, attempts:
+  [{attempt_id, EpisodeResult, VerificationResult}], selected_attempt}`. One entry per
+  teacher attempt 1..k that ran; each `EpisodeResult` carries the messages sent per step,
   each assistant turn's `content` + `reasoning_content` + `finish_reason` + `usage` +
-  latency, the resolved `Task`, and the `VerificationResult`.
+  latency, the resolved `Task`, and the produced `end_state`. `selected_attempt` is the
+  first Pass (or `null`). Multi-attempt by construction — this is what
+  `--from-stage serialize` re-reads without re-paying the teacher.
 - `loguru` logs (existing dep): task-level INFO outcomes, WARNING on retries and cost
   thresholds, ERROR on serialize failures. API keys and full prompts never logged
   (prompts live in the cache files).
@@ -916,8 +943,10 @@ ADR-012 is amended (see its Amendment log, 2026-09-08) to two symbol classes:
 | `nutrienv.world.daily_windows` | `plan_windows_for_meal`, `derive_profile_windows`, `meal_slot_and_remainder` |
 | `nutrienv.world.types` | `ledger_totals`, `WorldState`, `Profile`, `LedgerRow`, `MAX_ITEM_GRAMS` |
 | `nutrienv.world.catalog_store` | `load_catalog` |
-| `nutrienv.harness` | `ReActHarness`, `ScriptHarness` (only these two are re-exported here) |
-| `nutrienv.harness.react` | `react_manual`, `context_messages` (in that module's `__all__`; **not** re-exported from `nutrienv.harness` — ticket 001 finding) |
+| `nutrienv.harness` | `ReActHarness`, `ScriptHarness` (legacy re-exports; v2 train/eval do not use ReAct — ADR-014) |
+| `nutrienv.harness.tool_call` | `run_episode_tool_call` (lab; v2 teacher + student loop) |
+| `nutrienv.harness.tools_schema` | `NUTRIENV_TOOLS`, `TOOL_SYSTEM_PROMPT` |
+| `nutrienv.harness.react` | `react_manual`, `context_messages` — **not** the v2 protocol; kept only if a public symbol is still needed for reconstruction |
 | `nutrienv.harness.runner` | `DEFAULT_MAX_STEPS`, `FAMILY_MAX_STEPS`, `FINISH_OPS` |
 | `nutrienv.env` | `NutriEnv` |
 
@@ -930,9 +959,9 @@ ADR-012 is amended (see its Amendment log, 2026-09-08) to two symbol classes:
 
 - No signature-stability promise.
 - Not a v2 production dependency. Where a capability is only reachable through one,
-  reconstruct it from public symbols (3-leg composite — ticket 002) or subclass the
-  owner (`ReActHarness` for `_parse_action` and the loop; `react_manual("v2")` instead
-  of `_SYSTEM_V2`).
+  reconstruct it from public symbols (3-leg composite — ticket 002). The v2 train/eval
+  loop is `run_episode_tool_call` (ADR-014). Do **not** subclass `ReActHarness` or call
+  `react_manual("v2")` as a reconstruction strategy — that is ticket 009 history.
 - Covered indirectly by the Seam-1 end-to-end behaviour test.
 - If a stable dependency on one becomes unavoidable, the correct move is to get it
   promoted to nutri-env's `__all__` first, not to import the underscore name.
@@ -1008,6 +1037,10 @@ produced — not internal call order.
   v1-shaped record; rejects `len` mismatches and `segments[-1] != "final"`.
 - **v1/v2 isolation**: the v1 loader is unchanged; a test asserts the v1 loader and the
   v2 loader reject each other's record shape.
+- **Recovery (ADR-013)**: `is_recovery_positive` over scripted episodes — semantic error +
+  Pass → true; `bad_schema` + Pass → false; semantic error + Fail → false; no error + Pass →
+  false. Table-driven: every `ActionError` code reachable from the installed nutri-env is
+  classified semantic or syntax, so a new upstream code cannot silently deflate the metric.
 
 ### 19.5 RLVR (schema-level; export not built here)
 - A TaskPackage → RLVR export has `environment`, `verifier.oracle`, `reward.map`,
@@ -1032,11 +1065,15 @@ produced — not internal call order.
   (`nutri-env/scripts/generate_one_cli.py::make_synthetic_query_foods_expander`) and a
   scripted `teacher_complete` (queue of `(content, reasoning_content)`; prior art
   `tests/training/grpo/test_environment_execute.py` mock registry).
-- **Seam 2** — `gates.run(task) -> GateResult(keep, failure_code, reason_detail, stage)`
-  (pure). Build `Task`s with `generate_one(expander=synthetic)` offline.
-- **Seam 3** — the **verifier** `verify(task_package, end_state) -> VerificationResult`
-  (pure given the end state).
-- **Seam 4** — `serialize(task_package, episode) -> record` (pure).
+- **Seam 2** — `gates.run(task, ctx=GateContext.from_exam(exam_tasks)) ->
+  GateResult(keep, failure_code, reason_detail, stage)` (pure; the exam corpus is passed
+  in, never loaded implicitly). Build `Task`s with `generate_one(expander=synthetic)`
+  offline.
+- **Seam 3** — the **verifier** `verify(task_package, episode: EpisodeResult) ->
+  VerificationResult` (pure given the `EpisodeResult`; `EpisodeResult` bundles
+  `end_state` + per-turn `TurnMeta` + `reached_finish` + `error`, so the verifier can
+  derive all three axes of §12).
+- **Seam 4** — `serialize(task_package, episode: EpisodeResult) -> record` (pure).
 - **Seam 5** — the compatibility guard (§19.6), split from behaviour tests.
 - pytest: no config today; add `[tool.pytest.ini_options] testpaths=["tests"]` or rely
   on discovery. Tests under `tests/training/data_factory/`. Prior art
@@ -1057,6 +1094,17 @@ The factory is not "successful" merely by producing `sft/train.jsonl`. From
   (`completed / (completed + teacher_error + teacher_no_finish)`) ≥ 0.9.
 - `teacher_pass_rate` (`pass / completed`) ≈ 0.7 overall; flagged if 3-leg composite
   < 0.35.
+- **`recovery_fraction`** (ADR-013) — `recovery_positive / accepted`, where
+  recovery-positive means a **semantic** `ActionError` observation (`unknown_food` /
+  `implausible_quantity` / `bad_index`; never `bad_schema` / `unknown_op`) **and** a Passed
+  end state. Band **0.15–0.25** as a **health warning**, not a hard gate — the response to a
+  shortfall is over-generation, never a lower `counts.accepted`. Provisional until Batch 1
+  measures the natural rate. Report `recovery_by_code` split semantic vs syntax beside it.
+- **`schema_error_rate`** (ADR-013) — `syntax_error_turns / total_turns`, reported
+  **separately** from `recovery_fraction`. `bad_schema` / `unknown_op` are protocol
+  failures; ordinary SFT already supplies only well-formed ops as positive examples, so this
+  is a *student protocol-mastery* signal, not a corpus property. A syntax error followed by
+  a Passed recovery is recorded but never counted as recovery-positive.
 - **`indeterminate_rate`** — a **v2-r1 operational health threshold** (not a domain
   fact; revisable with `reward_version`). Denominator is **attempted `task_id`s**, not
   accepted:
@@ -1079,11 +1127,11 @@ failures.
 
 v2 processes only synthetic data — `TRAIN_ROSTER` (fictional `train-*` people), USDA
 catalog foods, LLM-authored queries. **No real user data enters the pipeline.** Prompts
-sent to DeepSeek (`api.deepseek.com`) and Volcengine (`ark/`) contain only synthetic
-roster + catalog content; nothing sensitive to redact. `rollouts/cache/` and logs may
-hold raw (synthetic) teacher responses under the git-ignored `data/`. No
-de-identification required. The only external data boundary: synthetic prompts leave the
-machine to two model providers.
+sent to Volcengine (`ark/deepseek-v4-flash` on `api/plan/v3`, one endpoint for teacher +
+expander) contain only synthetic roster + catalog content; nothing sensitive to redact.
+`rollouts/cache/` and logs may hold raw (synthetic) teacher responses under the
+git-ignored `data/`. No de-identification required. The only external data boundary:
+synthetic prompts leave the machine to one model provider.
 
 ## 22. Implementation Decisions
 
@@ -1111,10 +1159,13 @@ machine to two model providers.
    `nutrimind_rev` (git sha), `nutrienv_rev`.
 7. **Two injected dependencies** (§7): `expander` (the `generate_one` contract) and
    `teacher_complete` (returns `content` + `reasoning_content` separately). Production
-   `teacher_complete` uses the `openai` SDK directly against `api.deepseek.com` with
-   `extra_body={"thinking": {"type": "enabled"}}` + `reasoning_effort="low"`;
-   `nutrienv.io.chat.complete_chat` is **not** used for rollouts (it sends no thinking
-   param and `_message_text` collapses `content`/`reasoning_content`).
+   `teacher_complete` is a thin client against `ark/deepseek-v4-flash` on
+   `api/plan/v3/chat/completions` (`ARK_API_KEY`), reading `message.content` +
+   `message.reasoning_content` + `usage.completion_tokens_details.reasoning_tokens`, with
+   `thinking: {"type": "enabled"}` as the length control (ADR-011 amended — replaces the
+   DeepSeek-direct `reasoning_effort`); `nutrienv.io.chat.complete_chat` is **not** used
+   for rollouts (it sends no thinking param and `_message_text` collapses
+   `content`/`reasoning_content`).
 8. **Teacher rollout** subclasses `nutrienv.harness.ReActHarness`, overriding the
    completion to use `teacher_complete` and keep `reasoning_content`, and **recording per
    turn** a v2-owned trajectory-metadata structure: at minimum `raw_action_text` (the
@@ -1254,13 +1305,14 @@ tuning decisions that can be made inline or carried on a ticket.
   `<tool_call>` single-token vocab, Qwen3-4B) and does not govern v2. A v2 training spec
   is a separate future doc.
 - nutri-env's `EXPANDER_MODELS["deepseek-v4-flash-0731"]` (DashScope snapshot) is a
-  different id and route from the v2 teacher `deepseek/deepseek-v4-flash` (direct). Do
-  not conflate.
+  different id and route from the v2 teacher `ark/deepseek-v4-flash` on `api/plan/v3`
+  (ADR-011 amended). Do not conflate.
 - nutri-env's eval suite already has a `void` / `is_void` / `clean_pass_rate` concept —
   v2's `indeterminate` is the same idea, named.
-- The finalized design doc is still at `/tmp/nutrienv_student_data.md`; ADR-010/011
-  reference `docs/plans/nutrimind_v2_data_factory.md`. Moving it in is a pending chore,
-  deliberately not done here.
+- The finalized design doc `/tmp/nutrienv_student_data.md` (which ADR-010/011 reference as
+  `docs/plans/nutrimind_v2_data_factory.md`) is **lost** — no copy survives. Its
+  load-bearing numbers are preserved in §2.1 above and in ticket 002. **Ticket 021**
+  reconstructs the doc at that path from §2.1 + the ADRs + ticket 002.
 - `nutrienv` is currently **not importable** in this repo. Ticket 001 is a hard
   prerequisite for all implementation.
 

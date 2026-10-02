@@ -247,6 +247,13 @@ implementation ticket.
 
 ## Part C — N=40 accepted-Pass batch qualification (only if Part B passes)
 
+> **Superseded as a spike (2026-09-09).** Part C is now a hard acceptance gate on
+> **ticket 013**, not work in this ticket. The **teacher config below is stale** — the
+> Outcome block's "Side finding — ADR-011 amended" is authoritative: teacher =
+> `ark/deepseek-v4-flash` on `api/plan/v3` (`ARK_API_KEY`), `thinking` as the length
+> control, **not** `deepseek/` direct + `reasoning_effort`. The N-counting and `k = 6`
+> rules below still stand and are carried into ticket 013.
+
 v2.0 requires **40 accepted Pass** for this family (design doc §7; not negotiable in this
 ticket). Prove it under the fixed config below, or declare acceptance failure. These are
 **rules, not recommendations** — write them into `configs/data_factory.yaml` for the

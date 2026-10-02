@@ -15,13 +15,29 @@ Per-feature, under `.scratch/`:
 └── issues/            ← one Markdown file per ticket (from /to-tickets)
 ```
 
-Current feature:
+Current features:
 
 ```
-.scratch/nutrimind-v2/
+.scratch/nutrimind-v2/          ← Data Factory (SFT corpus); build tickets
+├── spec.md
+└── issues/
+
+.scratch/nutrimind-rl/          ← RL & OPD stages; consumes TaskPackages
+├── spec.md
+└── issues/                     ← cut by /to-tickets
+
+.scratch/nutrimind-pilot/       ← single-query speech + SFT/RL/OPD query-budget overlay
 ├── spec.md
 └── issues/
 ```
+
+`.scratch/nutrimind-rl/spec.md` consumes `.scratch/nutrimind-v2/`'s artifacts
+(`TaskPackage`, `rlvr/<task_id>.json`) and authors no tasks of its own, so its tickets
+depend on the Data Factory's rather than the reverse.
+
+`.scratch/nutrimind-pilot/spec.md` overlays **speech** quality and the SFT/RL/OPD
+**pilot query budget** on those two specs. It does not replace Batch-1 family mix or
+the production factory config.
 
 ## Triage labels
 

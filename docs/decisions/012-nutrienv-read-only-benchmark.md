@@ -2,7 +2,7 @@
 
 - **Status**: accepted
 - **Date**: 2026-09-08
-- **Amended**: 2026-09-08 — borrowed-symbol guard scope narrowed to two classes; see the Amendment log
+- **Amended**: 2026-09-08 — borrowed-symbol guard scope narrowed to two classes; 2026-09-11 — pin moved to `nutri-env-lab` (native tool-calling harness); 2026-09-11 — ticket 013 Part C 40-count is a live-run gate; see the Amendment log
 - **Deciders**: zeqing
 
 ## Context
@@ -20,9 +20,11 @@ The cheapest fix is a small patch to `../nutri-env` (one function +
 
 ## Decision
 
-**NutriMind never patches NutriEnv.** `../nutri-env` is consumed as a read-only
-benchmark and library: the frozen v1.0 split, `Scorer`, `NutriEnv`, the `ReActHarness`
-loop shape, `_SYSTEM_V2`, `catalog.sqlite`, and the `generate_one` internals.
+**NutriMind never patches NutriEnv.** v2 consumes **`../nutri-env-lab`** as a
+read-only benchmark and library: the frozen v1.0 split, `Scorer`, `NutriEnv`, the
+native tool-calling harness (`run_episode_tool_call`, `NUTRIENV_TOOLS`),
+`catalog.sqlite`, and the `generate_one` internals. The ReAct harness remains in
+the tree as a lab legacy path; v2 train and eval do not use it (ADR-014).
 
 Every authoring gap is closed **NutriMind-side** in `src/training/data_factory/` by
 composing **public** nutri-env symbols (in `nutrienv`'s `__all__`), then verifying each
@@ -33,7 +35,9 @@ the owning class; it does not import the underscore name as a long-term dependen
 
 Guardrails:
 
-- `../nutri-env` is pinned to an exact git SHA in `pyproject.toml`.
+- `../nutri-env-lab` is pinned to an exact git SHA in `pyproject.toml` /
+  `configs/data_factory.yaml` (`0ee68eaa6c246e8079915761c95fc986c53d4979` as of
+  2026-09-11). The older `../nutri-env@203d807` pin is v1/factory-history.
 - A compatibility test asserts, for the **public borrowed API only** (symbols in
   nutri-env's `__all__` that v2 calls directly): the symbol imports, and its
   `inspect.signature` is unchanged. Private helpers get an existence-only import check at
@@ -63,6 +67,30 @@ Guardrails:
   PR — but never as a prerequisite for a NutriMind batch.
 
 ## Amendment log
+
+### 2026-09-11 — ticket 013 Part C 40-count is a live-run gate, not an offline claim
+
+Ticket 013 ships the 3-leg family from **public** symbols only (no
+`_bind_log_foods` / `_update_from_template` import). The hard Part C gate
+(40 distinct-`task_id` accepted Pass, `k = 6`, `indeterminate_rate ≤ 0.05`)
+needs a live `ark/` teacher and is **not** claimed from scripted/offline
+runs. This amendment records that fallback: 013 does **not** silently
+re-size design §7 (`target_n` stays 40) and does **not** take a private-helper
+exception. The 40-count remains a live qualification on the production path
+(ticket 020). Offline tests prove one gated correct-replay Pass and the
+sizing formula.
+
+### 2026-09-11 — pin `nutri-env-lab` (native tool-calling harness)
+
+v2 needs `nutrienv.harness.tool_call` / `tools_schema`, which exist on
+`nutri-env-lab` at `0ee68eaa6c246e8079915761c95fc986c53d4979` and not on the
+earlier `nutri-env@203d807` pin. Read-only still holds: the lab is consumed, never
+patched. The frozen v1.0 split is byte-identical to the published exam (no v1.1);
+evaluation aborts if the working-tree exam file differs.
+
+The public/private borrowed-symbol split (2026-09-08) is unchanged. The FC harness
+symbols used by v2 are public for the purpose of the compatibility guard once they
+are in the lab's `__all__` (or listed explicitly in the v2 guard).
 
 ### 2026-09-08 — borrowed-symbol guard scope
 
@@ -94,7 +122,10 @@ NutriMind-side — is unchanged. The concrete public/private symbol split lives 
 ## Related
 
 - [ADR-010](010-nutrimind-v2-rescope.md),
-  [ADR-011](011-batch1-sft-trajectory-short-plan-thinking-teacher.md)
+  [ADR-011](011-batch1-sft-trajectory-short-plan-thinking-teacher.md),
+  [ADR-014](014-native-tool-calling-v2-protocol.md)
 - `.scratch/nutrimind-v2/spec.md` (§18 public/private symbol split, §22.9 3-leg spike)
 - `docs/plans/nutrienv_student.md` (§5 Pointers), `/tmp/nutrienv-data-review.md`
   (P0-1, P1-5)
+
+2026-09-29 ARK 已移除。NutriEnv pin 改为 `47367d9c569d0a46cbd1c97d5f08afb3a7d573ac`（只读消费，未改 lab 树）。

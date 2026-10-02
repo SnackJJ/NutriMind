@@ -1,0 +1,9 @@
+.git
+.venv
+.scratch
+.pytest_cache
+**/__pycache__
+data
+outputs
+dsh-alpha
+*.log

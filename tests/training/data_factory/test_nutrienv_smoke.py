@@ -1,7 +1,8 @@
-"""Ticket 001 — NutriEnv public-API smoke test.
+"""Ticket 023 — NutriEnv lab pin + native tool-calling smoke test.
 
-Proves `nutrienv` is importable and the public surface the v2 data factory borrows
-(ADR-012, spec §18) actually works. No v2 business code is exercised here.
+Proves `nutrienv` is importable from the nutri-env-lab pin and the public
+surface the v2 data factory borrows (ADR-012, spec §18) actually works,
+including native tool-calling symbols. No v2 business code is exercised here.
 
 NutriEnv must be installed strict-editable (`scripts/setup_nutrienv.sh`); a default
 wheel / git+ install drops `nutrienv/env/` and every assertion below fails at import.
@@ -16,15 +17,16 @@ import subprocess
 import pytest
 
 # Pinned rev — keep in sync with configs/data_factory.yaml : nutrienv.rev
-NUTRIENV_PIN = "203d807b19953a86b5486303ba6f7dd3b9cf7bb6"
+NUTRIENV_PIN = "47367d9c569d0a46cbd1c97d5f08afb3a7d573ac"
 
 nutrienv = pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 
 _CONFIG = pathlib.Path(__file__).resolve().parents[3] / "configs" / "data_factory.yaml"
+_NUTRIMIND_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
 def _src_root() -> pathlib.Path:
-    # .../nutri-env/src/nutrienv/__init__.py -> .../nutri-env
+    # .../nutri-env-lab/src/nutrienv/__init__.py -> .../nutri-env-lab
     return pathlib.Path(nutrienv.__file__).resolve().parents[2]
 
 
@@ -45,7 +47,7 @@ def test_pin_is_single_sourced():
     head = subprocess.check_output(
         ["git", "-C", str(_src_root()), "rev-parse", "HEAD"], text=True
     ).strip()
-    assert head == cfg, f"installed nutri-env HEAD {head} != config rev {cfg}"
+    assert head == cfg, f"installed nutri-env-lab HEAD {head} != config rev {cfg}"
 
 
 def test_version_and_editable_source():
@@ -58,28 +60,50 @@ def test_installed_rev_matches_pin():
     head = subprocess.check_output(
         ["git", "-C", str(_src_root()), "rev-parse", "HEAD"], text=True
     ).strip()
-    assert head == NUTRIENV_PIN, f"nutri-env HEAD {head} != pinned {NUTRIENV_PIN}"
+    assert head == NUTRIENV_PIN, f"nutri-env-lab HEAD {head} != pinned {NUTRIENV_PIN}"
 
 
-def test_public_api_imports():
-    from nutrienv.bench import (  # noqa: F401
-        Oracle,
-        Scorer,
-        Task,
-        check_achievable,
-        load_exam,
-        EXAM_SPLIT_PATH,
+# Public-API import coverage now lives in the ticket-016 guard: test_imports.py, test_borrowed_api_signatures.py, test_two_class_rule.py.
+
+
+def test_native_tool_calling_symbols_import():
+    """Ticket 023: FC harness symbols resolve from the lab pin."""
+    from nutrienv.harness.tool_call import run_episode_tool_call
+    from nutrienv.harness.tools_schema import NUTRIENV_TOOLS, TOOL_SYSTEM_PROMPT
+
+    assert callable(run_episode_tool_call)
+    assert isinstance(NUTRIENV_TOOLS, list) and NUTRIENV_TOOLS
+    assert isinstance(TOOL_SYSTEM_PROMPT, str) and TOOL_SYSTEM_PROMPT
+
+
+def test_exam_file_bytes_match_committed_pin():
+    """Working-tree v1.0 exam equals the git blob at the pin (no drift)."""
+    from nutrienv.bench import EXAM_SPLIT_PATH
+
+    src = _src_root()
+    exam_path = pathlib.Path(EXAM_SPLIT_PATH).resolve()
+    rel = exam_path.relative_to(src).as_posix()
+    committed = subprocess.check_output(
+        ["git", "-C", str(src), "rev-parse", f"HEAD:{rel}"], text=True
+    ).strip()
+    working = subprocess.check_output(
+        ["git", "-C", str(src), "hash-object", str(exam_path)], text=True
+    ).strip()
+    assert working == committed, (
+        f"exam working-tree blob {working} != pin blob {committed} ({rel})"
     )
-    from nutrienv.bench.pipeline.freezer import task_to_item  # noqa: F401
-    from nutrienv.bench.pipeline.generate_one import generate_one  # noqa: F401
-    from nutrienv.bench.pipeline.types import catalog_digest  # noqa: F401
-    from nutrienv.env import NutriEnv  # noqa: F401
-    from nutrienv.harness import ReActHarness, ScriptHarness  # noqa: F401
-    # react_manual / context_messages live in nutrienv.harness.react, not re-exported
-    # from nutrienv.harness (spec §18 note).
-    from nutrienv.harness.react import context_messages, react_manual  # noqa: F401
-    from nutrienv.harness.runner import FAMILY_MAX_STEPS, FINISH_OPS  # noqa: F401
-    from nutrienv.world.catalog_store import GOLD_CATALOG_PATH, load_catalog  # noqa: F401
+
+
+def test_nutrimind_does_not_patch_lab_tree():
+    """ADR-012: NutriMind never vendors nutrienv or dirties the lab's tracked files."""
+    assert not (_NUTRIMIND_ROOT / "src" / "nutrienv").exists()
+    dirty = subprocess.check_output(
+        ["git", "-C", str(_src_root()), "status", "--porcelain", "-uno"],
+        text=True,
+    )
+    assert dirty.strip() == "", (
+        "lab tracked files are dirty; NutriMind must not patch the lab:\n" + dirty
+    )
 
 
 def test_catalog_digest_matches_exam_split():
