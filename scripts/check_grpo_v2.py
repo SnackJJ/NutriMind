@@ -75,6 +75,7 @@ def check(root, lab, mimo, dataset):
             ("src/training/rl/verl_agent_loop.py", "src/training/rl/verl_trainer.py",
              "src/training/rl/train_verl.py", "scripts/run_grpo_v2.sh", "scripts/prepare_grpo_v2.py",
              "configs/grpo_v2_4090.yaml", "configs/grpo_v2_a800.yaml", "configs/grpo_v2_a800_fast.yaml",
+             "configs/grpo_v2_a800_bs16.yaml",
              "configs/grpo_v2_agent.yaml",
              "infra/grpo/vllm_plugin/nutrimind_vllm_compat.py",
              "infra/grpo/vllm_plugin/nutrimind_vllm_compat_model.py")},
