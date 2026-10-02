@@ -1,0 +1,110 @@
+defaults:
+  - ppo_trainer
+  - _self_
+
+algorithm:
+  adv_estimator: grpo
+  norm_adv_by_std_in_grpo: true
+  use_kl_in_reward: false
+  invalid_reward_value: -999
+
+data:
+  train_files: data/rl/grpo_v2/smoke_train.parquet
+  val_files: data/rl/grpo_v2/smoke_val.parquet
+  train_batch_size: 2
+  val_batch_size: 2
+  max_prompt_length: 4096
+  max_response_length: 4096
+  dataloader_num_workers: 0
+  shuffle: false
+  apply_chat_template_kwargs:
+    enable_thinking: true
+
+actor_rollout_ref:
+  model:
+    path: data/student/models/sft_v2_lora_b12/merged
+    override_config:
+      attn_implementation: sdpa
+    use_remove_padding: false
+    use_fused_kernels: true
+    fused_kernel_options:
+      impl_backend: torch
+    lora_rank: 32
+    lora_alpha: 64
+    target_modules: [q_proj, k_proj, v_proj, o_proj, in_proj_qkv, in_proj_z, out_proj, gate_proj, up_proj, down_proj]
+    lora:
+      merge: true
+  actor:
+    strategy: fsdp2
+    ppo_mini_batch_size: 2
+    ppo_micro_batch_size_per_gpu: 1
+    use_dynamic_bsz: false
+    use_kl_loss: false
+    use_torch_compile: false
+    entropy_coeff: 0
+    optim:
+      lr: 1.0e-6
+    fsdp_config:
+      model_dtype: bfloat16
+      param_offload: true
+      optimizer_offload: true
+      offload_policy: true
+      use_torch_compile: false
+  rollout:
+    name: vllm
+    mode: async
+    tensor_model_parallel_size: 1
+    n: 8
+    temperature: 1
+    top_p: 0.95
+    top_k: 20
+    logprobs_mode: raw_logprobs
+    calculate_log_probs: true
+    gpu_memory_utilization: 0.45
+    max_model_len: 8192
+    max_num_seqs: 8
+    max_num_batched_tokens: 8192
+    enforce_eager: true
+    enable_prefix_caching: false
+    log_prob_micro_batch_size_per_gpu: 1
+    agent:
+      num_workers: 1
+      default_agent_loop: nutrimind_v2
+      agent_loop_config_path: configs/grpo_v2_agent.yaml
+    multi_turn:
+      enable: true
+      format: qwen3_coder
+    val_kwargs:
+      n: 1
+      do_sample: true
+      temperature: 1
+      top_p: 0.95
+      top_k: 20
+
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 1
+  logger: [console, file]
+  project_name: nutrimind-v2-grpo
+  experiment_name: 4090-smoke
+  total_epochs: 1
+  total_training_steps: 2
+  save_freq: 1
+  test_freq: -1
+  val_before_train: false
+  balance_batch: false
+  resume_mode: disable
+  default_local_dir: data/rl_runs/grpo_v2_4090
+  rollout_data_dir: data/rl_runs/grpo_v2_4090/rollouts
+
+ray_kwargs:
+  ray_init:
+    num_cpus: 12
+
+reward:
+  num_workers: 1
+
+transfer_queue:
+  backend:
+    SimpleStorage:
+      num_data_storage_units: 2

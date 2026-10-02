@@ -1,0 +1,52 @@
+defaults:
+  - grpo_v2_4090
+  - _self_
+
+data:
+  train_files: data/rl/grpo_v2/train.parquet
+  val_files: data/rl/grpo_v2/val.parquet
+  train_batch_size: 8
+  val_batch_size: 104
+  max_prompt_length: 4096
+  max_response_length: 20480
+  shuffle: true
+  seed: 42
+
+algorithm:
+  filter_groups:
+    enable: true
+    metric: reward
+
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: 8
+    use_kl_loss: true
+    kl_loss_coef: 0.01
+    kl_loss_type: low_var_kl
+    fsdp_config:
+      param_offload: false
+      optimizer_offload: false
+      offload_policy: false
+  ref:
+    strategy: fsdp2
+    log_prob_micro_batch_size_per_gpu: 1
+    use_torch_compile: false
+    fsdp_config:
+      param_offload: true
+  rollout:
+    max_model_len: 24576
+    max_num_seqs: 16
+    gpu_memory_utilization: 0.5
+    agent:
+      num_workers: 2
+
+trainer:
+  logger: [console, file, wandb]
+  experiment_name: a800-pilot
+  total_epochs: 1
+  total_training_steps: 20
+  save_freq: 5
+  test_freq: 5
+  val_before_train: true
+  default_local_dir: data/rl_runs/grpo_v2_a800
+  rollout_data_dir: data/rl_runs/grpo_v2_a800/rollouts

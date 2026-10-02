@@ -1,0 +1,4 @@
+- name: nutrimind_v2
+  _target_: src.training.rl.verl_agent_loop.NutriMindAgentLoop
+  per_turn_max_tokens: 2048
+  harness_workers: 16
