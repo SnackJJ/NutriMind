@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PROFILE="${1:-4090}"
 shift || true
-case "$PROFILE" in 4090|a800|a800_fast) ;; *) echo "profile must be 4090, a800 or a800_fast" >&2; exit 2 ;; esac
+case "$PROFILE" in 4090|a800|a800_fast|a800_bs16) ;; *) echo "profile must be 4090, a800, a800_fast or a800_bs16" >&2; exit 2 ;; esac
 export PATH="${GRPO_VENV:-/root/autodl-tmp/venvs/grpo}/bin:$PATH"
 export PYTHONPATH="$PWD:${MIMO_VERL_ROOT:-/root/autodl-tmp/mimo-verl}:${NUTRIENV_ROOT:-/root/nutri-env-pin}/src:${FLA_ROOT:-/root/autodl-tmp/pydeps/fla}:${PYTHONPATH:-}"
 export TOKENIZERS_PARALLELISM=false
