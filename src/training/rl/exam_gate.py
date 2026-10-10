@@ -53,10 +53,26 @@ def assert_lab_at_rev(expected_rev: str | None = None) -> str:
     head = _git_output(["git", "rev-parse", "HEAD"], cwd=root)
     if head != expected_rev:
         raise ExamGateError(
-            f"nutri-env-lab at {root} is at HEAD {head}, expected rev {expected_rev}; "
+            f"NutriEnv tree at {root} is at HEAD {head}, expected rev {expected_rev}; "
             "eval aborts before any rollout"
         )
+    _assert_clean_tree(root)
     return head
+
+
+def _assert_clean_tree(root: pathlib.Path) -> None:
+    """Reject a pin whose tracked files are modified.
+
+    The HEAD check alone is not enough: an uncommitted edit to the scorer or to
+    the catalog changes the score while ``rev-parse HEAD`` still matches, and the
+    report still looks normal.
+    """
+    dirty = _git_output(["git", "status", "--porcelain", "-uno"], cwd=root)
+    if dirty:
+        raise ExamGateError(
+            f"NutriEnv tree at {root} has uncommitted tracked changes "
+            f"({dirty.splitlines()[0]}); eval aborts before any rollout"
+        )
 
 
 def pinned_exam_blob() -> str:
@@ -77,7 +93,7 @@ def assert_exam_byte_identical(
     *,
     expected_rev: str | None = None,
 ) -> None:
-    """Abort unless the lab HEAD is the pin and ``exam_path`` equals its exam blob."""
+    """Abort unless the pin HEAD is clean and ``exam_path`` equals its exam blob."""
     assert_lab_at_rev(expected_rev)
     from nutrienv.bench import EXAM_SPLIT_PATH
 

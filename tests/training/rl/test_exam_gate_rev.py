@@ -1,4 +1,4 @@
-"""Exam gate checks the installed lab HEAD is the ADR-012 pin before any blob check."""
+"""Exam gate checks the pin HEAD and its clean tree before any blob check."""
 
 from __future__ import annotations
 
@@ -22,13 +22,17 @@ LAB = pathlib.Path("/fake/nutri-env-lab")
 
 @pytest.fixture
 def fake_lab(monkeypatch):
-    """Fake lab at HEAD ``state['head']``; records blob-check calls."""
-    state = {"head": PIN, "blob_calls": []}
+    """Fake pin at HEAD ``state['head']`` with ``state['dirty']`` output; records blob calls."""
+    state = {"head": PIN, "dirty": "", "blob_calls": []}
     monkeypatch.setattr(exam_gate, "_lab_root", lambda: LAB)
 
     def git_output(args, *, cwd=None):
-        assert args == ["git", "rev-parse", "HEAD"] and cwd == LAB
-        return state["head"]
+        assert cwd == LAB
+        if args == ["git", "rev-parse", "HEAD"]:
+            return state["head"]
+        if args == ["git", "status", "--porcelain", "-uno"]:
+            return state["dirty"]
+        raise AssertionError(f"unexpected git call {args}")
 
     monkeypatch.setattr(exam_gate, "_git_output", git_output)
     monkeypatch.setattr(
@@ -50,6 +54,16 @@ def test_head_off_rev_raises_before_blob_check_and_rollout(fake_lab):
     with pytest.raises(ExamGateError, match=f"HEAD {DRIFT}, expected rev {PIN}") as err:
         before_eval_rollout(lambda: called.append(True), exam_path="exam.json", expected_rev=PIN)
     assert str(LAB) in str(err.value)
+    assert fake_lab["blob_calls"] == []
+    assert called == []
+
+
+def test_dirty_tree_raises_before_blob_check_and_rollout(fake_lab):
+    fake_lab["dirty"] = " M src/nutrienv/bench/scorer.py"
+    called: list[bool] = []
+    with pytest.raises(ExamGateError, match="uncommitted tracked changes") as err:
+        before_eval_rollout(lambda: called.append(True), exam_path="exam.json", expected_rev=PIN)
+    assert "scorer.py" in str(err.value)
     assert fake_lab["blob_calls"] == []
     assert called == []
 
