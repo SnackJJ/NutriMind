@@ -19,20 +19,22 @@
 #
 # max_intents: 2x wave caps = 6 x 370 (non-3-leg) + 2 x 135 (3-leg) = 2490 -> 2500.
 
-# nutrienv_rev is single-sourced from the pin block below (ticket 023 lab pin);
+# nutrienv_rev is single-sourced from the pin block below (the pinned release tree);
 # the loader exposes it as DataFactoryConfig.nutrienv_rev. Keep the rev the
 # FIRST 40-hex string in this file — CI resolves the pin from it.
 
-# NutriEnv (../nutri-env-lab) is consumed read-only (ADR-012), pinned to an exact
-# commit. The smoke test asserts the installed source tree's git HEAD equals this
-# value. The older ../nutri-env@203d807 pin is v1 / factory-history.
+# NutriEnv (../nutri-env-pin) is consumed read-only (ADR-012): a detached worktree
+# of the public repo at tag v1.1.0, pinned to an exact commit. The smoke test
+# asserts the installed source tree's git HEAD equals this value. The older
+# ../nutri-env-lab@47367d9 pin is v2 experiment history (scorer s7-amdr-windows,
+# exam nutrienv-v1.1-gold); numbers measured there are NOT comparable with this one.
 nutrienv:
   repo: "https://github.com/SnackJJ/NutriEnv"
-  rev: "47367d9c569d0a46cbd1c97d5f08afb3a7d573ac"     # nutrienv_rev
-  install: "uv pip install -e ../nutri-env-lab --config-settings editable_mode=strict"
+  rev: "174dcef997bf7b4180c84ee06713f30aaf7be058"     # nutrienv_rev
+  install: "uv pip install -e ../nutri-env-pin --config-settings editable_mode=strict"
   note: >
     Default (compat) editable / wheel / git+ installs drop nutrienv/env/ because
-    the lab's .gitignore has a bare `env/` line that hatchling honours. Use strict
+    the repo's .gitignore has a bare `env/` line that hatchling honours. Use strict
     PEP 660 editable mode (redirects to the source tree). If a clean wheel is ever
     needed, packaging must be fixed upstream (anchor the ignore as `/env/`,
     or add `[tool.hatch.build] artifacts = ["src/nutrienv/env/**"]`). NutriMind

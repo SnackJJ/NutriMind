@@ -2,7 +2,7 @@
 
 - **Status**: accepted
 - **Date**: 2026-09-08
-- **Amended**: 2026-09-08 — borrowed-symbol guard scope narrowed to two classes; 2026-09-11 — pin moved to `nutri-env-lab` (native tool-calling harness); 2026-09-11 — ticket 013 Part C 40-count is a live-run gate; see the Amendment log
+- **Amended**: 2026-09-08 — borrowed-symbol guard scope narrowed to two classes; 2026-09-11 — pin moved to `nutri-env-lab` (native tool-calling harness); 2026-09-11 — ticket 013 Part C 40-count is a live-run gate; 2026-10-10 — pin moved to the released tree (`nutri-env-pin` @ tag `v1.1.0`); see the Amendment log
 - **Deciders**: zeqing
 
 ## Context
@@ -20,7 +20,7 @@ The cheapest fix is a small patch to `../nutri-env` (one function +
 
 ## Decision
 
-**NutriMind never patches NutriEnv.** v2 consumes **`../nutri-env-lab`** as a
+**NutriMind never patches NutriEnv.** v2 consumes **`../nutri-env-pin`** as a
 read-only benchmark and library: the frozen v1.0 split, `Scorer`, `NutriEnv`, the
 native tool-calling harness (`run_episode_tool_call`, `NUTRIENV_TOOLS`),
 `catalog.sqlite`, and the `generate_one` internals. The ReAct harness remains in
@@ -35,9 +35,10 @@ the owning class; it does not import the underscore name as a long-term dependen
 
 Guardrails:
 
-- `../nutri-env-lab` is pinned to an exact git SHA in `pyproject.toml` /
-  `configs/data_factory.yaml` (`0ee68eaa6c246e8079915761c95fc986c53d4979` as of
-  2026-09-11). The older `../nutri-env@203d807` pin is v1/factory-history.
+- `../nutri-env-pin` is pinned to an exact git SHA in `pyproject.toml` /
+  `configs/data_factory.yaml` (`174dcef997bf7b4180c84ee06713f30aaf7be058`, tag
+  `v1.1.0` as of 2026-10-10). The older `../nutri-env-lab@47367d9` pin is v2
+  experiment history; `../nutri-env@203d807` is v1/factory-history.
 - A compatibility test asserts, for the **public borrowed API only** (symbols in
   nutri-env's `__all__` that v2 calls directly): the symbol imports, and its
   `inspect.signature` is unchanged. Private helpers get an existence-only import check at
@@ -67,6 +68,29 @@ Guardrails:
   PR — but never as a prerequisite for a NutriMind batch.
 
 ## Amendment log
+
+### 2026-10-10 — pin the released tree (tag `v1.1.0`)
+
+The consumed tree moves from the lab experiment checkout to the release:
+`../nutri-env-pin` is a detached `git worktree` of the public repo at tag
+`v1.1.0` (`174dcef997bf7b4180c84ee06713f30aaf7be058`), installed strict-editable.
+Read-only still holds, and the pin is now a checkout that no publish step moves.
+
+The ruler moved with the pin, so numbers measured before this date are not
+comparable with numbers measured after it: `SCORER_VERSION` `s7-amdr-windows` →
+`s10-meal-mass-envelope`, `PROMPT_VERSION` `p6-amdr-window-ranges` →
+`p8-published-meal-mass-limits`, the exam `nutrienv-v1.1.json` blob
+`a4475c04…` → `a7bba6d1…`, and the catalog the exam reads `catalog.sqlite`
+(`57184b2b…`) → `catalog-v3.sqlite` (`63e5da2c…`). The v1.0 split blob
+(`78cea3ce…`) and `catalog.sqlite` are unchanged between the two trees.
+
+The calibration table and the list of entry points that still name the old rev
+live in [ADR-016](016-nutrienv-v1.1.0-pin-caliber.md).
+
+The data factory is **not** re-pointed by this amendment: it still imports the
+pre-`47367d9` mill API (`generate_one(family=…)`, `freeze_tasks`) and is broken
+under both trees (26 test modules fail collection, 28 tests red). That repair is
+deferred as its own task and is not silenced.
 
 ### 2026-09-11 — ticket 013 Part C 40-count is a live-run gate, not an offline claim
 

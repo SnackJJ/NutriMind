@@ -1,6 +1,6 @@
-"""Ticket 023 — NutriEnv lab pin + native tool-calling smoke test.
+"""NutriEnv release pin (tag v1.1.0) + native tool-calling smoke test.
 
-Proves `nutrienv` is importable from the nutri-env-lab pin and the public
+Proves `nutrienv` is importable from the pinned release tree and the public
 surface the v2 data factory borrows (ADR-012, spec §18) actually works,
 including native tool-calling symbols. No v2 business code is exercised here.
 
@@ -17,7 +17,7 @@ import subprocess
 import pytest
 
 # Pinned rev — keep in sync with configs/data_factory.yaml : nutrienv.rev
-NUTRIENV_PIN = "47367d9c569d0a46cbd1c97d5f08afb3a7d573ac"
+NUTRIENV_PIN = "174dcef997bf7b4180c84ee06713f30aaf7be058"
 
 nutrienv = pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 
@@ -26,7 +26,7 @@ _NUTRIMIND_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
 def _src_root() -> pathlib.Path:
-    # .../nutri-env-lab/src/nutrienv/__init__.py -> .../nutri-env-lab
+    # .../nutri-env-pin/src/nutrienv/__init__.py -> .../nutri-env-pin
     return pathlib.Path(nutrienv.__file__).resolve().parents[2]
 
 
@@ -47,7 +47,7 @@ def test_pin_is_single_sourced():
     head = subprocess.check_output(
         ["git", "-C", str(_src_root()), "rev-parse", "HEAD"], text=True
     ).strip()
-    assert head == cfg, f"installed nutri-env-lab HEAD {head} != config rev {cfg}"
+    assert head == cfg, f"installed NutriEnv HEAD {head} != config rev {cfg}"
 
 
 def test_version_and_editable_source():
@@ -60,7 +60,7 @@ def test_installed_rev_matches_pin():
     head = subprocess.check_output(
         ["git", "-C", str(_src_root()), "rev-parse", "HEAD"], text=True
     ).strip()
-    assert head == NUTRIENV_PIN, f"nutri-env-lab HEAD {head} != pinned {NUTRIENV_PIN}"
+    assert head == NUTRIENV_PIN, f"NutriEnv HEAD {head} != pinned {NUTRIENV_PIN}"
 
 
 # Public-API import coverage now lives in the ticket-016 guard: test_imports.py, test_borrowed_api_signatures.py, test_two_class_rule.py.

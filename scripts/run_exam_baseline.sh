@@ -14,9 +14,9 @@
 #   SERVED_NAME    name the eval asks for        (basename of MODEL, or "sft" with ADAPTER)
 #   ADAPTER        LoRA dir -> --enable-lora --lora-modules sft=$ADAPTER
 #   LORA_RANK      --max-lora-rank               (32, configs/sft_v2_lora.yaml)
-#   NUTRIENV_SRC   lab src/ dir put on PYTHONPATH (/home/jzq/Projects/nutri-env-lab-pin/src)
-#   EXPECTED_REV   full 40-hex lab SHA            (0ee68ea…, the ADR-012 pin)
-#   EXAM_PATH      exam JSON                      (the lab's EXAM_SPLIT_PATH)
+#   NUTRIENV_SRC   NutriEnv src/ dir on PYTHONPATH (/home/jzq/Projects/nutri-env-pin/src)
+#   EXPECTED_REV   full 40-hex NutriEnv SHA       (174dcef…, the released main)
+#   EXAM_PATH      exam JSON                      (nutrienv.bench.EXAM_SPLIT_PATH)
 #   RUNS CONCURRENCY THINKING(0|1) SEED_BASE LIMIT EXTRA_EVAL_ARGS
 #   PORT MAX_MODEL_LEN GPU_MEM_UTIL LANGUAGE_MODEL_ONLY(1|0) EXTRA_VLLM_ARGS
 #   VLLM_BIN       vllm executable. Qwen3.5 (Qwen3_5ForConditionalGeneration) is NOT in
@@ -37,8 +37,8 @@ if [[ -n "${ADAPTER}" ]]; then
 else
   SERVED_NAME="${SERVED_NAME:-$(basename "${MODEL}")}"
 fi
-NUTRIENV_SRC="${NUTRIENV_SRC:-/home/jzq/Projects/nutri-env-lab-pin/src}"
-EXPECTED_REV="${EXPECTED_REV:-0ee68eaa6c246e8079915761c95fc986c53d4979}"
+NUTRIENV_SRC="${NUTRIENV_SRC:-/home/jzq/Projects/nutri-env-pin/src}"
+EXPECTED_REV="${EXPECTED_REV:-174dcef997bf7b4180c84ee06713f30aaf7be058}"
 EXAM_PATH="${EXAM_PATH:-}"
 RUNS="${RUNS:-3}"
 CONCURRENCY="${CONCURRENCY:-16}"

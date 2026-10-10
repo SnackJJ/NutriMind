@@ -19,7 +19,7 @@ from src.training.data_factory import ConfigError, DataFactoryConfig, load_confi
 REPO = pathlib.Path(__file__).resolve().parents[3]
 CONFIG_PATH = REPO / "configs" / "data_factory.yaml"
 
-NUTRIENV_PIN = "47367d9c569d0a46cbd1c97d5f08afb3a7d573ac"
+NUTRIENV_PIN = "174dcef997bf7b4180c84ee06713f30aaf7be058"
 CATALOG_SHA = "57184b2bbce4519076b4238a8d64861950db46fdc793d0e43055f07f43c28b5f"
 
 
@@ -318,12 +318,12 @@ def _pin_block(text: str) -> str:
     return "\n".join(lines[start:end]).rstrip()
 
 
-def test_nutrienv_pin_is_lab_rev():
-    """v2 pin is ``../nutri-env-lab`` at the ticket-023 SHA; CI reads the first 40-hex."""
+def test_nutrienv_pin_is_release_rev():
+    """v2 pin is ``../nutri-env-pin`` at the released tag; CI reads the first 40-hex."""
     text = CONFIG_PATH.read_text()
     block = _pin_block(text)
     assert NUTRIENV_PIN in block
-    assert "../nutri-env-lab" in block
+    assert "../nutri-env-pin" in block
     import re
 
     first_hex = re.search(r"[0-9a-f]{40}", text).group(0)

@@ -2,7 +2,7 @@
 # B5 (training half): v2 SFT (Qwen3.5-2B + LoRA, TRL SFTTrainer; ADR-015) ->
 # optional merge -> exam on the result (runs=3) -> compare to a baseline dir.
 #
-#   EXAM=... EXPECTED_REV=... NUTRIENV_SRC=../nutri-env-lab BASELINE_DIR=... \
+#   EXAM=... EXPECTED_REV=... NUTRIENV_SRC=../nutri-env-pin BASELINE_DIR=... \
 #     bash scripts/run_sft_v2.sh
 #
 # Env:
@@ -13,7 +13,7 @@
 #                 assistant\n<think>\n + plan); 0 = empty-think header     (1)
 #   EXAM          exam split path                 (required; passed through)
 #   EXPECTED_REV  expected NutriEnv rev for EXAM  (required; passed through)
-#   NUTRIENV_SRC  lab source tree                 (required; passed through)
+#   NUTRIENV_SRC  NutriEnv source tree            (required; passed through)
 #   BASELINE_DIR  eval output dir to compare against (optional; skip compare if unset)
 #   EVAL_OUT      where the exam writes           (<output_dir>/exam)
 #   SKIP_TRAIN    1 = reuse an existing <output_dir> (0)
@@ -30,7 +30,7 @@ ENABLE_THINKING=${ENABLE_THINKING:-1}
 SKIP_TRAIN=${SKIP_TRAIN:-0}
 : "${EXAM:?set EXAM (exam split path)}"
 : "${EXPECTED_REV:?set EXPECTED_REV (NutriEnv rev the exam was frozen at)}"
-: "${NUTRIENV_SRC:?set NUTRIENV_SRC (lab source tree)}"
+: "${NUTRIENV_SRC:?set NUTRIENV_SRC (NutriEnv source tree)}"
 PY=${PY:-.venv/bin/python}
 
 read -r BASE_MODEL OUTPUT_DIR < <("$PY" -c '
