@@ -51,13 +51,13 @@
 # FIRST 40-hex string in this file — CI resolves the pin from it.
 
 # NutriEnv (../nutri-env-pin) is consumed read-only (ADR-012): a detached worktree
-# of the public repo at tag v1.1.0, pinned to an exact commit. The smoke test
+# of the public repo at tag v1.1.1, pinned to an exact commit. The smoke test
 # asserts the installed source tree's git HEAD equals this value. The older
 # ../nutri-env-lab@47367d9 pin is v2 experiment history (scorer s7-amdr-windows,
 # exam nutrienv-v1.1-gold); numbers measured there are NOT comparable with this one.
 nutrienv:
   repo: "https://github.com/SnackJJ/NutriEnv"
-  rev: "174dcef997bf7b4180c84ee06713f30aaf7be058"     # nutrienv_rev
+  rev: "f4d70b2e9affc277aa1afd8e83d26bce65a20b04"     # nutrienv_rev
   install: "uv pip install -e ../nutri-env-pin --config-settings editable_mode=strict"
   note: >
     Default (compat) editable / wheel / git+ installs drop nutrienv/env/ because

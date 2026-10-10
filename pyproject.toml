@@ -21,7 +21,7 @@ extra-index-url = ["https://download.pytorch.org/whl/cu128"]
 
 # NutriEnv is consumed read-only as a benchmark + library (ADR-012). v2 pins the
 # released tree `../nutri-env-pin` (a detached worktree of the public repo at
-# tag v1.1.0). The wheel build drops
+# tag v1.1.1). The wheel build drops
 # `nutrienv/env/` (a bare `env/` line in the repo's .gitignore is honoured by
 # hatchling), so a plain wheel / git+ install produces a broken package. Install
 # editable in *strict* PEP 660 mode, which redirects to the source tree:

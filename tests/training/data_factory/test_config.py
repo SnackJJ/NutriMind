@@ -19,7 +19,7 @@ from src.training.data_factory import ConfigError, DataFactoryConfig, load_confi
 REPO = pathlib.Path(__file__).resolve().parents[3]
 CONFIG_PATH = REPO / "configs" / "data_factory.yaml"
 
-NUTRIENV_PIN = "174dcef997bf7b4180c84ee06713f30aaf7be058"
+NUTRIENV_PIN = "f4d70b2e9affc277aa1afd8e83d26bce65a20b04"
 CATALOG_SHA = "57184b2bbce4519076b4238a8d64861950db46fdc793d0e43055f07f43c28b5f"
 
 

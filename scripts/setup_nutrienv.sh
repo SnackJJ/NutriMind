@@ -2,7 +2,7 @@
 # NutriEnv release pin — install the pinned tree into the NutriMind venv.
 #
 # NutriEnv is consumed read-only (ADR-012). v2 uses `../nutri-env-pin`, a detached
-# worktree of the public repo at tag v1.1.0. The wheel build at the pinned rev
+# worktree of the public repo at tag v1.1.1. The wheel build at the pinned rev
 # DROPS `nutrienv/env/` (the repo's .gitignore has a bare `env/` line that hatchling honours), so a
 # plain wheel / `git+` / default-editable install produces a broken package
 # (`import nutrienv.bench` -> ModuleNotFoundError: nutrienv.env). Strict PEP 660
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 NUTRI_ENV="${1:-../nutri-env-pin}"
-PIN="174dcef997bf7b4180c84ee06713f30aaf7be058"   # keep in sync with configs/data_factory.yaml
+PIN="f4d70b2e9affc277aa1afd8e83d26bce65a20b04"   # keep in sync with configs/data_factory.yaml
 
 if [[ ! -d "${NUTRI_ENV}/src/nutrienv" ]]; then
   echo "ERROR: ${NUTRI_ENV}/src/nutrienv not found. Pass the NutriEnv checkout path." >&2

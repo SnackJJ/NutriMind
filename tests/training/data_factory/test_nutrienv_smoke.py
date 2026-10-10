@@ -1,4 +1,4 @@
-"""NutriEnv release pin (tag v1.1.0) + native tool-calling smoke test.
+"""NutriEnv release pin (tag v1.1.1) + native tool-calling smoke test.
 
 Proves `nutrienv` is importable from the pinned release tree and the public
 surface the v2 data factory borrows (ADR-012, spec §18) actually works,
@@ -17,7 +17,7 @@ import subprocess
 import pytest
 
 # Pinned rev — keep in sync with configs/data_factory.yaml : nutrienv.rev
-NUTRIENV_PIN = "174dcef997bf7b4180c84ee06713f30aaf7be058"
+NUTRIENV_PIN = "f4d70b2e9affc277aa1afd8e83d26bce65a20b04"
 
 nutrienv = pytest.importorskip("nutrienv", reason="run scripts/setup_nutrienv.sh")
 
@@ -51,7 +51,7 @@ def test_pin_is_single_sourced():
 
 
 def test_version_and_editable_source():
-    assert nutrienv.__version__ == "1.0.0"
+    assert nutrienv.__version__ == "1.1.1"
     # strict-editable install points __file__ at the real source tree, not a copied wheel
     assert (_src_root() / "src" / "nutrienv" / "env" / "nutri_env.py").is_file()
 

@@ -2,7 +2,7 @@
 
 - **Status**: accepted
 - **Date**: 2026-09-08
-- **Amended**: 2026-09-08 — borrowed-symbol guard scope narrowed to two classes; 2026-09-11 — pin moved to `nutri-env-lab` (native tool-calling harness); 2026-09-11 — ticket 013 Part C 40-count is a live-run gate; 2026-10-10 — pin moved to the released tree (`nutri-env-pin` @ tag `v1.1.0`); see the Amendment log
+- **Amended**: 2026-09-08 — borrowed-symbol guard scope narrowed to two classes; 2026-09-11 — pin moved to `nutri-env-lab` (native tool-calling harness); 2026-09-11 — ticket 013 Part C 40-count is a live-run gate; 2026-10-10 — pin moved to the released tree (`nutri-env-pin` @ tag `v1.1.1`); see the Amendment log
 - **Deciders**: zeqing
 
 ## Context
@@ -36,8 +36,8 @@ the owning class; it does not import the underscore name as a long-term dependen
 Guardrails:
 
 - `../nutri-env-pin` is pinned to an exact git SHA in `pyproject.toml` /
-  `configs/data_factory.yaml` (`174dcef997bf7b4180c84ee06713f30aaf7be058`, tag
-  `v1.1.0` as of 2026-10-10). The older `../nutri-env-lab@47367d9` pin is v2
+  `configs/data_factory.yaml` (`f4d70b2e9affc277aa1afd8e83d26bce65a20b04`, tag
+  `v1.1.1` as of 2026-10-10). The older `../nutri-env-lab@47367d9` pin is v2
   experiment history; `../nutri-env@203d807` is v1/factory-history.
 - A compatibility test asserts, for the **public borrowed API only** (symbols in
   nutri-env's `__all__` that v2 calls directly): the symbol imports, and its
@@ -69,11 +69,11 @@ Guardrails:
 
 ## Amendment log
 
-### 2026-10-10 — pin the released tree (tag `v1.1.0`)
+### 2026-10-10 — pin the released tree (tag `v1.1.1`)
 
 The consumed tree moves from the lab experiment checkout to the release:
 `../nutri-env-pin` is a detached `git worktree` of the public repo at tag
-`v1.1.0` (`174dcef997bf7b4180c84ee06713f30aaf7be058`), installed strict-editable.
+`v1.1.1` (`f4d70b2e9affc277aa1afd8e83d26bce65a20b04`), installed strict-editable.
 Read-only still holds, and the pin is now a checkout that no publish step moves.
 
 The ruler moved with the pin, so numbers measured before this date are not
@@ -85,7 +85,7 @@ comparable with numbers measured after it: `SCORER_VERSION` `s7-amdr-windows` �
 (`78cea3ce…`) and `catalog.sqlite` are unchanged between the two trees.
 
 The calibration table and the list of entry points that still name the old rev
-live in [ADR-016](016-nutrienv-v1.1.0-pin-caliber.md).
+live in [ADR-016](016-nutrienv-v1.1.1-pin-caliber.md).
 
 The data factory is **not** re-pointed by this amendment: it still imports the
 pre-`47367d9` mill API (`generate_one(family=…)`, `freeze_tasks`) and is broken

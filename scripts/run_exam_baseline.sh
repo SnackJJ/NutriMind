@@ -38,7 +38,7 @@ else
   SERVED_NAME="${SERVED_NAME:-$(basename "${MODEL}")}"
 fi
 NUTRIENV_SRC="${NUTRIENV_SRC:-/home/jzq/Projects/nutri-env-pin/src}"
-EXPECTED_REV="${EXPECTED_REV:-174dcef997bf7b4180c84ee06713f30aaf7be058}"
+EXPECTED_REV="${EXPECTED_REV:-f4d70b2e9affc277aa1afd8e83d26bce65a20b04}"
 EXAM_PATH="${EXAM_PATH:-}"
 RUNS="${RUNS:-3}"
 CONCURRENCY="${CONCURRENCY:-16}"

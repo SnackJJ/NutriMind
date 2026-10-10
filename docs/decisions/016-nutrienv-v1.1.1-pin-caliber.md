@@ -1,4 +1,4 @@
-# ADR-016: Pin the Released NutriEnv Tree (`v1.1.0`) and Its Ruler
+# ADR-016: Pin the Released NutriEnv Tree (`v1.1.1`) and Its Ruler
 
 - **Status**: accepted
 - **Date**: 2026-10-10
@@ -29,7 +29,7 @@ The consumed tree is the **released** one, pinned at a tag rather than a lab
 branch tip:
 
 - `../nutri-env-pin` is a detached `git worktree` of the public repo at tag
-  `v1.1.0` (`174dcef997bf7b4180c84ee06713f30aaf7be058`), installed
+  `v1.1.1` (`f4d70b2e9affc277aa1afd8e83d26bce65a20b04`), installed
   strict-editable. A publish to `main` no longer moves the pin.
 - `pyproject.toml` and `configs/data_factory*.yaml` carry that path and that SHA.
   The smoke test asserts the installed tree's git HEAD equals it.
@@ -43,11 +43,18 @@ a moving `main` plus no dirty-tree check is the failure mode this ADR exists to
 prevent.
 
 ## Consequences
+**`v1.1.0` is superseded by `v1.1.1`.** The `v1.1.0` tree carries
+`version = "1.1.0"` in `pyproject.toml` but `__version__ = "1.0.0"` in the
+module, so every manifest `harness/runner.py` writes is labelled
+`"env": "nutrienv-1.0.0"`. `v1.1.1` changes only those two strings; the exam,
+scorer, catalog and prompt digests are identical, so the table below describes
+both tags. Pin `v1.1.1`.
+
 
 **Numbers taken before 2026-10-10 are not comparable with numbers taken after
 it.** The ruler moved with the pin:
 
-| | before (`47367d9`) | after (`v1.1.0` = `174dcef`) |
+| | before (`47367d9`) | after (`v1.1.1` = `f4d70b2`) |
 |---|---|---|
 | `SCORER_VERSION` | `s7-amdr-windows` | `s10-meal-mass-envelope` |
 | `PROMPT_VERSION` / fingerprint | `p6-amdr-window-ranges` / `c4526440…` | `p8-published-meal-mass-limits` / `616dea69…` |
