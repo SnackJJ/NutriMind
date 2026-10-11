@@ -34,6 +34,7 @@ native vLLM LoRA support for the hybrid attention projections.
 bash scripts/run_grpo_v2.sh 4090
 bash scripts/run_grpo_v2.sh a800
 bash scripts/run_grpo_v2.sh a800_fast
+bash scripts/run_grpo_v2.sh 4090x2_async
 ```
 
 Defaults:
@@ -48,6 +49,54 @@ Defaults:
 64 concurrent rollouts, CUDA graphs, prefix caching and a resident reference policy.
 On 2026-10-02 it cut the A800 step from about 900 s to 150-250 s with unchanged
 rollout/actor probability agreement.
+
+`4090x2_async` keeps the `a800_bs16` algorithm and runs MiMo's `separate_async` trainer on
+two GPUs: GPU 0 trains (its hybrid vLLM replica sleeps during updates) and GPU 1 runs a
+standalone vLLM replica continuously, synced over NCCL after every optimizer step. One
+warmup batch, `parameter_sync_step=1` and `max_off_policy_threshold=2` (span counts the
+submitting step) bound rollouts to one policy version behind; the `wait` strategy finishes
+such trajectories instead of dropping long ones. Old log-probs are still recomputed and
+corrected with token-level truncated IS (threshold 2). Only these settings, GPU placement
+and memory differ from `a800_bs16`; `tests/training/rl/test_verl_separate_async.py`
+checks that. The NCCL weight sync needs `cupy-cuda13x`, which the A800 venv lacks; preflight
+fails without it.
+
+The standalone replica loads weights from disk (veRL switches `load_format` from `dummy` to
+`auto`), and vLLM's `Qwen3_5ForCausalLM` expects text-only key names; the SFT export keeps
+Qwen3.5's `model.language_model.*`, so norms, `A_log` and `dt_bias` fail to load. The profile
+points at `merged_text`, the same tensors with keys renamed, created once on the server:
+
+```bash
+$GRPO_VENV/bin/python -c "from safetensors.torch import load_file, save_file; d='data/student/models/sft_v2_lora_b12/'; save_file({k.replace('model.language_model.', 'model.', 1): v for k, v in load_file(d + 'merged/model.safetensors').items()}, d + 'merged_text/model.safetensors', metadata={'format': 'pt'})"
+cp data/student/models/sft_v2_lora_b12/merged/{config.json,generation_config.json,tokenizer.json,tokenizer_config.json,chat_template.jinja} data/student/models/sft_v2_lora_b12/merged_text/
+```
+
+`scripts/export_grpo_lora.py` still merges RL LoRAs into `merged`, whose naming the exam
+runner's vLLM (`--language-model-only`) loads.
+
+Run on 2026-10-03 (resumed from the A800 `global_step_10`, steps 11-46):
+
+- The standalone replica's memory budget is 0.75: at 0.8 it left 880 MiB free and the first
+  NCCL sync OOMed, because the receiver allocates each whole tensor (`embed_tokens` is
+  970 MiB) regardless of the 256 MB bucket. Peaks were 18.3 GiB (trainer GPU) and 22.5 GiB
+  (rollout GPU) of 23.5 GiB, so the rollout GPU has about 1 GiB of headroom.
+- Staleness stayed at 1, `rollout_is` mean 1.000 (ESS 0.998), rollout/actor probability
+  diff 0.0045 (A800: 0.004); weight sync took 3-5 s.
+- Length-normalized throughput was 2118 tokens/s, 0.87x the synchronous A800 bs16 run, at
+  0.76x the cost per token. The trainer path (0.37 ms/token vs. 0.27 on the A800) and a
+  single rollout GPU (gen waits 40-240 s, longer as more groups are filtered) bound it.
+- veRL's epoch is nominal: `steps_per_epoch = len(train) // train_batch_size` (286 // 16 =
+  17). The loop ends there with `total_epochs: 1` even though the dataloader wraps, and it
+  saves only on `save_freq` multiples or `total_training_steps`, so set `save_freq` to the
+  epoch length to keep epoch-end checkpoints.
+- By epoch 3 up to 67% of groups were all-correct; the 286 prompts are saturated.
+
+Exam (NutriEnv v1.1, official runner, 63 tasks, 8 runs each, thinking mode): Base 10.1%,
+SFT 29.4%, RL step 10 38.9%, step 17 46.2%, step 34 47.2%. Paired bootstrap: step 17 vs. SFT
++16.9 pp [+11.1, +22.8]; step 34 vs. step 17 +1.0 pp [-4.0, +5.8]. Validation reward rose
+0.606 → 0.740 → 0.808 at steps 10/17/34. Results are in `data/eval/exam/exam8_20261003/`.
+The run stopped at step 46 when the cloud account ran out of balance, so there is no step-51
+checkpoint.
 
 Training needs `flash-linear-attention==0.5.2`; without it transformers falls back to the
 torch gated-delta-rule kernel (about 4x slower forward/backward, same numerics against an

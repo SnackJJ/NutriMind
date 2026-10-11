@@ -18,7 +18,7 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def check(root, lab, mimo, dataset):
+def check(root, lab, mimo, dataset, gpus=1):
     from nutrienv.bench.pipeline.freezer import catalog_digest
     from nutrienv.world.catalog_store import load_catalog
     import torch
@@ -65,8 +65,12 @@ def check(root, lab, mimo, dataset):
     from transformers.models.qwen3_5 import modeling_qwen3_5
     if modeling_qwen3_5.chunk_gated_delta_rule is None:
         raise RuntimeError("fla kernels unavailable; Qwen3.5 training would use the torch GDN fallback")
-    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise RuntimeError("this baseline requires exactly one visible CUDA GPU")
+    if not torch.cuda.is_available() or torch.cuda.device_count() != gpus:
+        raise RuntimeError(f"this profile requires exactly {gpus} visible CUDA GPU(s)")
+    if gpus > 1:
+        from verl.checkpoint_engine import NCCLCheckpointEngine
+        if NCCLCheckpointEngine is None:
+            raise RuntimeError("NCCL checkpoint engine unavailable; separate async weight sync needs cupy and zmq")
     props = torch.cuda.get_device_properties(0)
     return {"mimo_commit": MIMO_COMMIT, "nutrienv_commit": ENV_COMMIT,
         "dataset_manifest_sha256": digest(dataset / "manifest.json"),
@@ -75,7 +79,7 @@ def check(root, lab, mimo, dataset):
             ("src/training/rl/verl_agent_loop.py", "src/training/rl/verl_trainer.py",
              "src/training/rl/train_verl.py", "scripts/run_grpo_v2.sh", "scripts/prepare_grpo_v2.py",
              "configs/grpo_v2_4090.yaml", "configs/grpo_v2_a800.yaml", "configs/grpo_v2_a800_fast.yaml",
-             "configs/grpo_v2_a800_bs16.yaml",
+             "configs/grpo_v2_a800_bs16.yaml", "configs/grpo_v2_4090x2_async.yaml",
              "configs/grpo_v2_agent.yaml",
              "infra/grpo/vllm_plugin/nutrimind_vllm_compat.py",
              "infra/grpo/vllm_plugin/nutrimind_vllm_compat_model.py")},
@@ -87,12 +91,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=".")
     parser.add_argument("--dataset", default="data/rl/grpo_v2")
+    parser.add_argument("--gpus", type=int, default=1, help="visible CUDA GPUs the profile needs")
     parser.add_argument("--output")
     args = parser.parse_args()
     root = Path(args.root).resolve()
     report = check(root, Path(os.environ.get("NUTRIENV_ROOT", "/root/nutri-env-pin")),
         Path(os.environ.get("MIMO_VERL_ROOT", "/root/autodl-tmp/mimo-verl")),
-        root / args.dataset)
+        root / args.dataset, args.gpus)
     print(json.dumps(report, indent=2))
     if args.output:
         path = Path(args.output)

@@ -1,4 +1,4 @@
-"""MiMo veRL entry point with NutriMind's synchronous scheduling adapter."""
+"""MiMo veRL entry point with NutriMind's trainer adapters."""
 
 import hydra
 import ray
@@ -15,7 +15,7 @@ class NutriMindTaskRunner:
     def run(self, config):
         import transfer_queue as tq
         from verl.trainer.ppo.v1 import AgentLoopManagerTQ
-        from src.training.rl.verl_trainer import NutriMindSyncTrainer
+        from src.training.rl.verl_trainer import trainer_class
 
         configure_verl_logging()
         OmegaConf.resolve(config)
@@ -23,7 +23,7 @@ class NutriMindTaskRunner:
         trainer = None
         succeeded = False
         try:
-            trainer = NutriMindSyncTrainer(config=config)
+            trainer = trainer_class(config)(config=config)
             trainer.init()
             manager = AgentLoopManagerTQ.create(
                 config=config,

@@ -32,6 +32,21 @@ _HARNESS_WORKERS = 8
 _HARNESS_POOL = None
 
 
+def _merge_engine_fields(fields, update):
+    """Merge one generate call's engine fields into the trajectory's.
+
+    A multi-turn trajectory can span policy versions under partial rollout, so
+    its version range is the min of the turn minima and the max of the maxima.
+    """
+    update = update or {}
+    merged = {**fields, **update}
+    for key, pick in (("min_global_steps", min), ("max_global_steps", max)):
+        versions = [v for v in (fields.get(key), update.get(key)) if v is not None]
+        if versions:
+            merged[key] = pick(versions)
+    return merged
+
+
 def _harness_pool():
     global _HARNESS_POOL
     if _HARNESS_POOL is None:
@@ -62,7 +77,7 @@ class NutriMindAgentLoop(AgentLoopBase):
         started = time.monotonic()
 
         async def generate(request):
-            nonlocal cursor, calls, budget_exhausted
+            nonlocal cursor, calls, budget_exhausted, engine_fields
             if request.get("parallel_tool_calls"):
                 raise ValueError("parallel tool calls are not allowed")
             delta, cursor = select_delta_messages(request["messages"], cursor)
@@ -90,7 +105,7 @@ class NutriMindAgentLoop(AgentLoopBase):
                 raise ValueError("rollout engine must return aligned token log probabilities")
             trace.append_generated(output.token_ids, output.log_probs)
             calls += 1
-            engine_fields.update(output.extra_fields or {})
+            engine_fields = _merge_engine_fields(engine_fields, output.extra_fields)
             content, parsed = await self.parser.extract_tool_calls(output.token_ids, self.schemas)
             # Parsing affects tool execution only; the training trace retains exact generated IDs.
             reasoning = None

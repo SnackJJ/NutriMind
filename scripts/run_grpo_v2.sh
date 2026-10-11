@@ -3,9 +3,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 PROFILE="${1:-4090}"
 shift || true
-case "$PROFILE" in 4090|a800|a800_fast|a800_bs16) ;; *) echo "profile must be 4090, a800, a800_fast or a800_bs16" >&2; exit 2 ;; esac
+case "$PROFILE" in 4090|a800|a800_fast|a800_bs16) GPUS=1 ;; 4090x2_async) GPUS=2 ;;
+  *) echo "profile must be 4090, a800, a800_fast, a800_bs16 or 4090x2_async" >&2; exit 2 ;; esac
 export PATH="${GRPO_VENV:-/root/autodl-tmp/venvs/grpo}/bin:$PATH"
-export PYTHONPATH="$PWD:${MIMO_VERL_ROOT:-/root/autodl-tmp/mimo-verl}:${NUTRIENV_ROOT:-/root/nutri-env-pin}/src:${FLA_ROOT:-/root/autodl-tmp/pydeps/fla}:${PYTHONPATH:-}"
+export PYTHONPATH="$PWD:${MIMO_VERL_ROOT:-/root/autodl-tmp/mimo-verl}:${NUTRIENV_ROOT:-/root/nutri-env-pin}/src:${FLA_ROOT:-/root/autodl-tmp/pydeps/fla}:${CUPY_ROOT:-/root/autodl-tmp/pydeps/cupy}:${PYTHONPATH:-}"
 export TOKENIZERS_PARALLELISM=false
 export NUTRIMIND_ALLOW_NETWORK=1
 export WANDB_MODE=offline
@@ -19,7 +20,7 @@ export VERL_FILE_LOGGER_ROOT="$PWD/data/rl_runs/metrics"
 UV_BIN="${UV_BIN:-/root/miniconda3/bin/uv}"
 if [[ "${GRPO_PREFLIGHT:-1}" == 1 ]]; then
   "$UV_BIN" run --no-project --python "${GRPO_VENV:-/root/autodl-tmp/venvs/grpo}/bin/python" \
-    python scripts/check_grpo_v2.py --output "data/rl_runs/grpo_v2_${PROFILE}/preflight.json"
+    python scripts/check_grpo_v2.py --gpus "$GPUS" --output "data/rl_runs/grpo_v2_${PROFILE}/preflight.json"
 fi
 exec "$UV_BIN" run --no-project --python "${GRPO_VENV:-/root/autodl-tmp/venvs/grpo}/bin/python" \
   python -m src.training.rl.train_verl --config-path "$PWD/configs" --config-name "grpo_v2_${PROFILE}" \

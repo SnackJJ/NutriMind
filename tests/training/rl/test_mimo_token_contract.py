@@ -96,8 +96,10 @@ def test_native_harness_bridge_scores_and_masks_real_tool_observations():
         async def generate(self, **kwargs):
             requests.append(kwargs)
             ids = next(generated)
+            # Each turn runs under a newer policy version, as with partial rollout.
+            version = len(requests) - 1
             return SimpleNamespace(token_ids=ids, log_probs=[-.1] * len(ids),
-                                   extra_fields={"max_global_steps": 0})
+                                   extra_fields={"min_global_steps": version, "max_global_steps": version})
 
     async def exercise():
         bridge = object.__new__(NutriMindAgentLoop)
@@ -116,6 +118,8 @@ def test_native_harness_bridge_scores_and_masks_real_tool_observations():
 
     output = asyncio.run(exercise())
     assert output.reward_score == 1 and output.extra_fields["status"] == "pass"
+    assert output.extra_fields["min_global_steps"] == 0
+    assert output.extra_fields["max_global_steps"] == len(requests) - 1 > 0
     assert 0 in output.response_mask and 1 in output.response_mask
     assert len(output.response_ids) == len(output.response_logprobs) == len(output.response_mask)
     assert output.prompt_ids == requests[0]["prompt_ids"]

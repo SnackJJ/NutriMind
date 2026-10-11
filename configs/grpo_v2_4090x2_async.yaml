@@ -1,0 +1,57 @@
+# One-step off-policy separate async on two RTX 4090s: GPU 0 trains (FSDP + sleeping hybrid
+# vLLM replica), GPU 1 runs a standalone vLLM replica continuously. Algorithm settings are
+# grpo_v2_a800_bs16's; only placement, memory, the async schedule, IS correction, the model's key
+# naming and the run length/checkpoint schedule differ.
+defaults:
+  - grpo_v2_a800_bs16
+  - _self_
+
+algorithm:
+  # Decoupled token-level truncated IS (old_log_prob is still recomputed by the trainer).
+  rollout_correction:
+    rollout_is: token
+    rollout_is_threshold: 2.0
+    rollout_rs: null
+    bypass_mode: false
+
+actor_rollout_ref:
+  model:
+    # The standalone replica loads from disk (load_format auto); vLLM's Qwen3_5ForCausalLM needs
+    # text-only key names, not the SFT export's model.language_model.* (see merged_text).
+    path: data/student/models/sft_v2_lora_b12/merged_text
+  rollout:
+    nnodes: 1
+    n_gpus_per_node: 1
+    # Hybrid replica, which shares the trainer GPU with the resident actor.
+    gpu_memory_utilization: 0.45
+    checkpoint_engine:
+      backend: nccl
+      # The standalone KV pool stays allocated during NCCL sync; keep transfer buffers small.
+      update_weights_bucket_megabytes: 256
+
+trainer:
+  n_gpus_per_node: 1
+  v1:
+    trainer_mode: separate_async
+    separate_async:
+      # One prefetched batch and one optimizer update per weight sync: rollouts lag by at most one version.
+      num_warmup_batches: 1
+      parameter_sync_step: 1
+      # 0.8 left 880MiB free; NCCL sync allocates each whole tensor (embed_tokens is 970MiB).
+      standalone_gpu_memory_utilization: 0.75
+    sampler:
+      # Span counts the submitting step, so 2 means one policy version behind.
+      max_off_policy_threshold: 2
+      # Finish stale-threshold trajectories instead of dropping them, which would bias against long episodes.
+      max_off_policy_strategy: wait
+  # veRL's epoch is nominal: steps_per_epoch = 286 // 16 = 17, so epochs end at steps 17/34/51.
+  # Dynamic sampling consumes ~21 prompts per step; the dataloader wraps on its own.
+  total_epochs: 3
+  total_training_steps: null
+  # Save and validate at each epoch end to compare epochs 1-3 for gains vs. overfitting.
+  save_freq: 17
+  test_freq: 17
+  max_actor_ckpt_to_keep: 3
+  experiment_name: 4090x2-async-bs16
+  default_local_dir: data/rl_runs/grpo_v2_4090x2_async
+  rollout_data_dir: data/rl_runs/grpo_v2_4090x2_async/rollouts
